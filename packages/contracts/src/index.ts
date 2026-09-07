@@ -18,12 +18,13 @@ export type DeployCommand = {
   source: {
     repository: string;
     ref: string;
-    dockerfile: string;
+    dockerfile?: string;
   };
   runtime: {
     containerName: string;
     containerPort: number;
     hostPort: number;
+    environment: Record<string, string>;
     healthcheck: {
       path: string;
       timeoutSeconds: number;
