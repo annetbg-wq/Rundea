@@ -21,7 +21,7 @@ func TestPrepareDockerfilePrefersExistingDockerfile(t *testing.T) {
 	}
 }
 
-func TestPrepareDockerfileGeneratesNode24Plan(t *testing.T) {
+func TestPrepareDockerfileGeneratesPinnedNode24Plan(t *testing.T) {
 	dir := t.TempDir()
 	manifest := `{"scripts":{"build":"vite build","start":"tsx server/index.ts"},"engines":{"node":">=24"}}`
 	if err := os.WriteFile(filepath.Join(dir, "package.json"), []byte(manifest), 0o600); err != nil {
@@ -34,7 +34,7 @@ func TestPrepareDockerfileGeneratesNode24Plan(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if plan != "nodejs-24:auto" {
+	if plan != "nodejs-24.20.0:auto" {
 		t.Fatalf("unexpected plan %q", plan)
 	}
 	contents, err := os.ReadFile(filepath.Join(dir, path))
@@ -42,7 +42,7 @@ func TestPrepareDockerfileGeneratesNode24Plan(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := string(contents)
-	for _, expected := range []string{"FROM node:24-bookworm-slim", "npm ci --no-audit --no-fund", "RUN npm run build", `CMD ["npm","start"]`} {
+	for _, expected := range []string{"FROM " + node24BaseImage, "npm ci --no-audit --no-fund", "RUN npm run build", `CMD ["npm","start"]`} {
 		if !strings.Contains(text, expected) {
 			t.Fatalf("generated Dockerfile missing %q:\n%s", expected, text)
 		}
