@@ -222,7 +222,9 @@ func runDeployment(cfg config, w *writer, cmd deployCommand) {
 		fail(err)
 		return
 	}
+	healthcheckPath := resolveHealthcheckPath(sourceDir, cmd.Runtime.Healthcheck.Path)
 	w.log(cmd.DeploymentID, "system", "selected build plan: "+plan)
+	w.log(cmd.DeploymentID, "system", "healthcheck path: "+healthcheckPath)
 	imageTag := "rundea/" + strings.ToLower(cmd.DeploymentID) + ":build"
 	if err := runStreamingIn(ctx, sourceDir, w, cmd.DeploymentID, "build", "docker", "build", "--pull", "-f", dockerfile, "-t", imageTag, "."); err != nil {
 		fail(fmt.Errorf("docker build: %w", err))
@@ -258,7 +260,7 @@ func runDeployment(cfg config, w *writer, cmd deployCommand) {
 	if timeout <= 0 {
 		timeout = 60 * time.Second
 	}
-	if err := waitForHealth(ctx, cmd.Runtime.HostPort, cmd.Runtime.Healthcheck.Path, timeout); err != nil {
+	if err := waitForHealth(ctx, cmd.Runtime.HostPort, healthcheckPath, timeout); err != nil {
 		cleanupContainer(ctx, w, cmd.DeploymentID, cmd.Runtime.ContainerName)
 		fail(err)
 		return
