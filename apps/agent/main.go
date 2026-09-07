@@ -227,7 +227,7 @@ func runDeployment(cfg config, w *writer, cmd deployCommand) {
 	}
 	_ = exec.CommandContext(ctx, "docker", "rm", "-f", cmd.Runtime.ContainerName).Run()
 	port := fmt.Sprintf("127.0.0.1:%d:%d", cmd.Runtime.HostPort, cmd.Runtime.ContainerPort)
-	out, err := exec.CommandContext(ctx, "docker", "run", "-d", "--restart", "unless-stopped", "--name", cmd.Runtime.ContainerName, "-p", port, imageTag).CombinedOutput()
+	out, err := exec.CommandContext(ctx, "docker", "run", "-d", "--restart", "unless-stopped", "--label", "rundea.managed=true", "--label", "rundea.deployment="+cmd.DeploymentID, "--name", cmd.Runtime.ContainerName, "-p", port, imageTag).CombinedOutput()
 	if err != nil {
 		fail(fmt.Errorf("docker run: %w: %s", err, strings.TrimSpace(string(out))))
 		return
@@ -257,8 +257,8 @@ func validateCommand(cmd deployCommand) error {
 		return errors.New("deployment command is missing source fields")
 	}
 	repoURL, err := url.Parse(cmd.Source.Repository)
-	if err != nil || repoURL.Scheme != "https" || repoURL.Host == "" || repoURL.User != nil {
-		return errors.New("source repository must be an HTTPS URL without embedded credentials")
+	if err != nil || repoURL.Scheme != "https" || !strings.EqualFold(repoURL.Hostname(), "github.com") || repoURL.User != nil {
+		return errors.New("source repository must be an HTTPS github.com URL without embedded credentials")
 	}
 	cleanDockerfile := filepath.Clean(cmd.Source.Dockerfile)
 	if filepath.IsAbs(cleanDockerfile) || cleanDockerfile == ".." || strings.HasPrefix(cleanDockerfile, ".."+string(filepath.Separator)) {

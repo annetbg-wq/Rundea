@@ -1,6 +1,7 @@
 import cors from "@fastify/cors";
 import websocket from "@fastify/websocket";
 import Fastify from "fastify";
+import type { FastifyReply, FastifyRequest } from "fastify";
 import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { Pool } from "pg";
@@ -13,8 +14,8 @@ type NodeSocket = { send(payload: string): void; close(code?: number, reason?: s
 
 const databaseUrl = process.env.DATABASE_URL;
 if (!databaseUrl) throw new Error("DATABASE_URL is required");
-const bootstrapToken = process.env.RUNDEA_BOOTSTRAP_TOKEN;
-if (!bootstrapToken) throw new Error("RUNDEA_BOOTSTRAP_TOKEN is required");
+const controlToken = process.env.RUNDEA_CONTROL_TOKEN;
+if (!controlToken) throw new Error("RUNDEA_CONTROL_TOKEN is required");
 
 const pool = new Pool({ connectionString: databaseUrl });
 const app = Fastify({ logger: true });
@@ -23,12 +24,20 @@ await app.register(websocket);
 
 const migrationUrl = new URL("../migrations/001_init.sql", import.meta.url);
 await pool.query(await readFile(migrationUrl, "utf8"));
+await pool.query("UPDATE nodes SET status='OFFLINE'");
 
 const sockets = new Map<string, NodeSocket>();
 
 function bearer(header: string | undefined): string | null {
   if (!header?.startsWith("Bearer ")) return null;
   return header.slice(7).trim() || null;
+}
+
+async function requireControl(request: FastifyRequest, reply: FastifyReply): Promise<void> {
+  const token = bearer(request.headers.authorization);
+  if (!token || !equalTokenHash(hashToken(token), hashToken(controlToken))) {
+    await reply.code(401).send({ error: "unauthorized" });
+  }
 }
 
 function safeServiceName(value: string): string {
@@ -47,6 +56,10 @@ async function dispatchQueued(nodeId: string): Promise<void> {
       `SELECT id, service_name, source_repository, source_ref, dockerfile, container_port, host_port, healthcheck_path
          FROM deployments
         WHERE node_id=$1 AND status='QUEUED' AND (dispatch_lease_until IS NULL OR dispatch_lease_until < now())
+          AND NOT EXISTS (
+            SELECT 1 FROM deployments active
+             WHERE active.node_id=$1 AND active.status IN ('BUILDING','DEPLOYING','HEALTHCHECK')
+          )
         ORDER BY created_at ASC FOR UPDATE SKIP LOCKED LIMIT 1`,
       [nodeId],
     );
@@ -116,9 +129,7 @@ app.get("/health", async () => {
   return { ok: true };
 });
 
-app.post<{ Body: { name?: string } }>("/v0/nodes", async (request, reply) => {
-  const token = bearer(request.headers.authorization);
-  if (!token || !equalTokenHash(hashToken(token), hashToken(bootstrapToken))) return reply.code(401).send({ error: "unauthorized" });
+app.post<{ Body: { name?: string } }>("/v0/nodes", { preHandler: requireControl }, async (request, reply) => {
   const name = request.body?.name?.trim();
   if (!name) return reply.code(400).send({ error: "name is required" });
   const id = randomUUID();
@@ -127,12 +138,12 @@ app.post<{ Body: { name?: string } }>("/v0/nodes", async (request, reply) => {
   return reply.code(201).send({ id, name, token: nodeToken });
 });
 
-app.get("/v0/nodes", async () => {
+app.get("/v0/nodes", { preHandler: requireControl }, async () => {
   const result = await pool.query("SELECT id,name,status,last_seen_at,created_at FROM nodes ORDER BY created_at DESC");
   return result.rows;
 });
 
-app.get("/v0/deployments", async () => {
+app.get("/v0/deployments", { preHandler: requireControl }, async () => {
   const result = await pool.query(
     `SELECT id,service_name,node_id,source_repository,source_ref,dockerfile,container_port,host_port,healthcheck_path,status,runtime_container_id,created_at,updated_at
        FROM deployments ORDER BY created_at DESC LIMIT 100`,
@@ -140,7 +151,7 @@ app.get("/v0/deployments", async () => {
   return result.rows;
 });
 
-app.get<{ Params: { id: string } }>("/v0/deployments/:id/events", async (request) => {
+app.get<{ Params: { id: string } }>("/v0/deployments/:id/events", { preHandler: requireControl }, async (request) => {
   const result = await pool.query(
     "SELECT id,kind,status,stream,message,created_at FROM deployment_events WHERE deployment_id=$1 ORDER BY id ASC LIMIT 2000",
     [request.params.id],
@@ -150,9 +161,8 @@ app.get<{ Params: { id: string } }>("/v0/deployments/:id/events", async (request
 
 app.post<{ Body: { serviceName?: string; nodeId?: string; sourceRepository?: string; sourceRef?: string; dockerfile?: string; containerPort?: number; hostPort?: number; healthcheckPath?: string } }>(
   "/v0/deployments",
+  { preHandler: requireControl },
   async (request, reply) => {
-    const controlToken = bearer(request.headers.authorization);
-    if (!controlToken || !equalTokenHash(hashToken(controlToken), hashToken(bootstrapToken))) return reply.code(401).send({ error: "unauthorized" });
     const body = request.body ?? {};
     if (!body.serviceName || !body.nodeId || !body.sourceRepository || !body.sourceRef) return reply.code(400).send({ error: "serviceName, nodeId, sourceRepository and sourceRef are required" });
     if (!Number.isInteger(body.containerPort) || !Number.isInteger(body.hostPort)) return reply.code(400).send({ error: "containerPort and hostPort must be integers" });

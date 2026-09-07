@@ -40,12 +40,12 @@ npm run dev:api
 In another shell:
 
 ```bash
-VITE_API_URL=http://localhost:4000 VITE_CONTROL_TOKEN=change-me npm run dev:web
+RUNDEA_API_URL=http://localhost:4000 RUNDEA_CONTROL_TOKEN=change-me npm run dev:web
 ```
 
 ## Node bootstrap
 
-Create a node (bootstrap endpoint is temporary v0 administration and is protected by `RUNDEA_BOOTSTRAP_TOKEN`):
+Create a node (bootstrap endpoint is temporary v0 administration and is protected by `RUNDEA_CONTROL_TOKEN`):
 
 ```bash
 curl -sS -X POST http://localhost:4000/v0/nodes \
@@ -55,6 +55,8 @@ curl -sS -X POST http://localhost:4000/v0/nodes \
 ```
 
 The response contains `id` and a **one-time** `token`. The API stores only its SHA-256 hash.
+
+The browser bundle never receives `RUNDEA_CONTROL_TOKEN`: during local development Vite proxies `/api` server-side and injects the control credential. A production user-auth/session layer is intentionally a later slice; this foundation does not publish an admin token to client JavaScript.
 
 Run the agent:
 
@@ -68,7 +70,7 @@ go run . \
 
 ## Create a deployment
 
-The source repository must currently be an HTTPS repository cloneable by the agent without interactive credentials. Private GitHub App source delivery is deliberately separated into the next slice; the architecture does not bake long-lived GitHub credentials into nodes.
+The source repository must currently be an HTTPS GitHub repository cloneable by the agent without interactive credentials. Private GitHub App source delivery is deliberately separated into the next slice; the architecture does not bake long-lived GitHub credentials into nodes.
 
 ```bash
 curl -sS -X POST http://localhost:4000/v0/deployments \

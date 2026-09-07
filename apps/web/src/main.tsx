@@ -2,8 +2,7 @@ import React, { FormEvent, useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 import "./styles.css";
 
-const api = import.meta.env.VITE_API_URL ?? "http://localhost:4000";
-const controlToken = import.meta.env.VITE_CONTROL_TOKEN ?? "";
+const api = "/api";
 type NodeRow = { id:string; name:string; status:string };
 type Deployment = { id:string; service_name:string; source_ref:string; status:string; created_at:string };
 
@@ -22,7 +21,7 @@ function App() {
 
   async function submit(event: FormEvent) {
     event.preventDefault(); setMessage("Creating deployment…");
-    const response = await fetch(`${api}/v0/deployments`, { method:"POST", headers:{"content-type":"application/json", ...(controlToken ? {authorization:`Bearer ${controlToken}`} : {})}, body:JSON.stringify({...form, containerPort:Number(form.containerPort), hostPort:Number(form.hostPort)}) });
+    const response = await fetch(`${api}/v0/deployments`, { method:"POST", headers:{"content-type":"application/json"}, body:JSON.stringify({...form, containerPort:Number(form.containerPort), hostPort:Number(form.hostPort)}) });
     const body = await response.json();
     setMessage(response.ok ? `Deployment ${body.id} queued` : body.error ?? "Request failed");
     if (response.ok) void refresh();
