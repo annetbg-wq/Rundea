@@ -1,7 +1,9 @@
 package main
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -45,4 +47,20 @@ func writeRuntimeEnvFile(workspace string, values map[string]string, containerPo
 		return "", err
 	}
 	return path, nil
+}
+
+func cleanupStaleRuntimeEnvFiles(workDir string) error {
+	deploymentsDir := filepath.Join(workDir, "deployments")
+	return filepath.WalkDir(deploymentsDir, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			if errors.Is(walkErr, os.ErrNotExist) {
+				return nil
+			}
+			return walkErr
+		}
+		if entry.IsDir() || entry.Name() != "runtime.env" {
+			return nil
+		}
+		return os.Remove(path)
+	})
 }
