@@ -16,6 +16,7 @@ const databaseUrl = process.env.DATABASE_URL;
 if (!databaseUrl) throw new Error("DATABASE_URL is required");
 const controlToken = process.env.RUNDEA_CONTROL_TOKEN;
 if (!controlToken) throw new Error("RUNDEA_CONTROL_TOKEN is required");
+const controlTokenHash = hashToken(controlToken);
 
 const pool = new Pool({ connectionString: databaseUrl });
 const app = Fastify({ logger: true });
@@ -35,7 +36,7 @@ function bearer(header: string | undefined): string | null {
 
 async function requireControl(request: FastifyRequest, reply: FastifyReply): Promise<void> {
   const token = bearer(request.headers.authorization);
-  if (!token || !equalTokenHash(hashToken(token), hashToken(controlToken))) {
+  if (!token || !equalTokenHash(hashToken(token), controlTokenHash)) {
     await reply.code(401).send({ error: "unauthorized" });
   }
 }
