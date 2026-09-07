@@ -7,8 +7,15 @@ import { readFile } from "node:fs/promises";
 import { Pool } from "pg";
 import type { AgentCommand, AgentEvent, DeploymentStatus } from "@rundea/contracts";
 import { deploymentStatuses } from "@rundea/contracts";
-import { createOpaqueToken, equalTokenHash, hashToken } from "@rundea/crypto";
+import { createOpaqueToken, equalTokenHash, hashToken, parseMasterKey } from "@rundea/crypto";
 import { assertTransition } from "@rundea/deployer";
+import {
+  deleteServiceVariable,
+  listServiceVariables,
+  loadServiceEnvironment,
+  upsertServiceVariables,
+  type ServiceVariableInput,
+} from "./service-variables";
 
 type NodeSocket = { send(payload: string): void; close(code?: number, reason?: string): void };
 
@@ -16,18 +23,24 @@ const databaseUrl = process.env.DATABASE_URL;
 if (!databaseUrl) throw new Error("DATABASE_URL is required");
 const controlToken = process.env.RUNDEA_CONTROL_TOKEN;
 if (!controlToken) throw new Error("RUNDEA_CONTROL_TOKEN is required");
+const masterKeyEncoded = process.env.RUNDEA_MASTER_KEY;
+if (!masterKeyEncoded) throw new Error("RUNDEA_MASTER_KEY is required");
 const controlTokenHash = hashToken(controlToken);
+const masterKey = parseMasterKey(masterKeyEncoded);
 
 const pool = new Pool({ connectionString: databaseUrl });
 const app = Fastify({ logger: true });
 await app.register(cors, { origin: process.env.RUNDEA_WEB_ORIGIN ?? "http://localhost:5173" });
 await app.register(websocket);
 
-const migrationUrl = new URL("../migrations/001_init.sql", import.meta.url);
-await pool.query(await readFile(migrationUrl, "utf8"));
+for (const migration of ["001_init.sql", "002_service_variables_and_auto_build.sql"]) {
+  const migrationUrl = new URL(`../migrations/${migration}`, import.meta.url);
+  await pool.query(await readFile(migrationUrl, "utf8"));
+}
 await pool.query("UPDATE nodes SET status='OFFLINE'");
 
 const sockets = new Map<string, NodeSocket>();
+const serviceNamePattern = /^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/;
 
 function bearer(header: string | undefined): string | null {
   if (!header?.startsWith("Bearer ")) return null;
@@ -39,6 +52,11 @@ async function requireControl(request: FastifyRequest, reply: FastifyReply): Pro
   if (!token || !equalTokenHash(hashToken(token), controlTokenHash)) {
     await reply.code(401).send({ error: "unauthorized" });
   }
+}
+
+function requireServiceName(value: string): string {
+  if (!serviceNamePattern.test(value)) throw new Error("invalid service name");
+  return value;
 }
 
 function safeServiceName(value: string): string {
@@ -83,15 +101,28 @@ async function dispatchQueued(nodeId: string): Promise<void> {
   }
   if (!row) return;
 
+  let environment: Record<string, string>;
+  try {
+    environment = await loadServiceEnvironment(pool, masterKey, row.service_name);
+  } catch (error) {
+    await pool.query("UPDATE deployments SET dispatch_lease_until=NULL WHERE id=$1 AND status='QUEUED'", [row.id]);
+    throw error;
+  }
+
   const command: AgentCommand = {
     type: "deploy",
     deploymentId: row.id,
     serviceName: row.service_name,
-    source: { repository: row.source_repository, ref: row.source_ref, dockerfile: row.dockerfile },
+    source: {
+      repository: row.source_repository,
+      ref: row.source_ref,
+      ...(row.dockerfile ? { dockerfile: row.dockerfile } : {}),
+    },
     runtime: {
       containerName: `rundea-${safeServiceName(row.service_name)}`,
       containerPort: row.container_port,
       hostPort: row.host_port,
+      environment,
       healthcheck: { path: row.healthcheck_path, timeoutSeconds: 60 },
     },
   };
@@ -174,6 +205,49 @@ app.get("/v0/nodes", { preHandler: requireControl }, async () => {
   return result.rows;
 });
 
+app.put<{ Params: { serviceName: string }; Body: { variables?: ServiceVariableInput[] } }>(
+  "/v0/services/:serviceName/variables",
+  { preHandler: requireControl },
+  async (request, reply) => {
+    try {
+      const serviceName = requireServiceName(request.params.serviceName);
+      const variables = request.body?.variables;
+      if (!Array.isArray(variables)) return reply.code(400).send({ error: "variables must be an array" });
+      await upsertServiceVariables(pool, masterKey, serviceName, variables);
+      return reply.send({ variables: await listServiceVariables(pool, masterKey, serviceName) });
+    } catch (error) {
+      return reply.code(400).send({ error: error instanceof Error ? error.message : "invalid variables" });
+    }
+  },
+);
+
+app.get<{ Params: { serviceName: string } }>(
+  "/v0/services/:serviceName/variables",
+  { preHandler: requireControl },
+  async (request, reply) => {
+    try {
+      const serviceName = requireServiceName(request.params.serviceName);
+      return { variables: await listServiceVariables(pool, masterKey, serviceName) };
+    } catch (error) {
+      return reply.code(400).send({ error: error instanceof Error ? error.message : "invalid service" });
+    }
+  },
+);
+
+app.delete<{ Params: { serviceName: string; key: string } }>(
+  "/v0/services/:serviceName/variables/:key",
+  { preHandler: requireControl },
+  async (request, reply) => {
+    try {
+      const serviceName = requireServiceName(request.params.serviceName);
+      const deleted = await deleteServiceVariable(pool, serviceName, request.params.key);
+      return deleted ? reply.code(204).send() : reply.code(404).send({ error: "variable not found" });
+    } catch (error) {
+      return reply.code(400).send({ error: error instanceof Error ? error.message : "invalid variable" });
+    }
+  },
+);
+
 app.get("/v0/deployments", { preHandler: requireControl }, async () => {
   const result = await pool.query(
     `SELECT id,service_name,node_id,source_repository,source_ref,dockerfile,container_port,host_port,healthcheck_path,status,runtime_container_id,created_at,updated_at
@@ -196,13 +270,18 @@ app.post<{ Body: { serviceName?: string; nodeId?: string; sourceRepository?: str
   async (request, reply) => {
     const body = request.body ?? {};
     if (!body.serviceName || !body.nodeId || !body.sourceRepository || !body.sourceRef) return reply.code(400).send({ error: "serviceName, nodeId, sourceRepository and sourceRef are required" });
+    try {
+      requireServiceName(body.serviceName);
+    } catch (error) {
+      return reply.code(400).send({ error: error instanceof Error ? error.message : "invalid service name" });
+    }
     if (!Number.isInteger(body.containerPort) || !Number.isInteger(body.hostPort)) return reply.code(400).send({ error: "containerPort and hostPort must be integers" });
     const id = randomUUID();
     try {
       await pool.query(
         `INSERT INTO deployments(id,service_name,node_id,source_repository,source_ref,dockerfile,container_port,host_port,healthcheck_path,status)
          VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,'QUEUED')`,
-        [id, body.serviceName, body.nodeId, body.sourceRepository, body.sourceRef, body.dockerfile ?? "Dockerfile", body.containerPort, body.hostPort, body.healthcheckPath ?? "/health"],
+        [id, body.serviceName, body.nodeId, body.sourceRepository, body.sourceRef, body.dockerfile?.trim() || null, body.containerPort, body.hostPort, body.healthcheckPath ?? "/health"],
       );
     } catch (error) {
       request.log.error(error);
