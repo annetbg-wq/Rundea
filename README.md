@@ -32,15 +32,17 @@ Requires Node.js 24 and Docker.
 ```bash
 cp .env.example .env
 docker compose -f docker-compose.dev.yml up -d
-npm install
+npm ci
 set -a; source .env; set +a
 npm run dev:api
 ```
 
+The value in `.env.example` is an explicit **local-development-only** control token. Production deployments must use a unique high-entropy secret generated outside the repository.
+
 In another shell:
 
 ```bash
-RUNDEA_API_URL=http://localhost:4000 RUNDEA_CONTROL_TOKEN=change-me npm run dev:web
+RUNDEA_API_URL=http://localhost:4000 RUNDEA_CONTROL_TOKEN=local-dev-only-control-token-0123456789abcdef npm run dev:web
 ```
 
 ## Node bootstrap
@@ -50,7 +52,7 @@ Create a node (bootstrap endpoint is temporary v0 administration and is protecte
 ```bash
 curl -sS -X POST http://localhost:4000/v0/nodes \
   -H 'content-type: application/json' \
-  -H 'authorization: Bearer change-me' \
+  -H 'authorization: Bearer local-dev-only-control-token-0123456789abcdef' \
   -d '{"name":"dev-node"}'
 ```
 
@@ -58,7 +60,7 @@ The response contains `id` and a **one-time** `token`. The API stores only its S
 
 The browser bundle never receives `RUNDEA_CONTROL_TOKEN`: during local development Vite proxies `/api` server-side and injects the control credential. A production user-auth/session layer is intentionally a later slice; this foundation does not publish an admin token to client JavaScript.
 
-Run the agent:
+Run the agent directly during development:
 
 ```bash
 cd apps/agent
@@ -68,6 +70,8 @@ go run . \
   --token '<one-time-token>'
 ```
 
+For installed nodes, `infra/agent/install.sh` requires the published agent binary URL **and its SHA-256 checksum**. The installer refuses to place an unverified root-level agent binary on the host.
+
 ## Create a deployment
 
 The source repository must currently be an HTTPS GitHub repository cloneable by the agent without interactive credentials. Private GitHub App source delivery is deliberately separated into the next slice; the architecture does not bake long-lived GitHub credentials into nodes.
@@ -75,7 +79,7 @@ The source repository must currently be an HTTPS GitHub repository cloneable by 
 ```bash
 curl -sS -X POST http://localhost:4000/v0/deployments \
   -H 'content-type: application/json' \
-  -H 'authorization: Bearer change-me' \
+  -H 'authorization: Bearer local-dev-only-control-token-0123456789abcdef' \
   -d '{
     "serviceName":"hello",
     "nodeId":"<node-id>",
