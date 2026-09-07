@@ -14,6 +14,13 @@ import (
 var environmentKeyPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
 func writeRuntimeEnvFile(workspace string, values map[string]string, containerPort int) (string, error) {
+	// Deployments are serialized per node in v0, so it is safe to remove any
+	// secret transport file left behind by a previous interrupted deployment.
+	workDir := filepath.Dir(filepath.Dir(workspace))
+	if err := cleanupStaleRuntimeEnvFiles(workDir); err != nil {
+		return "", fmt.Errorf("clean stale runtime env files: %w", err)
+	}
+
 	merged := make(map[string]string, len(values)+2)
 	for key, value := range values {
 		if !environmentKeyPattern.MatchString(key) {
