@@ -186,7 +186,7 @@ app.get("/v0/agent/ws", { websocket: true }, async (socket, request) => {
   await pool.query("UPDATE nodes SET status='ONLINE', last_seen_at=now() WHERE id=$1", [nodeId]);
   await dispatchQueued(nodeId);
 
-  socket.on("message", async (raw) => {
+  socket.on("message", async (raw: Buffer) => {
     try {
       const event = JSON.parse(raw.toString()) as AgentEvent;
       if (event.type === "heartbeat") {
