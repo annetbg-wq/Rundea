@@ -235,6 +235,7 @@ func runDeployment(cfg config, w *writer, cmd deployCommand) {
 	containerID := strings.TrimSpace(string(out))
 
 	if err := w.status(cmd.DeploymentID, "HEALTHCHECK", "waiting for healthcheck", containerID); err != nil {
+		cleanupContainer(ctx, w, cmd.DeploymentID, cmd.Runtime.ContainerName)
 		return
 	}
 	timeout := time.Duration(cmd.Runtime.Healthcheck.TimeoutSeconds) * time.Second
@@ -242,14 +243,23 @@ func runDeployment(cfg config, w *writer, cmd deployCommand) {
 		timeout = 60 * time.Second
 	}
 	if err := waitForHealth(ctx, cmd.Runtime.HostPort, cmd.Runtime.Healthcheck.Path, timeout); err != nil {
+		cleanupContainer(ctx, w, cmd.DeploymentID, cmd.Runtime.ContainerName)
 		fail(err)
 		return
 	}
 
 	if err := w.status(cmd.DeploymentID, "READY", "healthcheck passed", containerID); err != nil {
+		cleanupContainer(ctx, w, cmd.DeploymentID, cmd.Runtime.ContainerName)
 		return
 	}
 	go streamRuntimeLogs(ctx, w, cmd.DeploymentID, cmd.Runtime.ContainerName)
+}
+
+func cleanupContainer(ctx context.Context, w *writer, deploymentID, containerName string) {
+	out, err := exec.CommandContext(ctx, "docker", "rm", "-f", containerName).CombinedOutput()
+	if err != nil && !strings.Contains(string(out), "No such container") {
+		w.log(deploymentID, "system", fmt.Sprintf("failed to remove incomplete container: %v: %s", err, strings.TrimSpace(string(out))))
+	}
 }
 
 func validateCommand(cmd deployCommand) error {
