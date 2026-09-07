@@ -37,9 +37,10 @@ type deployCommand struct {
 		Dockerfile string `json:"dockerfile"`
 	} `json:"source"`
 	Runtime struct {
-		ContainerName string `json:"containerName"`
-		ContainerPort int    `json:"containerPort"`
-		HostPort      int    `json:"hostPort"`
+		ContainerName string            `json:"containerName"`
+		ContainerPort int               `json:"containerPort"`
+		HostPort      int               `json:"hostPort"`
+		Environment   map[string]string `json:"environment"`
 		Healthcheck   struct {
 			Path           string `json:"path"`
 			TimeoutSeconds int    `json:"timeoutSeconds"`
@@ -216,8 +217,14 @@ func runDeployment(cfg config, w *writer, cmd deployCommand) {
 		return
 	}
 
+	dockerfile, plan, err := prepareDockerfile(sourceDir, cmd.Source.Dockerfile)
+	if err != nil {
+		fail(err)
+		return
+	}
+	w.log(cmd.DeploymentID, "system", "selected build plan: "+plan)
 	imageTag := "rundea/" + strings.ToLower(cmd.DeploymentID) + ":build"
-	if err := runStreamingIn(ctx, sourceDir, w, cmd.DeploymentID, "build", "docker", "build", "--pull", "-f", cmd.Source.Dockerfile, "-t", imageTag, "."); err != nil {
+	if err := runStreamingIn(ctx, sourceDir, w, cmd.DeploymentID, "build", "docker", "build", "--pull", "-f", dockerfile, "-t", imageTag, "."); err != nil {
 		fail(fmt.Errorf("docker build: %w", err))
 		return
 	}
@@ -225,11 +232,20 @@ func runDeployment(cfg config, w *writer, cmd deployCommand) {
 	if err := w.status(cmd.DeploymentID, "DEPLOYING", "starting container", ""); err != nil {
 		return
 	}
+	envFile, err := writeRuntimeEnvFile(workspace, cmd.Runtime.Environment, cmd.Runtime.ContainerPort)
+	if err != nil {
+		fail(fmt.Errorf("runtime environment: %w", err))
+		return
+	}
 	_ = exec.CommandContext(ctx, "docker", "rm", "-f", cmd.Runtime.ContainerName).Run()
 	port := fmt.Sprintf("127.0.0.1:%d:%d", cmd.Runtime.HostPort, cmd.Runtime.ContainerPort)
-	out, err := exec.CommandContext(ctx, "docker", "run", "-d", "--restart", "unless-stopped", "--label", "rundea.managed=true", "--label", "rundea.deployment="+cmd.DeploymentID, "--name", cmd.Runtime.ContainerName, "-p", port, imageTag).CombinedOutput()
-	if err != nil {
-		fail(fmt.Errorf("docker run: %w: %s", err, strings.TrimSpace(string(out))))
+	dockerRun := exec.CommandContext(ctx, "docker", "run", "-d", "--restart", "unless-stopped", "--label", "rundea.managed=true", "--label", "rundea.deployment="+cmd.DeploymentID, "--name", cmd.Runtime.ContainerName, "-p", port, "--env-file", envFile, imageTag)
+	out, runErr := dockerRun.CombinedOutput()
+	if removeErr := os.Remove(envFile); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+		w.log(cmd.DeploymentID, "system", "failed to remove temporary runtime env file: "+removeErr.Error())
+	}
+	if runErr != nil {
+		fail(fmt.Errorf("docker run: %w: %s", runErr, strings.TrimSpace(string(out))))
 		return
 	}
 	containerID := strings.TrimSpace(string(out))
@@ -263,16 +279,18 @@ func cleanupContainer(ctx context.Context, w *writer, deploymentID, containerNam
 }
 
 func validateCommand(cmd deployCommand) error {
-	if cmd.DeploymentID == "" || cmd.Source.Repository == "" || cmd.Source.Ref == "" || cmd.Source.Dockerfile == "" {
+	if cmd.DeploymentID == "" || cmd.Source.Repository == "" || cmd.Source.Ref == "" {
 		return errors.New("deployment command is missing source fields")
 	}
 	repoURL, err := url.Parse(cmd.Source.Repository)
 	if err != nil || repoURL.Scheme != "https" || !strings.EqualFold(repoURL.Hostname(), "github.com") || repoURL.User != nil {
 		return errors.New("source repository must be an HTTPS github.com URL without embedded credentials")
 	}
-	cleanDockerfile := filepath.Clean(cmd.Source.Dockerfile)
-	if filepath.IsAbs(cleanDockerfile) || cleanDockerfile == ".." || strings.HasPrefix(cleanDockerfile, ".."+string(filepath.Separator)) {
-		return errors.New("dockerfile path must stay inside the source repository")
+	if cmd.Source.Dockerfile != "" {
+		cleanDockerfile := filepath.Clean(cmd.Source.Dockerfile)
+		if filepath.IsAbs(cleanDockerfile) || cleanDockerfile == ".." || strings.HasPrefix(cleanDockerfile, ".."+string(filepath.Separator)) {
+			return errors.New("dockerfile path must stay inside the source repository")
+		}
 	}
 	if cmd.Runtime.ContainerName == "" || cmd.Runtime.ContainerPort < 1 || cmd.Runtime.ContainerPort > 65535 || cmd.Runtime.HostPort < 1 || cmd.Runtime.HostPort > 65535 {
 		return errors.New("deployment command contains invalid runtime fields")
