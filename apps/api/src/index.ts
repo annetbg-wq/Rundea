@@ -63,6 +63,7 @@ async function dispatchQueued(nodeId: string): Promise<void> {
   } finally {
     client.release();
   }
+  if (!row) return;
 
   const command: AgentCommand = {
     type: "deploy",
