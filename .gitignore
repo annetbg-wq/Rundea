@@ -1,0 +1,10 @@
+node_modules
+.dist
+dist
+.env
+.env.*
+!.env.example
+coverage
+.DS_Store
+*.log
+apps/agent/rundea-agent

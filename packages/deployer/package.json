@@ -1,0 +1,12 @@
+{
+  "name": "@rundea/deployer",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": "./src/index.ts",
+  "dependencies": {"@rundea/contracts": "*"},
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "tsx --test src/*.test.ts"
+  }
+}
