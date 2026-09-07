@@ -6,12 +6,13 @@ set -euo pipefail
 : "${RUNDEA_NODE_ID:?set RUNDEA_NODE_ID}"
 : "${RUNDEA_NODE_TOKEN:?set RUNDEA_NODE_TOKEN}"
 if [[ ${EUID} -ne 0 ]]; then echo "run as root" >&2; exit 1; fi
+[[ "$RUNDEA_CONTROL_PLANE_URL" == https://* ]] || { echo "Installed Rundea nodes require an https:// control plane URL" >&2; exit 1; }
 command -v docker >/dev/null || { echo "Docker must be installed first" >&2; exit 1; }
 command -v git >/dev/null || { echo "Git must be installed first" >&2; exit 1; }
 command -v curl >/dev/null || { echo "curl must be installed first" >&2; exit 1; }
 command -v sha256sum >/dev/null || { echo "sha256sum must be installed first" >&2; exit 1; }
 [[ "$RUNDEA_AGENT_SHA256" =~ ^[a-fA-F0-9]{64}$ ]] || { echo "RUNDEA_AGENT_SHA256 must be a 64-character hex SHA-256" >&2; exit 1; }
-install -d -m 0700 /etc/rundea /var/lib/rundea
+install -d -m 0700 /etc/rundea /var/lib/rundea /var/lib/rundea/deployments
 
 tmp_agent="$(mktemp /tmp/rundea-agent.XXXXXX)"
 cleanup() { rm -f "$tmp_agent"; }
@@ -36,6 +37,7 @@ Wants=network-online.target docker.service
 [Service]
 Type=simple
 EnvironmentFile=/etc/rundea/agent.env
+ExecStartPre=/usr/bin/find /var/lib/rundea/deployments -name runtime.env -type f -delete
 ExecStart=/usr/local/bin/rundea-agent
 Restart=always
 RestartSec=3
