@@ -125,6 +125,32 @@ async function recordStatus(event: Extract<AgentEvent, { type: "status" }>): Pro
   }
 }
 
+async function failActiveDeploymentsForNode(nodeId: string, message: string): Promise<void> {
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const failed = await client.query(
+      `UPDATE deployments
+          SET status='FAILED', dispatch_lease_until=NULL, updated_at=now()
+        WHERE node_id=$1 AND status IN ('BUILDING','DEPLOYING','HEALTHCHECK')
+        RETURNING id`,
+      [nodeId],
+    );
+    for (const row of failed.rows) {
+      await client.query(
+        `INSERT INTO deployment_events(deployment_id,kind,status,message) VALUES($1,'STATUS','FAILED',$2)`,
+        [row.id, message],
+      );
+    }
+    await client.query("COMMIT");
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
 app.get("/health", async () => {
   await pool.query("SELECT 1");
   return { ok: true };
@@ -225,6 +251,7 @@ app.get("/v0/agent/ws", { websocket: true }, async (socket, request) => {
     if (sockets.get(nodeId) === socket) {
       sockets.delete(nodeId);
       await pool.query("UPDATE nodes SET status='OFFLINE' WHERE id=$1", [nodeId]).catch(() => undefined);
+      await failActiveDeploymentsForNode(nodeId, "agent disconnected during deployment").catch((error) => request.log.error(error, "failed to reconcile disconnected deployment"));
     }
   });
 });
