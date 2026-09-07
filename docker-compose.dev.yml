@@ -1,0 +1,19 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: rundea
+      POSTGRES_PASSWORD: rundea
+      POSTGRES_DB: rundea
+    ports:
+      - "54329:5432"
+    volumes:
+      - rundea_pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U rundea -d rundea"]
+      interval: 2s
+      timeout: 2s
+      retries: 20
+
+volumes:
+  rundea_pg:
