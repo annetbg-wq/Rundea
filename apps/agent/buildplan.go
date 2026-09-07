@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 )
 
+const node24BaseImage = "node:24.20.0-bookworm-slim@sha256:ba849c60be29959425b8734d57b8b4b7d56f98edd9504c9af091d5281095a71e"
+
 type packageManifest struct {
 	Scripts map[string]string `json:"scripts"`
 }
@@ -48,17 +50,17 @@ func prepareDockerfile(sourceDir, requested string) (path string, plan string, e
 	if manifest.Scripts["build"] != "" {
 		build = "RUN npm run build\n"
 	}
-	generated := fmt.Sprintf(`FROM node:24-bookworm-slim
+	generated := fmt.Sprintf(`FROM %s
 WORKDIR /app
 COPY package*.json ./
 RUN %s
 COPY . .
 %sENV NODE_ENV=production
 CMD ["npm","start"]
-`, install, build)
+`, node24BaseImage, install, build)
 	name := ".rundea.generated.Dockerfile"
 	if err := os.WriteFile(filepath.Join(sourceDir, name), []byte(generated), 0o600); err != nil {
 		return "", "", fmt.Errorf("write generated Dockerfile: %w", err)
 	}
-	return name, "nodejs-24:auto", nil
+	return name, "nodejs-24.20.0:auto", nil
 }
