@@ -29,6 +29,7 @@ export function validateVariables(inputs: ServiceVariableInput[]): void {
     seen.add(item.key);
     if (Buffer.byteLength(item.value, "utf8") > maxValueBytes) throw new Error(`${item.key} exceeds ${maxValueBytes} bytes`);
     if (item.value.includes("\u0000")) throw new Error(`${item.key} contains a NUL byte`);
+    if (item.value.includes("\n") || item.value.includes("\r")) throw new Error(`${item.key} cannot contain newlines in v0`);
   }
 }
 
