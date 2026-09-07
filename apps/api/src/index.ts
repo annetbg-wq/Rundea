@@ -59,7 +59,11 @@ async function dispatchQueued(nodeId: string): Promise<void> {
         WHERE node_id=$1 AND status='QUEUED' AND (dispatch_lease_until IS NULL OR dispatch_lease_until < now())
           AND NOT EXISTS (
             SELECT 1 FROM deployments active
-             WHERE active.node_id=$1 AND active.status IN ('BUILDING','DEPLOYING','HEALTHCHECK')
+             WHERE active.node_id=$1
+               AND (
+                 active.status IN ('BUILDING','DEPLOYING','HEALTHCHECK')
+                 OR (active.status='QUEUED' AND active.dispatch_lease_until >= now())
+               )
           )
         ORDER BY created_at ASC FOR UPDATE SKIP LOCKED LIMIT 1`,
       [nodeId],
