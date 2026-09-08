@@ -1,7 +1,9 @@
 ALTER TABLE deployments
   ADD COLUMN IF NOT EXISTS operation text NOT NULL DEFAULT 'DEPLOY',
   ADD COLUMN IF NOT EXISTS rollback_target_id uuid REFERENCES deployments(id),
-  ADD COLUMN IF NOT EXISTS environment_snapshot_at timestamptz;
+  ADD COLUMN IF NOT EXISTS environment_snapshot_at timestamptz,
+  ADD COLUMN IF NOT EXISTS source_commit_sha text,
+  ADD COLUMN IF NOT EXISTS image_id text;
 
 DO $$
 BEGIN
@@ -9,6 +11,12 @@ BEGIN
     SELECT 1 FROM pg_constraint WHERE conname = 'deployments_operation_check'
   ) THEN
     ALTER TABLE deployments ADD CONSTRAINT deployments_operation_check CHECK (operation IN ('DEPLOY','ROLLBACK'));
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint WHERE conname = 'deployments_source_commit_sha_check'
+  ) THEN
+    ALTER TABLE deployments ADD CONSTRAINT deployments_source_commit_sha_check
+      CHECK (source_commit_sha IS NULL OR source_commit_sha ~ '^[0-9a-f]{40}$');
   END IF;
 END $$;
 
