@@ -24,6 +24,8 @@ const workDir = await mkdtemp(join(tmpdir(), "rundea-acceptance-"));
 let agent;
 const deploymentIds = [];
 
+class FatalPollError extends Error {}
+
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -46,6 +48,7 @@ async function poll(label, fn, timeoutMs = 180_000, intervalMs = 1000) {
       if (value?.done) return value.value;
       last = value?.last ?? last;
     } catch (error) {
+      if (error instanceof FatalPollError) throw error;
       last = error instanceof Error ? error.message : String(error);
     }
     await sleep(intervalMs);
@@ -66,7 +69,7 @@ async function waitDeployment(id, label) {
     const row = await deployment(id);
     if (!row) return { last: "deployment not visible yet" };
     if (row.status === "READY") return { done: true, value: row };
-    if (terminal.has(row.status)) throw new Error(`${label} reached ${row.status}`);
+    if (terminal.has(row.status)) throw new FatalPollError(`${label} reached ${row.status}`);
     return { last: row.status };
   }, 240_000, 1500);
 }
@@ -113,7 +116,7 @@ async function restart(deploymentId) {
     const row = body.actions.find((item) => item.id === action.id);
     if (!row) return { last: "action not visible yet" };
     if (row.status === "SUCCEEDED") return { done: true, value: row };
-    if (row.status === "FAILED") throw new Error(`restart failed: ${row.error ?? "unknown error"}`);
+    if (row.status === "FAILED") throw new FatalPollError(`restart failed: ${row.error ?? "unknown error"}`);
     return { last: row.status };
   }, 120_000, 1000);
 }
@@ -136,14 +139,19 @@ try {
   });
   nodeId = node.id;
 
-  agent = spawn(agentBinary, [
-    "--control-plane", api,
-    "--node-id", node.id,
-    "--token", node.token,
-    "--work-dir", workDir,
-  ], { stdio: ["ignore", "inherit", "inherit"] });
+  agent = spawn(agentBinary, [], {
+    stdio: ["ignore", "inherit", "inherit"],
+    env: {
+      ...process.env,
+      RUNDEA_CONTROL_PLANE_URL: api,
+      RUNDEA_NODE_ID: node.id,
+      RUNDEA_NODE_TOKEN: node.token,
+      RUNDEA_WORK_DIR: workDir,
+    },
+  });
 
   await poll("agent online", async () => {
+    if (agent.exitCode !== null) throw new FatalPollError(`Agent exited before becoming ONLINE with code ${agent.exitCode}`);
     const nodes = await request("/v0/nodes", { headers });
     const row = nodes.find((item) => item.id === node.id);
     return row?.status === "ONLINE" ? { done: true, value: row } : { last: row?.status ?? "missing" };
