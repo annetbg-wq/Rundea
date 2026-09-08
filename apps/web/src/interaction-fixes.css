@@ -1,0 +1,8 @@
+.primaryNavItem{display:grid;grid-template-columns:minmax(0,1fr) auto auto;align-items:center;gap:5px;padding:2px 7px;border-radius:7px;color:#8e949f}
+.primaryNavItem:hover,.primaryNavItem.active{background:#17191e;color:#e9ebef}
+.primaryNavItem>button{min-width:0;display:grid;grid-template-columns:22px minmax(0,1fr);align-items:center;gap:6px;padding:6px 2px;border:0;background:transparent;color:inherit;text-align:left;cursor:pointer;font-size:12px}
+.primaryNavItem>button .navLabel{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.primaryNavItem .helpWrap{justify-self:end}
+.primaryNavItem .navCount{justify-self:end}
+@media(max-width:860px){.primaryNavItem{width:100%;grid-template-columns:1fr;justify-items:center;padding:2px}.primaryNavItem>button{width:36px;height:36px;display:grid;grid-template-columns:1fr;place-items:center;padding:0}.primaryNavItem>button .navLabel,.primaryNavItem .helpWrap{display:none}.primaryNavItem .navCount{position:absolute;margin-left:27px;margin-top:-25px}.primaryNavItem{position:relative}}
+@media(max-width:620px){.primaryNavItem{width:36px;height:36px;display:grid;place-items:center;background:transparent!important}.primaryNavItem>button{width:34px;height:34px}.primaryNavItem .navCount,.primaryNavItem .helpWrap{display:none}}
