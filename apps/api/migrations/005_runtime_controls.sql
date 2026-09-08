@@ -47,4 +47,6 @@ CREATE TABLE IF NOT EXISTS runtime_actions (
 
 CREATE UNIQUE INDEX IF NOT EXISTS runtime_actions_one_restart_idx
   ON runtime_actions(deployment_id) WHERE kind='RESTART' AND status='RUNNING';
+CREATE UNIQUE INDEX IF NOT EXISTS runtime_actions_one_node_idx
+  ON runtime_actions(node_id) WHERE status='RUNNING';
 CREATE INDEX IF NOT EXISTS runtime_actions_created_idx ON runtime_actions(created_at DESC);
