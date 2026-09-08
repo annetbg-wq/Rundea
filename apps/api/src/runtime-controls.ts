@@ -26,7 +26,7 @@ async function latestReadyForService(pool: Pool, serviceName: string) {
       ORDER BY created_at DESC,id DESC LIMIT 1`,
     [serviceName],
   );
-  return result.rows[0] as Record<string, unknown> | undefined;
+  return result.rows[0] as Record<string, any> | undefined;
 }
 
 export function registerRuntimeControlRoutes(
@@ -124,6 +124,13 @@ export function registerRuntimeControlRoutes(
       if (current.id === target.id) return reply.code(409).send({ error: "target deployment is already the current revision" });
       if (current.node_id !== target.node_id) return reply.code(409).send({ error: "v0 rollback requires target and current revision on the same node" });
 
+      const activeWork = await pool.query(
+        `SELECT id FROM deployments
+          WHERE node_id=$1 AND status IN ('QUEUED','BUILDING','DEPLOYING','HEALTHCHECK') LIMIT 1`,
+        [target.node_id],
+      );
+      if ((activeWork.rowCount ?? 0) > 0) return reply.code(409).send({ error: "node already has an active deployment operation" });
+
       const id = randomUUID();
       const client = await pool.connect();
       try {
@@ -131,11 +138,11 @@ export function registerRuntimeControlRoutes(
         await client.query(
           `INSERT INTO deployments(
              id,service_name,node_id,source_repository,source_ref,dockerfile,container_port,host_port,healthcheck_path,
-             status,operation,rollback_target_id,source_commit_sha
-           ) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,'QUEUED','ROLLBACK',$10,$11)`,
+             status,operation,rollback_target_id,source_commit_sha,image_id
+           ) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,'QUEUED','ROLLBACK',$10,$11,$12)`,
           [
             id,target.service_name,target.node_id,target.source_repository,target.source_ref,target.dockerfile,
-            target.container_port,target.host_port,target.healthcheck_path,target.id,target.source_commit_sha,
+            target.container_port,target.host_port,target.healthcheck_path,target.id,target.source_commit_sha,target.image_id,
           ],
         );
         await copyDeploymentEnvironment(client, target.id, id);
