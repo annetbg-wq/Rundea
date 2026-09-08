@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"net"
+	"strconv"
 	"testing"
 	"time"
 )
@@ -21,7 +22,7 @@ func TestTargetsForSendinaProfileAreFixed(t *testing.T) {
 		"imap-tls":      "imap.gmail.com:993",
 	}
 	for _, target := range targets {
-		if got := net.JoinHostPort(target.Host, fmtPort(target.Port)); got != want[target.Name] {
+		if got := net.JoinHostPort(target.Host, strconv.Itoa(target.Port)); got != want[target.Name] {
 			t.Fatalf("unexpected target %s=%s", target.Name, got)
 		}
 	}
@@ -44,8 +45,4 @@ func TestRunTCPProbeAgainstLocalListener(t *testing.T) {
 	if !result.OK {
 		t.Fatalf("expected local probe to pass: %+v", result)
 	}
-}
-
-func fmtPort(port int) string {
-	return strconv.Itoa(port)
 }
