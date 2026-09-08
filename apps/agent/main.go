@@ -245,13 +245,9 @@ func runDeployment(cfg config, w *writer, cmd deployCommand) {
 	if err := w.status(cmd.DeploymentID, "BUILDING", "checking out source", ""); err != nil {
 		return
 	}
-	if err := cloneSource(ctx, w, cmd.DeploymentID, cmd.Source.Repository, cmd.Source.Ref, sourceDir); err != nil {
-		fail(fmt.Errorf("source checkout: %w", err))
-		return
-	}
-	sourceSHA, err := sourceCommitSHA(ctx, sourceDir)
+	sourceSHA, err := materializeSource(ctx, cfg, w, cmd, sourceDir)
 	if err != nil {
-		fail(err)
+		fail(fmt.Errorf("source checkout: %w", err))
 		return
 	}
 
