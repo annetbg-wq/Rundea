@@ -25,6 +25,12 @@ export type RuntimeSpec = {
   };
 };
 
+export type RundeaSourceGrant = {
+  kind: "rundeaGrant";
+  grantId: string;
+  token: string;
+};
+
 export type DeployCommand = {
   type: "deploy";
   deploymentId: string;
@@ -33,6 +39,7 @@ export type DeployCommand = {
     repository: string;
     ref: string;
     dockerfile?: string;
+    access?: RundeaSourceGrant;
   };
   runtime: RuntimeSpec;
 };
