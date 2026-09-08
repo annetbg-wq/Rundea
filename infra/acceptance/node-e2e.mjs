@@ -1,4 +1,5 @@
 import { spawn, spawnSync } from "node:child_process";
+import { createHmac } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -6,6 +7,7 @@ import { join } from "node:path";
 const api = process.env.RUNDEA_ACCEPTANCE_API_URL ?? "http://127.0.0.1:4000";
 const controlToken = process.env.RUNDEA_CONTROL_TOKEN;
 const agentBinary = process.env.RUNDEA_AGENT_BINARY;
+const githubWebhookSecret = process.env.RUNDEA_GITHUB_WEBHOOK_SECRET;
 const fixtureRepository = "https://github.com/render-examples/express-hello-world.git";
 const fixtureRef = process.env.RUNDEA_ACCEPTANCE_FIXTURE_REF ?? "main";
 const expectedFixtureSha = process.env.RUNDEA_ACCEPTANCE_FIXTURE_SHA ?? "039c34770852fb07cef7f9f0f8534c5de408b207";
@@ -15,6 +17,7 @@ const imageIdPattern = /^sha256:[0-9a-f]{64}$/;
 
 if (!controlToken) throw new Error("RUNDEA_CONTROL_TOKEN is required");
 if (!agentBinary) throw new Error("RUNDEA_AGENT_BINARY is required");
+if (!githubWebhookSecret) throw new Error("RUNDEA_GITHUB_WEBHOOK_SECRET is required");
 if (!Number.isInteger(hostPort) || hostPort < 1024 || hostPort > 65535) throw new Error("invalid acceptance host port");
 
 const headers = { authorization: `Bearer ${controlToken}` };
@@ -92,6 +95,76 @@ async function createDeployment() {
   return body.id;
 }
 
+async function configureAutodeploy() {
+  const body = await request(`/v0/services/${serviceName}/autodeploy`, {
+    method: "PUT",
+    headers: jsonHeaders,
+    body: JSON.stringify({
+      nodeId,
+      repository: fixtureRepository,
+      branch: "main",
+      containerPort: 3001,
+      hostPort,
+      healthcheckPath: "/",
+      enabled: true,
+    }),
+  });
+  if (body.autodeploy?.repository_full_name !== "render-examples/express-hello-world" || body.autodeploy?.source_branch !== "main") {
+    throw new Error(`unexpected autodeploy configuration: ${JSON.stringify(body)}`);
+  }
+}
+
+async function signedPush(deliveryId) {
+  const rawBody = JSON.stringify({
+    ref: "refs/heads/main",
+    after: expectedFixtureSha,
+    deleted: false,
+    repository: { full_name: "render-examples/express-hello-world" },
+  });
+  const signature = `sha256=${createHmac("sha256", githubWebhookSecret).update(rawBody).digest("hex")}`;
+  const response = await fetch(`${api}/v0/github/webhook`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-github-event": "push",
+      "x-github-delivery": deliveryId,
+      "x-hub-signature-256": signature,
+    },
+    body: rawBody,
+  });
+  const text = await response.text();
+  let body;
+  try { body = text ? JSON.parse(text) : null; } catch { body = text; }
+  if (!response.ok) throw new Error(`GitHub webhook -> ${response.status}: ${typeof body === "string" ? body : JSON.stringify(body)}`);
+  return body;
+}
+
+async function createDeploymentFromPush() {
+  await configureAutodeploy();
+  const deliveryId = `acceptance-${Date.now().toString(36)}-${process.pid}`;
+  const first = await signedPush(deliveryId);
+  if (first.status !== "TRIGGERED" || first.deployments?.length !== 1 || first.deployments[0]?.serviceName !== serviceName) {
+    throw new Error(`signed push did not trigger exactly one service deployment: ${JSON.stringify(first)}`);
+  }
+  const deploymentId = first.deployments[0].deploymentId;
+  deploymentIds.push(deploymentId);
+
+  const duplicate = await signedPush(deliveryId);
+  if (duplicate.duplicate !== true || duplicate.status !== "TRIGGERED" || duplicate.deploymentCount !== 1) {
+    throw new Error(`duplicate GitHub delivery was not idempotent: ${JSON.stringify(duplicate)}`);
+  }
+
+  const deliveries = await request("/v0/github/deliveries", { headers });
+  const recorded = deliveries.deliveries?.find((item) => item.delivery_id === deliveryId);
+  if (!recorded || recorded.status !== "TRIGGERED" || Number(recorded.deployment_count) !== 1) {
+    throw new Error(`GitHub delivery observability mismatch: ${JSON.stringify(recorded)}`);
+  }
+  if (!recorded.deployments?.some((item) => item.serviceName === serviceName && item.deploymentId === deploymentId)) {
+    throw new Error(`GitHub delivery is not linked to triggered deployment: ${JSON.stringify(recorded)}`);
+  }
+  return deploymentId;
+}
+
 function assertArtifact(row, label) {
   if (row.source_commit_sha !== expectedFixtureSha) {
     throw new Error(`${label} resolved unexpected source SHA ${row.source_commit_sha}; expected ${expectedFixtureSha}`);
@@ -157,10 +230,10 @@ try {
     return row?.status === "ONLINE" ? { done: true, value: row } : { last: row?.status ?? "missing" };
   }, 45_000, 500);
 
-  const firstId = await createDeployment();
-  const first = await waitDeployment(firstId, "first deployment");
-  assertArtifact(first, "first deployment");
-  await assertService("first deployment");
+  const firstId = await createDeploymentFromPush();
+  const first = await waitDeployment(firstId, "GitHub push deployment");
+  assertArtifact(first, "GitHub push deployment");
+  await assertService("GitHub push deployment");
 
   await restart(firstId);
   await assertService("restart");
@@ -189,7 +262,19 @@ try {
     serviceName,
     fixtureSha: expectedFixtureSha,
     deployments: deploymentIds,
-    verified: ["agent-online", "node-auto-build", "artifact-identity", "http-health", "restart", "exact-rollback", "rollback-chain"],
+    verified: [
+      "agent-online",
+      "signed-github-push",
+      "github-delivery-idempotency",
+      "github-delivery-observability",
+      "exact-source-commit",
+      "node-auto-build",
+      "artifact-identity",
+      "http-health",
+      "restart",
+      "exact-rollback",
+      "rollback-chain",
+    ],
   }, null, 2));
 } finally {
   if (agent && agent.exitCode === null) {
