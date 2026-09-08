@@ -162,6 +162,7 @@ func runRollback(cfg config, w *writer, cmd rollbackCommand) {
 		if out, startErr := exec.CommandContext(ctx, "docker", "start", cmd.Runtime.ContainerName).CombinedOutput(); startErr != nil {
 			return fmt.Errorf("restart previous container: %w: %s", startErr, strings.TrimSpace(string(out)))
 		}
+		backupExists = false
 		return nil
 	}
 
@@ -173,6 +174,9 @@ func runRollback(cfg config, w *writer, cmd rollbackCommand) {
 		"--label", "rundea.rollback_target="+cmd.TargetDeploymentID,
 		"--name", cmd.Runtime.ContainerName, "-p", port, "--env-file", envFile, imageTag,
 	).CombinedOutput()
+	if removeErr := os.Remove(envFile); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+		w.log(cmd.DeploymentID, "system", "failed to remove temporary rollback environment file: "+removeErr.Error())
+	}
 	if runErr != nil {
 		restoreErr := restoreBackup()
 		if restoreErr != nil {
@@ -200,11 +204,18 @@ func runRollback(cfg config, w *writer, cmd rollbackCommand) {
 		}
 		return
 	}
-	if backupExists {
-		_ = exec.CommandContext(ctx, "docker", "rm", "-f", backupName).Run()
-	}
+
+	// Keep the previous healthy container until the Control Plane has accepted READY.
+	// If the WebSocket write fails, restore the previous revision so runtime truth and
+	// Control Plane truth cannot silently diverge.
 	if err := w.status(cmd.DeploymentID, "READY", "rollback revision is healthy", containerID); err != nil {
+		_ = restoreBackup()
 		return
+	}
+	if backupExists {
+		if out, removeErr := exec.CommandContext(ctx, "docker", "rm", "-f", backupName).CombinedOutput(); removeErr != nil {
+			w.log(cmd.DeploymentID, "system", fmt.Sprintf("rollback succeeded but backup cleanup failed: %v: %s", removeErr, strings.TrimSpace(string(out))))
+		}
 	}
 	go streamRuntimeLogs(context.Background(), w, cmd.DeploymentID, cmd.Runtime.ContainerName)
 }
