@@ -41,7 +41,18 @@ export type QualifyNodeCommand = {
   profile: NodeQualificationProfile;
 };
 
-export type AgentCommand = DeployCommand | QualifyNodeCommand;
+export type IngressRoute = {
+  hostname: string;
+  hostPort: number;
+};
+
+export type ReconcileIngressCommand = {
+  type: "reconcileIngress";
+  reconciliationId: string;
+  routes: IngressRoute[];
+};
+
+export type AgentCommand = DeployCommand | QualifyNodeCommand | ReconcileIngressCommand;
 
 export type NodeProbeResult = {
   name: string;
@@ -64,4 +75,13 @@ export type AgentEvent =
       startedAt: string;
       completedAt: string;
       probes: NodeProbeResult[];
+    }
+  | {
+      type: "ingress";
+      reconciliationId: string;
+      applied: boolean;
+      ok: boolean;
+      routes: Array<{ hostname: string; ok: boolean; error?: string }>;
+      error?: string;
+      completedAt: string;
     };

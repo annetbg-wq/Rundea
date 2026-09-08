@@ -4,29 +4,37 @@ import "./styles.css";
 
 const api = "/api";
 type NodeRow = { id:string; name:string; status:string };
-type Deployment = { id:string; service_name:string; source_ref:string; status:string; created_at:string };
+type Deployment = { id:string; service_name:string; node_id:string; source_ref:string; status:string; created_at:string };
 type VariableDraft = { key:string; value:string; secret:boolean };
 type SavedVariable = { key:string; secret:boolean; value?:string };
 type Probe = { name:string; host:string; port:number; ok:boolean; latencyMs?:number; error?:string };
 type Qualification = { id:string; status:"RUNNING"|"PASSED"|"FAILED"; failure_reason?:string; started_at:string; completed_at?:string; probes:Probe[] };
+type Domain = { id:string; hostname:string; service_name:string; node_id:string; status:"PENDING"|"CONFIGURING"|"ACTIVE"|"FAILED"|"DELETING"; last_error?:string; verified_at?:string };
 
 const probeLabels:Record<string,string> = {"smtp-tls":"SMTP 465","smtp-starttls":"SMTP 587","imap-tls":"IMAP 993"};
 
 function App() {
   const [nodes, setNodes] = useState<NodeRow[]>([]);
   const [deployments, setDeployments] = useState<Deployment[]>([]);
+  const [domains, setDomains] = useState<Domain[]>([]);
   const [message, setMessage] = useState("");
   const [variables, setVariables] = useState<VariableDraft[]>([]);
   const [savedVariables, setSavedVariables] = useState<SavedVariable[]>([]);
   const [qualificationNodeId, setQualificationNodeId] = useState("");
   const [qualifications, setQualifications] = useState<Qualification[]>([]);
   const [qualificationMessage, setQualificationMessage] = useState("");
+  const [domainForm, setDomainForm] = useState({serviceName:"",hostname:""});
+  const [domainMessage, setDomainMessage] = useState("");
   const [form, setForm] = useState({ serviceName:"", nodeId:"", sourceRepository:"", sourceRef:"main", dockerfile:"", containerPort:"8080", hostPort:"18080", healthcheckPath:"" });
 
   async function refresh() {
-    const [n,d] = await Promise.all([fetch(`${api}/v0/nodes`), fetch(`${api}/v0/deployments`)]);
+    const [n,d,dm] = await Promise.all([fetch(`${api}/v0/nodes`), fetch(`${api}/v0/deployments`), fetch(`${api}/v0/domains`)]);
     if (n.ok) setNodes(await n.json());
     if (d.ok) setDeployments(await d.json());
+    if (dm.ok) {
+      const body = await dm.json() as {domains:Domain[]};
+      setDomains(body.domains);
+    }
   }
   useEffect(() => { void refresh(); const id=setInterval(()=>void refresh(), 2500); return()=>clearInterval(id); }, []);
 
@@ -107,8 +115,36 @@ function App() {
     if (response.ok) void refresh();
   }
 
+  async function attachDomain(event:FormEvent) {
+    event.preventDefault();
+    setDomainMessage("Creating route and requesting HTTPS…");
+    const response=await fetch(`${api}/v0/domains`,{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({serviceName:domainForm.serviceName,hostname:domainForm.hostname.trim()})});
+    const body=await response.json();
+    if (!response.ok) { setDomainMessage(body.error??"Domain could not be attached"); return; }
+    setDomainMessage("Domain saved. Point DNS to the service node; Rundea will activate it only after verified HTTPS reaches the current reconciliation.");
+    setDomainForm(current=>({...current,hostname:""}));
+    void refresh();
+  }
+
+  async function reconcileDomain(id:string) {
+    setDomainMessage("Rechecking DNS, Caddy and HTTPS…");
+    const response=await fetch(`${api}/v0/domains/${encodeURIComponent(id)}/reconcile`,{method:"POST"});
+    const body=await response.json();
+    setDomainMessage(response.ok?"Ingress reconciliation started.":body.error??"Reconciliation could not start");
+    void refresh();
+  }
+
+  async function removeDomain(id:string) {
+    setDomainMessage("Removing route from the node…");
+    const response=await fetch(`${api}/v0/domains/${encodeURIComponent(id)}`,{method:"DELETE"});
+    const body=await response.json();
+    setDomainMessage(response.ok?"Domain is deleting. It remains visible until the Agent confirms route removal.":body.error??"Domain could not be removed");
+    void refresh();
+  }
+
   const latestQualification=qualifications[0];
   const selectedNode=nodes.find(node=>node.id===qualificationNodeId);
+  const readyServices=[...new Set(deployments.filter(deployment=>deployment.status==="READY").map(deployment=>deployment.service_name))].sort();
 
   return <div className="shell">
     <aside><div className="brand">Rundea</div><nav><button className="active">Deployments</button><button>Projects</button><button>Nodes</button><button>Domains</button></nav><div className="foot">infrastructure, without the tax</div></aside>
@@ -146,6 +182,22 @@ function App() {
               <div className="qualificationMeta"><span>{latestQualification.status==="PASSED"?"This node passes the current Sendina network gate.":latestQualification.status==="FAILED"?"Do not migrate Sendina to this node yet.":"Qualification is running on the node."}</span><time>{new Date(latestQualification.completed_at??latestQualification.started_at).toLocaleString()}</time></div>
             </>:<div className="empty compact">No qualification yet. Run the real egress test on an online node.</div>}
             {qualificationMessage&&<p className="message">{qualificationMessage}</p>}
+          </div>
+
+          <div className="card domainsCard">
+            <div className="cardTitle"><div><h2>Custom domains</h2><p>Managed Caddy · automatic HTTPS · verified DNS target.</p></div><span>{domains.length}</span></div>
+            <form className="domainForm" onSubmit={attachDomain}>
+              <select required value={domainForm.serviceName} onChange={e=>setDomainForm({...domainForm,serviceName:e.target.value})}><option value="">READY service</option>{readyServices.map(service=><option key={service} value={service}>{service}</option>)}</select>
+              <input required placeholder="api.example.com" value={domainForm.hostname} onChange={e=>setDomainForm({...domainForm,hostname:e.target.value})}/>
+              <button type="submit" disabled={!readyServices.length}>Attach</button>
+            </form>
+            <p className="dnsHint">Point the hostname to the service node. ACTIVE is set only when valid TLS and the current Rundea reconciliation marker are both observed through public DNS.</p>
+            <div className="domainList">{domains.length===0?<div className="empty compact">No domains attached yet.</div>:domains.map(domain=><article key={domain.id}>
+              <div className="domainMain"><div><strong>{domain.hostname}</strong><small>{domain.service_name} · {nodes.find(node=>node.id===domain.node_id)?.name??domain.node_id.slice(0,8)}</small></div><span className={`status ${domain.status.toLowerCase()}`}>{domain.status}</span></div>
+              {domain.last_error&&<p className="domainError">{domain.last_error}</p>}
+              <div className="domainActions">{domain.status==="ACTIVE"?<a href={`https://${domain.hostname}`} target="_blank" rel="noreferrer">Open HTTPS</a>:domain.status!=="DELETING"?<button type="button" onClick={()=>void reconcileDomain(domain.id)}>Retry</button>:<span>Waiting for Agent cleanup…</span>}<button type="button" className="danger" disabled={domain.status==="DELETING"} onClick={()=>void removeDomain(domain.id)}>Remove</button></div>
+            </article>)}</div>
+            {domainMessage&&<p className="message">{domainMessage}</p>}
           </div>
 
           <div className="card list"><div className="cardTitle"><h2>Deployments</h2><span>live state</span></div>{deployments.length===0?<div className="empty">No deployments yet.</div>:deployments.map(d=><article key={d.id}><div><strong>{d.service_name}</strong><small>{d.source_ref} · {new Date(d.created_at).toLocaleString()}</small></div><span className={`status ${d.status.toLowerCase()}`}>{d.status}</span></article>)}</div>
