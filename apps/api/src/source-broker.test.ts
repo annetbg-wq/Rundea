@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { canonicalGitHubRepository, validateSourceDelivery } from "./source-broker";
+import { canonicalGitHubRepository, readResponseBodyWithLimit, validateSourceDelivery } from "./source-broker";
 
 test("canonicalGitHubRepository accepts strict GitHub clone URLs", () => {
   assert.deepEqual(canonicalGitHubRepository("https://github.com/OpenAI/openai.git"), {
@@ -29,4 +29,14 @@ test("broker delivery requires an exact commit", () => {
   assert.equal(validateSourceDelivery("broker", sha), "BROKER");
   assert.throws(() => validateSourceDelivery("broker", "main"));
   assert.throws(() => validateSourceDelivery("other", sha));
+});
+
+test("source archive body is rejected as soon as the streaming limit is exceeded", async () => {
+  const response = new Response(new Uint8Array([1, 2, 3, 4]));
+  await assert.rejects(() => readResponseBodyWithLimit(response, 3), /exceeds v0 compressed size limit/);
+});
+
+test("source archive body rejects empty responses", async () => {
+  const response = new Response(new Uint8Array());
+  await assert.rejects(() => readResponseBodyWithLimit(response, 3), /source archive is empty/);
 });
