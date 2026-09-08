@@ -76,6 +76,18 @@ function parseMinutes(value: unknown): number {
   return minutes;
 }
 
+function metricPoint(row: Record<string, unknown>, sampleCount: number) {
+  return {
+    at: new Date(String(row.sampled_at)).toISOString(),
+    cpuPercent: Number(row.cpu_percent),
+    memoryUsageBytes: Math.round(Number(row.memory_usage_bytes)),
+    memoryLimitBytes: Number(row.memory_limit_bytes),
+    networkRxBytes: Number(row.network_rx_bytes),
+    networkTxBytes: Number(row.network_tx_bytes),
+    sampleCount,
+  };
+}
+
 export function registerRuntimeMetricRoutes(app: FastifyInstance, pool: Pool, requireControl: RequireControl): void {
   app.get<{ Params: { id: string }; Querystring: { minutes?: string } }>(
     "/v0/deployments/:id/metrics",
@@ -95,33 +107,35 @@ export function registerRuntimeMetricRoutes(app: FastifyInstance, pool: Pool, re
       const targetPoints = 240;
       const rawBucket = Math.ceil((minutes * 60) / targetPoints);
       const bucketSeconds = Math.max(15, Math.ceil(rawBucket / 15) * 15);
-      const result = await pool.query(
-        `SELECT
-           date_bin(make_interval(secs => $2::int), sampled_at, timestamptz '1970-01-01 00:00:00+00') AS sampled_at,
-           avg(cpu_percent)::double precision AS cpu_percent,
-           avg(memory_usage_bytes)::double precision AS memory_usage_bytes,
-           max(memory_limit_bytes) AS memory_limit_bytes,
-           max(network_rx_bytes) AS network_rx_bytes,
-           max(network_tx_bytes) AS network_tx_bytes,
-           count(*)::int AS sample_count
-         FROM runtime_metrics
-        WHERE deployment_id=$1
-          AND sampled_at >= now() - make_interval(mins => $3::int)
-        GROUP BY 1
-        ORDER BY 1 ASC`,
-        [request.params.id, bucketSeconds, minutes],
-      );
+      const [seriesResult, latestResult] = await Promise.all([
+        pool.query(
+          `SELECT
+             date_bin(make_interval(secs => $2::int), sampled_at, timestamptz '1970-01-01 00:00:00+00') AS sampled_at,
+             avg(cpu_percent)::double precision AS cpu_percent,
+             avg(memory_usage_bytes)::double precision AS memory_usage_bytes,
+             max(memory_limit_bytes) AS memory_limit_bytes,
+             max(network_rx_bytes) AS network_rx_bytes,
+             max(network_tx_bytes) AS network_tx_bytes,
+             count(*)::int AS sample_count
+           FROM runtime_metrics
+          WHERE deployment_id=$1
+            AND sampled_at >= now() - make_interval(mins => $3::int)
+          GROUP BY 1
+          ORDER BY 1 ASC`,
+          [request.params.id, bucketSeconds, minutes],
+        ),
+        pool.query(
+          `SELECT sampled_at,cpu_percent,memory_usage_bytes,memory_limit_bytes,network_rx_bytes,network_tx_bytes
+             FROM runtime_metrics
+            WHERE deployment_id=$1
+            ORDER BY sampled_at DESC,id DESC
+            LIMIT 1`,
+          [request.params.id],
+        ),
+      ]);
 
-      const points = result.rows.map((row) => ({
-        at: new Date(row.sampled_at).toISOString(),
-        cpuPercent: Number(row.cpu_percent),
-        memoryUsageBytes: Math.round(Number(row.memory_usage_bytes)),
-        memoryLimitBytes: Number(row.memory_limit_bytes),
-        networkRxBytes: Number(row.network_rx_bytes),
-        networkTxBytes: Number(row.network_tx_bytes),
-        sampleCount: Number(row.sample_count),
-      }));
-      const latest = points.at(-1) ?? null;
+      const points = seriesResult.rows.map((row) => metricPoint(row, Number(row.sample_count)));
+      const latest = latestResult.rowCount === 1 ? metricPoint(latestResult.rows[0], 1) : null;
       return {
         deploymentId: request.params.id,
         nodeId: deployment.rows[0].node_id,
