@@ -242,11 +242,11 @@ func runDeployment(cfg config, w *writer, cmd deployCommand) {
 		return
 	}
 
-	if err := w.status(cmd.DeploymentID, "BUILDING", "cloning source", ""); err != nil {
+	if err := w.status(cmd.DeploymentID, "BUILDING", "checking out source", ""); err != nil {
 		return
 	}
-	if err := runStreaming(ctx, w, cmd.DeploymentID, "build", "git", "clone", "--depth", "1", "--branch", cmd.Source.Ref, "--single-branch", cmd.Source.Repository, sourceDir); err != nil {
-		fail(fmt.Errorf("git clone: %w", err))
+	if err := cloneSource(ctx, w, cmd.DeploymentID, cmd.Source.Repository, cmd.Source.Ref, sourceDir); err != nil {
+		fail(fmt.Errorf("source checkout: %w", err))
 		return
 	}
 	sourceSHA, err := sourceCommitSHA(ctx, sourceDir)
@@ -339,6 +339,11 @@ func validateCommand(cmd deployCommand) error {
 	repoURL, err := url.Parse(cmd.Source.Repository)
 	if err != nil || repoURL.Scheme != "https" || !strings.EqualFold(repoURL.Hostname(), "github.com") || repoURL.User != nil {
 		return errors.New("source repository must be an HTTPS github.com URL without embedded credentials")
+	}
+	if !isFullGitCommit(cmd.Source.Ref) {
+		if err := validateNamedGitRef(cmd.Source.Ref); err != nil {
+			return err
+		}
 	}
 	if cmd.Source.Dockerfile != "" {
 		cleanDockerfile := filepath.Clean(cmd.Source.Dockerfile)
