@@ -1,0 +1,35 @@
+.metricsPanel.metricsLiveMounted { min-height: 520px; overflow: hidden; }
+.metricsPanel.metricsLiveMounted > :not(.runtimeMetricsLive) { display: none; }
+.runtimeMetricsLive { display: flex; flex-direction: column; gap: 18px; min-height: 100%; }
+.runtimeMetricsHeader { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+.runtimeMetricsHeader h2 { margin: 5px 0 4px; font-size: 20px; }
+.runtimeMetricsHeader p { margin: 0; color: var(--muted, #89909f); font-size: 13px; }
+.runtimeMetricsEyebrow { color: #7f8795; font-size: 10px; font-weight: 800; letter-spacing: .16em; }
+.runtimeFreshness { display: inline-flex; align-items: center; gap: 7px; border: 1px solid rgba(255,255,255,.1); border-radius: 999px; padding: 6px 9px; font-size: 10px; font-weight: 800; letter-spacing: .08em; }
+.runtimeFreshness i { width: 7px; height: 7px; border-radius: 50%; background: currentColor; box-shadow: 0 0 10px currentColor; }
+.runtimeFreshness.live { color: #63d69b; }
+.runtimeFreshness.stale { color: #e9a55f; }
+.runtimeControls { display: flex; align-items: flex-end; justify-content: space-between; gap: 12px; }
+.runtimeControls label { flex: 1; display: grid; gap: 6px; color: #8d94a2; font-size: 11px; }
+.runtimeControls select { width: 100%; min-width: 0; border: 1px solid rgba(255,255,255,.1); background: rgba(255,255,255,.035); color: inherit; border-radius: 8px; padding: 9px 10px; }
+.runtimeWindows { display: flex; gap: 4px; padding: 3px; border: 1px solid rgba(255,255,255,.08); border-radius: 8px; background: rgba(255,255,255,.025); }
+.runtimeWindows button { border: 0; background: transparent; color: #8d94a2; border-radius: 6px; padding: 6px 9px; cursor: pointer; font-size: 11px; }
+.runtimeWindows button.active { background: rgba(255,255,255,.09); color: #fff; }
+.runtimeMetricCards { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 8px; }
+.runtimeMetricCards > div { display: grid; gap: 5px; min-width: 0; border: 1px solid rgba(255,255,255,.08); border-radius: 10px; padding: 12px; background: rgba(255,255,255,.025); }
+.runtimeMetricCards span { color: #8c93a0; font-size: 11px; }
+.runtimeMetricCards strong { font-size: 21px; line-height: 1.05; overflow: hidden; text-overflow: ellipsis; }
+.runtimeMetricCards small { color: #717887; font-size: 10px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.runtimeCharts { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.runtimeCharts > div { min-width: 0; border: 1px solid rgba(255,255,255,.08); border-radius: 10px; padding: 10px; background: linear-gradient(180deg,rgba(255,255,255,.025),rgba(255,255,255,.01)); }
+.runtimeChartLabel { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; font-size: 11px; color: #8b92a0; }
+.runtimeChartLabel strong { color: #e7e9ed; font-size: 12px; }
+.runtimeSparkline { width: 100%; height: 76px; margin-top: 7px; overflow: visible; }
+.runtimeSparkline path { vector-effect: non-scaling-stroke; fill: none; }
+.runtimeSparkline .sparkGrid { stroke: rgba(255,255,255,.08); stroke-width: 1; }
+.runtimeSparkline .sparkValue { stroke: currentColor; color: #9a8cff; stroke-width: 1.75; stroke-linejoin: round; stroke-linecap: round; }
+.runtimeNoData { display: grid; place-items: center; min-height: 210px; border: 1px dashed rgba(255,255,255,.1); border-radius: 10px; color: #858c99; font-size: 12px; text-align: center; padding: 18px; }
+.runtimeNoData.error { color: #e58b8b; }
+.runtimeMetricsFooter { margin-top: auto; display: flex; justify-content: space-between; gap: 14px; border-top: 1px solid rgba(255,255,255,.07); padding-top: 12px; color: #6f7684; font-size: 10px; }
+.runtimeMetricsFooter span:last-child { text-align: right; max-width: 65%; }
+@media (max-width: 1050px) { .runtimeMetricCards { grid-template-columns: 1fr; } .runtimeCharts { grid-template-columns: 1fr; } .runtimeControls { align-items: stretch; flex-direction: column; } .runtimeWindows { align-self: flex-start; } }
