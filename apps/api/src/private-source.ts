@@ -80,9 +80,6 @@ function githubApiBase(): URL {
 
 async function installationToken(installationId: string, repositoryFullName: string): Promise<string> {
   const base = githubApiBase();
-  const testToken = process.env.RUNDEA_GITHUB_TEST_INSTALLATION_TOKEN;
-  if (base.origin !== "https://api.github.com" && testToken) return testToken;
-
   const appId = process.env.RUNDEA_GITHUB_APP_ID?.trim();
   const privateKey = process.env.RUNDEA_GITHUB_APP_PRIVATE_KEY;
   if (!appId || !privateKey) throw new Error("GitHub App credentials are not configured on the Control Plane");
