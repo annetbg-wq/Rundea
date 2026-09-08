@@ -25,3 +25,5 @@ CREATE TABLE IF NOT EXISTS node_ingress_reconciliations (
 
 CREATE INDEX IF NOT EXISTS node_ingress_reconciliations_node_created_idx
   ON node_ingress_reconciliations(node_id, created_at DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS node_ingress_one_running_idx
+  ON node_ingress_reconciliations(node_id) WHERE status='RUNNING';
