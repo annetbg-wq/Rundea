@@ -7,6 +7,7 @@ import type { NodeCommandSocket } from "./node-qualification";
 type ControlPreHandler = (request: FastifyRequest, reply: FastifyReply) => Promise<void>;
 const serviceNamePattern = /^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/;
 const hostnamePattern = /^(?=.{4,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
+const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 export function normalizeDomainHostname(value: string): string {
   return value.trim().toLowerCase().replace(/\.$/, "");
@@ -18,11 +19,22 @@ export function validateDomainHostname(value: string): string {
   return hostname;
 }
 
-export async function reconcileNodeIngress(pool: Pool, sockets: Map<string, NodeCommandSocket>, nodeId: string): Promise<boolean> {
-  const routes = await pool.query(
-    `SELECT d.hostname, active.host_port
+function validUuid(value: string): boolean {
+  return uuidPattern.test(value);
+}
+
+type DesiredDomainRow = {
+  id: string;
+  hostname: string;
+  service_name: string;
+  host_port: number | null;
+};
+
+async function desiredDomainRows(pool: Pool, nodeId: string): Promise<DesiredDomainRow[]> {
+  const result = await pool.query(
+    `SELECT d.id,d.hostname,d.service_name,active.host_port
        FROM service_domains d
-       JOIN LATERAL (
+       LEFT JOIN LATERAL (
          SELECT host_port
            FROM deployments
           WHERE service_name=d.service_name AND node_id=d.node_id AND status='READY'
@@ -33,19 +45,44 @@ export async function reconcileNodeIngress(pool: Pool, sockets: Map<string, Node
       ORDER BY d.hostname ASC`,
     [nodeId],
   );
+  return result.rows as DesiredDomainRow[];
+}
+
+export async function reconcileNodeIngress(pool: Pool, sockets: Map<string, NodeCommandSocket>, nodeId: string): Promise<boolean> {
+  const rows = await desiredDomainRows(pool, nodeId);
+  const routable = rows.filter((row) => Number.isInteger(row.host_port));
   const reconciliationId = randomUUID();
-  await pool.query(
-    `UPDATE service_domains
-        SET status='CONFIGURING', reconciliation_id=$2, last_error=NULL, verified_at=NULL, updated_at=now()
-      WHERE node_id=$1`,
-    [nodeId, reconciliationId],
-  );
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query(
+      `UPDATE service_domains
+          SET status='PENDING', reconciliation_id=NULL,
+              last_error='service has no READY deployment on this node', verified_at=NULL, updated_at=now()
+        WHERE node_id=$1`,
+      [nodeId],
+    );
+    if (routable.length > 0) {
+      await client.query(
+        `UPDATE service_domains
+            SET status='CONFIGURING', reconciliation_id=$2, last_error=NULL, verified_at=NULL, updated_at=now()
+          WHERE node_id=$1 AND id = ANY($3::uuid[])`,
+        [nodeId, reconciliationId, routable.map((row) => row.id)],
+      );
+    }
+    await client.query("COMMIT");
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
 
   const socket = sockets.get(nodeId);
   if (!socket) {
     await pool.query(
       `UPDATE service_domains
-          SET status='PENDING', last_error='node agent is not connected', updated_at=now()
+          SET status='PENDING', reconciliation_id=NULL, last_error='node agent is not connected', updated_at=now()
         WHERE node_id=$1 AND reconciliation_id=$2`,
       [nodeId, reconciliationId],
     );
@@ -55,7 +92,7 @@ export async function reconcileNodeIngress(pool: Pool, sockets: Map<string, Node
   const command: AgentCommand = {
     type: "reconcileIngress",
     reconciliationId,
-    routes: routes.rows.map((row) => ({ hostname: row.hostname, hostPort: row.host_port })),
+    routes: routable.map((row) => ({ hostname: row.hostname, hostPort: row.host_port as number })),
   };
   try {
     socket.send(JSON.stringify(command));
@@ -63,7 +100,7 @@ export async function reconcileNodeIngress(pool: Pool, sockets: Map<string, Node
   } catch {
     await pool.query(
       `UPDATE service_domains
-          SET status='FAILED', last_error='ingress command could not be sent', updated_at=now()
+          SET status='FAILED', reconciliation_id=NULL, last_error='ingress command could not be sent', updated_at=now()
         WHERE node_id=$1 AND reconciliation_id=$2`,
       [nodeId, reconciliationId],
     );
@@ -71,12 +108,34 @@ export async function reconcileNodeIngress(pool: Pool, sockets: Map<string, Node
   }
 }
 
+export async function reconcileServiceDomainsAfterReady(
+  pool: Pool,
+  sockets: Map<string, NodeCommandSocket>,
+  serviceName: string,
+  readyNodeId: string,
+): Promise<void> {
+  const oldNodes = await pool.query(
+    "SELECT DISTINCT node_id FROM service_domains WHERE service_name=$1 AND node_id<>$2",
+    [serviceName, readyNodeId],
+  );
+  await pool.query(
+    `UPDATE service_domains
+        SET node_id=$2,status='PENDING',reconciliation_id=NULL,last_error='service deployment moved to another node',verified_at=NULL,updated_at=now()
+      WHERE service_name=$1 AND node_id<>$2`,
+    [serviceName, readyNodeId],
+  );
+  for (const row of oldNodes.rows) {
+    await reconcileNodeIngress(pool, sockets, row.node_id);
+  }
+  await reconcileNodeIngress(pool, sockets, readyNodeId);
+}
+
 export async function recordIngressResult(
   pool: Pool,
   nodeId: string,
   event: Extract<AgentEvent, { type: "ingress" }>,
 ): Promise<void> {
-  if (!event.reconciliationId || !Array.isArray(event.routes) || event.routes.length > 100) throw new Error("invalid ingress result");
+  if (!validUuid(event.reconciliationId) || !Array.isArray(event.routes) || event.routes.length > 100) throw new Error("invalid ingress result");
   const known = await pool.query(
     "SELECT hostname FROM service_domains WHERE node_id=$1 AND reconciliation_id=$2 ORDER BY hostname",
     [nodeId, event.reconciliationId],
@@ -98,12 +157,14 @@ export async function recordIngressResult(
   try {
     await client.query("BEGIN");
     for (const route of event.routes) {
-      await client.query(
+      const updated = await client.query(
         `UPDATE service_domains
-            SET status=$4, last_error=$5, verified_at=CASE WHEN $4='ACTIVE' THEN now() ELSE NULL END, updated_at=now()
+            SET status=$4, reconciliation_id=NULL, last_error=$5,
+                verified_at=CASE WHEN $4='ACTIVE' THEN now() ELSE NULL END, updated_at=now()
           WHERE node_id=$1 AND reconciliation_id=$2 AND hostname=$3`,
         [nodeId, event.reconciliationId, route.hostname, route.ok ? "ACTIVE" : "FAILED", route.error ?? null],
       );
+      if (updated.rowCount !== 1) throw new Error("ingress route result lost reconciliation ownership");
     }
     await client.query("COMMIT");
   } catch (error) {
@@ -141,7 +202,7 @@ export function registerDomainRoutes(
         return reply.code(400).send({ error: error instanceof Error ? error.message : "invalid hostname" });
       }
       const deployment = await pool.query(
-        `SELECT node_id,host_port
+        `SELECT node_id
            FROM deployments
           WHERE service_name=$1 AND status='READY'
           ORDER BY updated_at DESC, created_at DESC LIMIT 1`,
@@ -172,8 +233,9 @@ export function registerDomainRoutes(
     "/v0/domains/:id/reconcile",
     { preHandler: requireControl },
     async (request, reply) => {
-      const domain = await pool.query("SELECT node_id FROM service_domains WHERE id=$1", [request.params.id]).catch(() => null);
-      if (!domain || domain.rowCount !== 1) return reply.code(404).send({ error: "domain not found" });
+      if (!validUuid(request.params.id)) return reply.code(400).send({ error: "invalid domain id" });
+      const domain = await pool.query("SELECT node_id FROM service_domains WHERE id=$1", [request.params.id]);
+      if (domain.rowCount !== 1) return reply.code(404).send({ error: "domain not found" });
       const sent = await reconcileNodeIngress(pool, sockets, domain.rows[0].node_id);
       return reply.code(sent ? 202 : 409).send({ status: sent ? "CONFIGURING" : "PENDING" });
     },
@@ -183,8 +245,9 @@ export function registerDomainRoutes(
     "/v0/domains/:id",
     { preHandler: requireControl },
     async (request, reply) => {
-      const result = await pool.query("DELETE FROM service_domains WHERE id=$1 RETURNING node_id", [request.params.id]).catch(() => null);
-      if (!result || result.rowCount !== 1) return reply.code(404).send({ error: "domain not found" });
+      if (!validUuid(request.params.id)) return reply.code(400).send({ error: "invalid domain id" });
+      const result = await pool.query("DELETE FROM service_domains WHERE id=$1 RETURNING node_id", [request.params.id]);
+      if (result.rowCount !== 1) return reply.code(404).send({ error: "domain not found" });
       await reconcileNodeIngress(pool, sockets, result.rows[0].node_id);
       return reply.code(204).send();
     },
