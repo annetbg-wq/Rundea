@@ -53,7 +53,7 @@ export async function recordRuntimeMetric(pool: Pool, nodeId: string, rawEvent: 
      )
      SELECT id,$2,now(),$3,$4,$5,$6,$7
        FROM deployments
-      WHERE id=$1 AND node_id=$2 AND status='READY'`,
+      WHERE id=$1 AND node_id=$2 AND status IN ('DEPLOYING','HEALTHCHECK','READY')`,
     [
       event.deploymentId,
       nodeId,
@@ -64,7 +64,7 @@ export async function recordRuntimeMetric(pool: Pool, nodeId: string, rawEvent: 
       event.networkTxBytes,
     ],
   );
-  if (inserted.rowCount !== 1) throw new Error("runtime metric rejected for authenticated node or deployment state");
+  if (inserted.rowCount !== 1) throw new Error("runtime metric rejected for authenticated node or inactive deployment");
   await maybeCleanup(pool).catch(() => undefined);
 }
 
