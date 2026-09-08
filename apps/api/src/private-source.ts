@@ -1,17 +1,22 @@
-import { createSign, randomUUID } from "node:crypto";
+import { createSign } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { Pool } from "pg";
-import { createOpaqueToken, equalTokenHash, hashToken } from "@rundea/crypto";
+import { equalTokenHash, hashToken } from "@rundea/crypto";
 import { canonicalGitHubRepository } from "./github-autodeploy";
 
 type RequireControl = (request: FastifyRequest, reply: FastifyReply) => Promise<void>;
 
-export type PrivateSourceAccess = {
-  kind: "rundeaGrant";
-  grantId: string;
-  token: string;
+type SourceFetch = {
+  repositoryFullName: string;
+  sourceCommitSha: string;
+  installationId: string;
 };
+
+type SourceFetchDecision =
+  | { kind: "public" }
+  | { kind: "denied"; reason: "unauthorized" | "inactive" | "consumed" | "expired" | "busy" | "not-exact" }
+  | { kind: "private"; fetch: SourceFetch };
 
 const fullCommitPattern = /^[0-9a-f]{40}$/;
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -122,85 +127,79 @@ async function fetchPrivateArchive(installationId: string, repositoryFullName: s
   return buffer;
 }
 
-export async function preparePrivateSourceAccess(
-  pool: Pool,
-  deploymentId: string,
-  nodeId: string,
-  sourceRepository: string,
-  sourceRef: string,
-): Promise<PrivateSourceAccess | undefined> {
-  await ensurePrivateSourceSchema(pool);
-  const repository = canonicalGitHubRepository(sourceRepository);
-  const mapping = await pool.query(
-    "SELECT installation_id::text AS installation_id FROM github_repository_installations WHERE repository_full_name=$1",
-    [repository.fullName],
-  );
-  if (mapping.rowCount !== 1) return undefined;
-  if (!fullCommitPattern.test(sourceRef)) throw new Error("private GitHub source requires an exact 40-hex commit SHA");
-
-  const grantId = randomUUID();
-  const token = createOpaqueToken();
-  await pool.query(
-    `INSERT INTO source_grants(id,deployment_id,node_id,token_hash,repository_full_name,source_commit_sha,expires_at)
-     VALUES($1,$2,$3,$4,$5,$6,now()+interval '5 minutes')
-     ON CONFLICT(deployment_id) DO UPDATE SET
-       id=EXCLUDED.id,
-       node_id=EXCLUDED.node_id,
-       token_hash=EXCLUDED.token_hash,
-       repository_full_name=EXCLUDED.repository_full_name,
-       source_commit_sha=EXCLUDED.source_commit_sha,
-       expires_at=EXCLUDED.expires_at,
-       lease_until=NULL,
-       consumed_at=NULL,
-       created_at=now()`,
-    [grantId, deploymentId, nodeId, hashToken(token), repository.fullName, sourceRef.toLowerCase()],
-  );
-  return { kind: "rundeaGrant", grantId, token };
-}
-
-async function beginGrantFetch(
-  pool: Pool,
-  grantId: string,
-  nodeId: string,
-  nodeToken: string,
-  grantToken: string,
-): Promise<{ repositoryFullName: string; sourceCommitSha: string; installationId: string } | null> {
+async function beginSourceFetch(pool: Pool, deploymentId: string, nodeId: string, nodeToken: string): Promise<SourceFetchDecision> {
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
-    const result = await client.query(
-      `SELECT g.node_id,g.token_hash,g.repository_full_name,g.source_commit_sha,g.expires_at,g.lease_until,g.consumed_at,
-              n.token_hash AS node_token_hash,i.installation_id::text AS installation_id
-         FROM source_grants g
-         JOIN nodes n ON n.id=g.node_id
-         JOIN github_repository_installations i ON i.repository_full_name=g.repository_full_name
-        WHERE g.id=$1
-        FOR UPDATE OF g`,
-      [grantId],
+    const deployment = await client.query(
+      `SELECT d.id,d.node_id,d.source_repository,d.source_ref,d.status,n.token_hash AS node_token_hash
+         FROM deployments d JOIN nodes n ON n.id=d.node_id
+        WHERE d.id=$1
+        FOR UPDATE OF d`,
+      [deploymentId],
     );
-    if (result.rowCount !== 1) {
+    if (deployment.rowCount !== 1) {
       await client.query("ROLLBACK");
-      return null;
+      return { kind: "denied", reason: "unauthorized" };
     }
-    const row = result.rows[0];
-    const authorized =
-      row.node_id === nodeId &&
-      equalTokenHash(row.node_token_hash, hashToken(nodeToken)) &&
-      equalTokenHash(row.token_hash, hashToken(grantToken));
-    if (!authorized || row.consumed_at || new Date(row.expires_at).getTime() <= Date.now()) {
+    const row = deployment.rows[0];
+    if (row.node_id !== nodeId || !equalTokenHash(row.node_token_hash, hashToken(nodeToken))) {
       await client.query("ROLLBACK");
-      return null;
+      return { kind: "denied", reason: "unauthorized" };
     }
-    if (row.lease_until && new Date(row.lease_until).getTime() > Date.now()) {
+    if (row.status !== "BUILDING") {
       await client.query("ROLLBACK");
-      throw new Error("source grant is already being consumed");
+      return { kind: "denied", reason: "inactive" };
     }
-    await client.query("UPDATE source_grants SET lease_until=now()+interval '2 minutes' WHERE id=$1", [grantId]);
+
+    const repository = canonicalGitHubRepository(row.source_repository);
+    const mapping = await client.query(
+      "SELECT installation_id::text AS installation_id FROM github_repository_installations WHERE repository_full_name=$1",
+      [repository.fullName],
+    );
+    if (mapping.rowCount !== 1) {
+      await client.query("ROLLBACK");
+      return { kind: "public" };
+    }
+    const sourceCommitSha = String(row.source_ref).toLowerCase();
+    if (!fullCommitPattern.test(sourceCommitSha)) {
+      await client.query("ROLLBACK");
+      return { kind: "denied", reason: "not-exact" };
+    }
+
+    await client.query(
+      `INSERT INTO source_fetches(deployment_id,node_id,repository_full_name,source_commit_sha,expires_at)
+       VALUES($1,$2,$3,$4,now()+interval '5 minutes')
+       ON CONFLICT(deployment_id) DO NOTHING`,
+      [deploymentId, nodeId, repository.fullName, sourceCommitSha],
+    );
+    const fetchRow = await client.query(
+      `SELECT expires_at,lease_until,consumed_at
+         FROM source_fetches WHERE deployment_id=$1 FOR UPDATE`,
+      [deploymentId],
+    );
+    const state = fetchRow.rows[0];
+    if (state.consumed_at) {
+      await client.query("ROLLBACK");
+      return { kind: "denied", reason: "consumed" };
+    }
+    if (new Date(state.expires_at).getTime() <= Date.now()) {
+      await client.query("ROLLBACK");
+      return { kind: "denied", reason: "expired" };
+    }
+    if (state.lease_until && new Date(state.lease_until).getTime() > Date.now()) {
+      await client.query("ROLLBACK");
+      return { kind: "denied", reason: "busy" };
+    }
+    await client.query("UPDATE source_fetches SET lease_until=now()+interval '2 minutes' WHERE deployment_id=$1", [deploymentId]);
     await client.query("COMMIT");
     return {
-      repositoryFullName: row.repository_full_name,
-      sourceCommitSha: row.source_commit_sha,
-      installationId: row.installation_id,
+      kind: "private",
+      fetch: {
+        repositoryFullName: repository.fullName,
+        sourceCommitSha,
+        installationId: mapping.rows[0].installation_id,
+      },
     };
   } catch (error) {
     await client.query("ROLLBACK").catch(() => undefined);
@@ -210,8 +209,8 @@ async function beginGrantFetch(
   }
 }
 
-async function clearGrantLease(pool: Pool, grantId: string): Promise<void> {
-  await pool.query("UPDATE source_grants SET lease_until=NULL WHERE id=$1 AND consumed_at IS NULL", [grantId]);
+async function clearFetchLease(pool: Pool, deploymentId: string): Promise<void> {
+  await pool.query("UPDATE source_fetches SET lease_until=NULL WHERE deployment_id=$1 AND consumed_at IS NULL", [deploymentId]);
 }
 
 export function registerPrivateSourceRoutes(app: FastifyInstance, pool: Pool, requireControl: RequireControl): void {
@@ -263,36 +262,43 @@ export function registerPrivateSourceRoutes(app: FastifyInstance, pool: Pool, re
     },
   );
 
-  app.get<{ Params: { id: string } }>("/v0/source-grants/:id/archive", async (request, reply) => {
+  app.get<{ Params: { id: string } }>("/v0/deployments/:id/source-archive", async (request, reply) => {
     await ready;
-    if (!uuidPattern.test(request.params.id)) return reply.code(400).send({ error: "invalid source grant" });
+    if (!uuidPattern.test(request.params.id)) return reply.code(400).send({ error: "invalid deployment id" });
     const nodeId = singleHeader(request.headers["x-rundea-node-id"]);
     const nodeToken = bearer(request.headers.authorization);
-    const grantToken = singleHeader(request.headers["x-rundea-source-grant"]);
-    if (!nodeId || !nodeToken || !grantToken) return reply.code(401).send({ error: "source grant credentials are required" });
+    if (!nodeId || !nodeToken) return reply.code(401).send({ error: "node credentials are required" });
 
-    let grant;
+    let decision: SourceFetchDecision;
     try {
-      grant = await beginGrantFetch(pool, request.params.id, nodeId, nodeToken, grantToken);
+      decision = await beginSourceFetch(pool, request.params.id, nodeId, nodeToken);
     } catch (error) {
-      request.log.warn({ err: error }, "source grant is busy");
-      return reply.code(409).send({ error: "source grant is already being consumed" });
+      request.log.error({ err: error }, "private source authorization failed");
+      return reply.code(500).send({ error: "private source authorization failed" });
     }
-    if (!grant) return reply.code(401).send({ error: "invalid or expired source grant" });
+    if (decision.kind === "public") return reply.code(404).send({ brokered: false });
+    if (decision.kind === "denied") {
+      const status = decision.reason === "busy" ? 409 : decision.reason === "consumed" || decision.reason === "expired" ? 410 : decision.reason === "not-exact" || decision.reason === "inactive" ? 409 : 401;
+      return reply.code(status).send({ error: `private source fetch denied: ${decision.reason}` });
+    }
 
     try {
-      const archive = await fetchPrivateArchive(grant.installationId, grant.repositoryFullName, grant.sourceCommitSha);
+      const archive = await fetchPrivateArchive(
+        decision.fetch.installationId,
+        decision.fetch.repositoryFullName,
+        decision.fetch.sourceCommitSha,
+      );
       const consumed = await pool.query(
-        "UPDATE source_grants SET consumed_at=now(),lease_until=NULL WHERE id=$1 AND node_id=$2 AND consumed_at IS NULL RETURNING id",
+        "UPDATE source_fetches SET consumed_at=now(),lease_until=NULL WHERE deployment_id=$1 AND node_id=$2 AND consumed_at IS NULL RETURNING deployment_id",
         [request.params.id, nodeId],
       );
-      if (consumed.rowCount !== 1) throw new Error("source grant could not be consumed atomically");
+      if (consumed.rowCount !== 1) throw new Error("private source fetch could not be consumed atomically");
       reply.header("content-type", "application/gzip");
       reply.header("cache-control", "no-store");
-      reply.header("x-rundea-source-sha", grant.sourceCommitSha);
+      reply.header("x-rundea-source-sha", decision.fetch.sourceCommitSha);
       return reply.send(archive);
     } catch (error) {
-      await clearGrantLease(pool, request.params.id).catch(() => undefined);
+      await clearFetchLease(pool, request.params.id).catch(() => undefined);
       request.log.error({ err: error }, "private GitHub source fetch failed");
       return reply.code(502).send({ error: "private GitHub source could not be fetched" });
     }
