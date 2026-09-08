@@ -1,6 +1,7 @@
 import { spawn, spawnSync } from "node:child_process";
 import { createHmac } from "node:crypto";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -9,9 +10,13 @@ const controlToken = process.env.RUNDEA_CONTROL_TOKEN;
 const agentBinary = process.env.RUNDEA_AGENT_BINARY;
 const githubWebhookSecret = process.env.RUNDEA_GITHUB_WEBHOOK_SECRET;
 const fixtureRepository = "https://github.com/render-examples/express-hello-world.git";
+const privateFixtureRepository = "https://github.com/private/fixture.git";
+const privateFixtureFullName = "private/fixture";
 const fixtureRef = process.env.RUNDEA_ACCEPTANCE_FIXTURE_REF ?? "main";
 const expectedFixtureSha = process.env.RUNDEA_ACCEPTANCE_FIXTURE_SHA ?? "039c34770852fb07cef7f9f0f8534c5de408b207";
 const hostPort = Number(process.env.RUNDEA_ACCEPTANCE_HOST_PORT ?? "18081");
+const fakeGitHubPort = Number(process.env.RUNDEA_ACCEPTANCE_FAKE_GITHUB_PORT ?? "19090");
+const fakeInstallationToken = "acceptance-installation-token";
 const terminal = new Set(["READY", "FAILED", "CANCELLED", "ROLLED_BACK"]);
 const imageIdPattern = /^sha256:[0-9a-f]{64}$/;
 
@@ -19,13 +24,17 @@ if (!controlToken) throw new Error("RUNDEA_CONTROL_TOKEN is required");
 if (!agentBinary) throw new Error("RUNDEA_AGENT_BINARY is required");
 if (!githubWebhookSecret) throw new Error("RUNDEA_GITHUB_WEBHOOK_SECRET is required");
 if (!Number.isInteger(hostPort) || hostPort < 1024 || hostPort > 65535) throw new Error("invalid acceptance host port");
+if (!Number.isInteger(fakeGitHubPort) || fakeGitHubPort < 1024 || fakeGitHubPort > 65535) throw new Error("invalid fake GitHub port");
 
 const headers = { authorization: `Bearer ${controlToken}` };
 const jsonHeaders = { ...headers, "content-type": "application/json" };
 const serviceName = `acceptance-${Date.now().toString(36)}`;
 const workDir = await mkdtemp(join(tmpdir(), "rundea-acceptance-"));
 let agent;
+let nodeToken;
+let fakeGitHub;
 const deploymentIds = [];
+const fakeGitHubStats = { tokenRequests: 0, archiveRequests: 0 };
 
 class FatalPollError extends Error {}
 
@@ -77,6 +86,92 @@ async function waitDeployment(id, label) {
   }, 240_000, 1500);
 }
 
+async function createPrivateFixtureArchive() {
+  const parent = join(workDir, "fake-github");
+  const rootName = `private-fixture-${expectedFixtureSha.slice(0, 12)}`;
+  const root = join(parent, rootName);
+  await mkdir(root, { recursive: true });
+  await writeFile(join(root, "package.json"), JSON.stringify({
+    name: "rundea-private-acceptance-fixture",
+    version: "1.0.0",
+    private: true,
+    scripts: { start: "node index.js" },
+  }, null, 2));
+  await writeFile(join(root, "index.js"), `const http = require("http");\nconst port = Number(process.env.PORT || 3001);\nconst host = process.env.HOST || "0.0.0.0";\nhttp.createServer((_req, res) => { res.writeHead(200, { "content-type": "text/plain" }); res.end("Hello from private Rundea fixture!\\n"); }).listen(port, host);\n`);
+  const archivePath = join(parent, "private-fixture.tar.gz");
+  const tar = spawnSync("tar", ["-czf", archivePath, "-C", parent, rootName], { encoding: "utf8" });
+  if (tar.status !== 0) throw new Error(`failed to build fake GitHub archive: ${tar.stderr}`);
+  return await readFile(archivePath);
+}
+
+function readRequestBody(req) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    let size = 0;
+    req.on("data", (chunk) => {
+      size += chunk.length;
+      if (size > 1024 * 1024) {
+        reject(new Error("fake GitHub request body too large"));
+        req.destroy();
+        return;
+      }
+      chunks.push(chunk);
+    });
+    req.on("end", () => resolve(Buffer.concat(chunks)));
+    req.on("error", reject);
+  });
+}
+
+async function startFakeGitHub() {
+  const archive = await createPrivateFixtureArchive();
+  fakeGitHub = createServer((req, res) => {
+    void (async () => {
+      const url = new URL(req.url ?? "/", `http://127.0.0.1:${fakeGitHubPort}`);
+      if (req.method === "POST" && url.pathname === "/app/installations/4242/access_tokens") {
+        const auth = req.headers.authorization ?? "";
+        const jwt = auth.startsWith("Bearer ") ? auth.slice(7) : "";
+        const parts = jwt.split(".");
+        if (parts.length !== 3) {
+          res.writeHead(401); res.end("invalid app jwt"); return;
+        }
+        let claims;
+        try { claims = JSON.parse(Buffer.from(parts[1], "base64url").toString("utf8")); } catch { claims = null; }
+        if (claims?.iss !== "123456" || typeof claims?.iat !== "number" || typeof claims?.exp !== "number" || claims.exp <= claims.iat) {
+          res.writeHead(401); res.end("invalid app claims"); return;
+        }
+        const raw = await readRequestBody(req);
+        let body;
+        try { body = JSON.parse(raw.toString("utf8")); } catch { body = null; }
+        if (body?.repositories?.length !== 1 || body.repositories[0] !== "fixture" || body?.permissions?.contents !== "read") {
+          res.writeHead(400); res.end("installation token was not least-privilege scoped"); return;
+        }
+        fakeGitHubStats.tokenRequests += 1;
+        res.writeHead(201, { "content-type": "application/json" });
+        res.end(JSON.stringify({ token: fakeInstallationToken, expires_at: new Date(Date.now() + 3600_000).toISOString() }));
+        return;
+      }
+      if (req.method === "GET" && url.pathname === `/repos/${privateFixtureFullName}/tarball/${expectedFixtureSha}`) {
+        if (req.headers.authorization !== `Bearer ${fakeInstallationToken}`) {
+          res.writeHead(401); res.end("installation token missing"); return;
+        }
+        fakeGitHubStats.archiveRequests += 1;
+        res.writeHead(200, { "content-type": "application/gzip", "content-length": String(archive.length) });
+        res.end(archive);
+        return;
+      }
+      res.writeHead(404);
+      res.end("not found");
+    })().catch((error) => {
+      res.writeHead(500);
+      res.end(error instanceof Error ? error.message : String(error));
+    });
+  });
+  await new Promise((resolve, reject) => {
+    fakeGitHub.once("error", reject);
+    fakeGitHub.listen(fakeGitHubPort, "127.0.0.1", resolve);
+  });
+}
+
 async function createDeployment() {
   const body = await request("/v0/deployments", {
     method: "POST",
@@ -95,13 +190,25 @@ async function createDeployment() {
   return body.id;
 }
 
+async function configurePrivateRepository() {
+  const body = await request("/v0/github/repositories", {
+    method: "PUT",
+    headers: jsonHeaders,
+    body: JSON.stringify({ repository: privateFixtureRepository, installationId: "4242" }),
+  });
+  if (body.repository?.repository_full_name !== privateFixtureFullName || body.repository?.installation_id !== "4242") {
+    throw new Error(`unexpected private GitHub repository mapping: ${JSON.stringify(body)}`);
+  }
+}
+
 async function configureAutodeploy() {
+  await configurePrivateRepository();
   const body = await request(`/v0/services/${serviceName}/autodeploy`, {
     method: "PUT",
     headers: jsonHeaders,
     body: JSON.stringify({
       nodeId,
-      repository: fixtureRepository,
+      repository: privateFixtureRepository,
       branch: "main",
       containerPort: 3001,
       hostPort,
@@ -109,7 +216,7 @@ async function configureAutodeploy() {
       enabled: true,
     }),
   });
-  if (body.autodeploy?.repository_full_name !== "render-examples/express-hello-world" || body.autodeploy?.source_branch !== "main") {
+  if (body.autodeploy?.repository_full_name !== privateFixtureFullName || body.autodeploy?.source_branch !== "main") {
     throw new Error(`unexpected autodeploy configuration: ${JSON.stringify(body)}`);
   }
 }
@@ -119,7 +226,7 @@ async function signedPush(deliveryId) {
     ref: "refs/heads/main",
     after: expectedFixtureSha,
     deleted: false,
-    repository: { full_name: "render-examples/express-hello-world" },
+    repository: { full_name: privateFixtureFullName },
   });
   const signature = `sha256=${createHmac("sha256", githubWebhookSecret).update(rawBody).digest("hex")}`;
   const response = await fetch(`${api}/v0/github/webhook`, {
@@ -183,12 +290,22 @@ function assertArtifact(row, label) {
   if (row.healthcheck_path !== "/") throw new Error(`${label} resolved unexpected healthcheck ${row.healthcheck_path}`);
 }
 
-async function assertService(label) {
+async function assertService(label, expectedText) {
   const response = await fetch(`http://127.0.0.1:${hostPort}/`);
   const body = await response.text();
-  if (!response.ok || !body.includes("Hello from Render!")) {
+  if (!response.ok || !body.includes(expectedText)) {
     throw new Error(`${label} service check failed: ${response.status} ${body.slice(0, 160)}`);
   }
+}
+
+async function assertPrivateSourceCannotBeFetchedAgain(deploymentId) {
+  const response = await fetch(`${api}/v0/deployments/${deploymentId}/source-archive`, {
+    headers: { authorization: `Bearer ${nodeToken}`, "x-rundea-node-id": nodeId },
+  });
+  if (![409, 410].includes(response.status)) {
+    throw new Error(`completed private source unexpectedly remained fetchable: HTTP ${response.status}`);
+  }
+  await response.body?.cancel();
 }
 
 async function restart(deploymentId) {
@@ -211,6 +328,7 @@ async function rollback(targetId, label) {
 
 let nodeId;
 try {
+  await startFakeGitHub();
   const health = await fetch(`${api}/health`);
   if (!health.ok) throw new Error(`control plane health returned ${health.status}`);
 
@@ -220,6 +338,7 @@ try {
     body: JSON.stringify({ name: `acceptance-${process.pid}` }),
   });
   nodeId = node.id;
+  nodeToken = node.token;
 
   agent = spawn(agentBinary, [], {
     stdio: ["ignore", "inherit", "inherit"],
@@ -240,30 +359,35 @@ try {
   }, 45_000, 500);
 
   const firstId = await createDeploymentFromPush();
-  const first = await waitDeployment(firstId, "GitHub push deployment");
-  assertArtifact(first, "GitHub push deployment");
-  await assertService("GitHub push deployment");
+  const first = await waitDeployment(firstId, "private GitHub push deployment");
+  assertArtifact(first, "private GitHub push deployment");
+  await assertService("private GitHub push deployment", "Hello from private Rundea fixture!");
+  if (fakeGitHubStats.tokenRequests !== 1 || fakeGitHubStats.archiveRequests !== 1) {
+    throw new Error(`private source did not use exactly one GitHub App token/archive exchange: ${JSON.stringify(fakeGitHubStats)}`);
+  }
+  await assertPrivateSourceCannotBeFetchedAgain(firstId);
 
   await restart(firstId);
-  await assertService("restart");
+  await assertService("restart", "Hello from private Rundea fixture!");
 
   const secondId = await createDeployment();
-  const second = await waitDeployment(secondId, "second deployment");
-  assertArtifact(second, "second deployment");
-  await assertService("second deployment");
+  const second = await waitDeployment(secondId, "public fallback deployment");
+  assertArtifact(second, "public fallback deployment");
+  await assertService("public fallback deployment", "Hello from Render!");
+  if (fakeGitHubStats.archiveRequests !== 1) throw new Error("public deployment unexpectedly used private source broker");
 
-  const rollbackOne = await rollback(firstId, "rollback to first revision");
-  assertArtifact(rollbackOne, "rollback to first revision");
-  await assertService("rollback to first revision");
+  const rollbackOne = await rollback(firstId, "rollback to private revision");
+  assertArtifact(rollbackOne, "rollback to private revision");
+  await assertService("rollback to private revision", "Hello from private Rundea fixture!");
 
   const secondAfterRollback = await deployment(secondId);
   if (secondAfterRollback?.status !== "ROLLED_BACK") {
     throw new Error(`second deployment should be ROLLED_BACK, got ${secondAfterRollback?.status}`);
   }
 
-  const rollbackTwo = await rollback(secondId, "rollback chain to second revision");
-  assertArtifact(rollbackTwo, "rollback chain to second revision");
-  await assertService("rollback chain");
+  const rollbackTwo = await rollback(secondId, "rollback chain to public revision");
+  assertArtifact(rollbackTwo, "rollback chain to public revision");
+  await assertService("rollback chain", "Hello from Render!");
 
   console.log(JSON.stringify({
     ok: true,
@@ -271,12 +395,17 @@ try {
     serviceName,
     fixtureSha: expectedFixtureSha,
     deployments: deploymentIds,
+    fakeGitHub: fakeGitHubStats,
     verified: [
       "agent-online",
       "signed-github-push",
       "github-delivery-idempotency",
       "github-body-replay-protection",
       "github-delivery-observability",
+      "github-app-token-exchange",
+      "private-source-broker",
+      "private-source-not-reusable",
+      "public-git-fallback",
       "exact-source-commit",
       "node-auto-build",
       "artifact-identity",
@@ -295,6 +424,7 @@ try {
     ]);
     if (agent.exitCode === null) agent.kill("SIGKILL");
   }
+  if (fakeGitHub) await new Promise((resolve) => fakeGitHub.close(resolve));
   spawnSync("docker", ["rm", "-f", `rundea-${serviceName}`], { stdio: "ignore" });
   spawnSync("docker", ["rm", "-f", `rundea-${serviceName}-rollback-backup`], { stdio: "ignore" });
   await rm(workDir, { recursive: true, force: true });
