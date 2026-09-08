@@ -471,6 +471,7 @@ app.get("/v0/agent/ws", { websocket: true }, async (socket, request) => {
   socket.on("message", (raw: Buffer) => {
     messageQueue = messageQueue
       .then(async () => {
+        if (sockets.get(nodeId) !== socket) return;
         const event = JSON.parse(raw.toString()) as AgentEvent;
         if (event.type === "heartbeat") {
           await pool.query("UPDATE nodes SET status='ONLINE',last_seen_at=now() WHERE id=$1", [nodeId]);
@@ -511,6 +512,8 @@ app.get("/v0/agent/ws", { websocket: true }, async (socket, request) => {
 
   socket.on("close", async () => {
     if (sockets.get(nodeId) === socket) {
+      await messageQueue;
+      if (sockets.get(nodeId) !== socket) return;
       sockets.delete(nodeId);
       await pool.query("UPDATE nodes SET status='OFFLINE' WHERE id=$1", [nodeId]).catch(() => undefined);
       await failActiveDeploymentsForNode(nodeId, "agent disconnected during deployment").catch((error) => request.log.error(error, "failed to reconcile disconnected deployment"));
