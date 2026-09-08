@@ -179,14 +179,26 @@ func connectAndServe(cfg config) error {
 		if err != nil {
 			return err
 		}
-		var cmd deployCommand
-		if err := json.Unmarshal(payload, &cmd); err != nil {
+		var envelope struct {
+			Type string `json:"type"`
+		}
+		if err := json.Unmarshal(payload, &envelope); err != nil {
 			continue
 		}
-		if cmd.Type != "deploy" {
-			continue
+		switch envelope.Type {
+		case "deploy":
+			var cmd deployCommand
+			if err := json.Unmarshal(payload, &cmd); err != nil {
+				continue
+			}
+			go runDeployment(cfg, w, cmd)
+		case "qualify":
+			var cmd qualifyCommand
+			if err := json.Unmarshal(payload, &cmd); err != nil || cmd.QualificationID == "" || cmd.Profile == "" {
+				continue
+			}
+			go runQualification(w, cmd)
 		}
-		go runDeployment(cfg, w, cmd)
 	}
 }
 

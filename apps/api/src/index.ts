@@ -10,6 +10,11 @@ import { deploymentStatuses } from "@rundea/contracts";
 import { createOpaqueToken, equalTokenHash, hashToken, parseMasterKey } from "@rundea/crypto";
 import { assertTransition } from "@rundea/deployer";
 import {
+  failRunningQualificationsForNode,
+  recordNodeQualification,
+  registerNodeQualificationRoutes,
+} from "./node-qualification";
+import {
   deleteServiceVariable,
   listServiceVariables,
   loadServiceEnvironment,
@@ -33,11 +38,12 @@ const app = Fastify({ logger: true });
 await app.register(cors, { origin: process.env.RUNDEA_WEB_ORIGIN ?? "http://localhost:5173" });
 await app.register(websocket);
 
-for (const migration of ["001_init.sql", "002_service_variables_and_auto_build.sql"]) {
+for (const migration of ["001_init.sql", "002_service_variables_and_auto_build.sql", "003_node_qualification.sql"]) {
   const migrationUrl = new URL(`../migrations/${migration}`, import.meta.url);
   await pool.query(await readFile(migrationUrl, "utf8"));
 }
 await pool.query("UPDATE nodes SET status='OFFLINE'");
+await pool.query("UPDATE node_qualifications SET status='FAILED', completed_at=now() WHERE status='RUNNING'");
 
 const sockets = new Map<string, NodeSocket>();
 const serviceNamePattern = /^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/;
@@ -205,6 +211,8 @@ app.get("/v0/nodes", { preHandler: requireControl }, async () => {
   return result.rows;
 });
 
+registerNodeQualificationRoutes(app, pool, sockets, requireControl);
+
 app.put<{ Params: { serviceName: string }; Body: { variables?: ServiceVariableInput[] } }>(
   "/v0/services/:serviceName/variables",
   { preHandler: requireControl },
@@ -319,6 +327,10 @@ app.get("/v0/agent/ws", { websocket: true }, async (socket, request) => {
         if (["READY", "FAILED", "CANCELLED", "ROLLED_BACK"].includes(event.status)) await dispatchQueued(nodeId);
         return;
       }
+      if (event.type === "qualification") {
+        await recordNodeQualification(pool, nodeId, event);
+        return;
+      }
       if (event.type === "log") {
         await pool.query(
           `INSERT INTO deployment_events(deployment_id,kind,stream,message,created_at) VALUES($1,'LOG',$2,$3,$4)`,
@@ -335,6 +347,7 @@ app.get("/v0/agent/ws", { websocket: true }, async (socket, request) => {
       sockets.delete(nodeId);
       await pool.query("UPDATE nodes SET status='OFFLINE' WHERE id=$1", [nodeId]).catch(() => undefined);
       await failActiveDeploymentsForNode(nodeId, "agent disconnected during deployment").catch((error) => request.log.error(error, "failed to reconcile disconnected deployment"));
+      await failRunningQualificationsForNode(pool, nodeId).catch((error) => request.log.error(error, "failed to reconcile disconnected qualification"));
     }
   });
 });

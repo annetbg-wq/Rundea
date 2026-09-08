@@ -7,6 +7,10 @@ type NodeRow = { id:string; name:string; status:string };
 type Deployment = { id:string; service_name:string; source_ref:string; status:string; created_at:string };
 type VariableDraft = { key:string; value:string; secret:boolean };
 type SavedVariable = { key:string; secret:boolean; value?:string };
+type Probe = { name:string; host:string; port:number; ok:boolean; latencyMs?:number; error?:string };
+type Qualification = { id:string; status:"RUNNING"|"PASSED"|"FAILED"; failure_reason?:string; started_at:string; completed_at?:string; probes:Probe[] };
+
+const probeLabels:Record<string,string> = {"smtp-tls":"SMTP 465","smtp-starttls":"SMTP 587","imap-tls":"IMAP 993"};
 
 function App() {
   const [nodes, setNodes] = useState<NodeRow[]>([]);
@@ -14,6 +18,9 @@ function App() {
   const [message, setMessage] = useState("");
   const [variables, setVariables] = useState<VariableDraft[]>([]);
   const [savedVariables, setSavedVariables] = useState<SavedVariable[]>([]);
+  const [qualificationNodeId, setQualificationNodeId] = useState("");
+  const [qualifications, setQualifications] = useState<Qualification[]>([]);
+  const [qualificationMessage, setQualificationMessage] = useState("");
   const [form, setForm] = useState({ serviceName:"", nodeId:"", sourceRepository:"", sourceRef:"main", dockerfile:"", containerPort:"8080", hostPort:"18080", healthcheckPath:"" });
 
   async function refresh() {
@@ -22,6 +29,29 @@ function App() {
     if (d.ok) setDeployments(await d.json());
   }
   useEffect(() => { void refresh(); const id=setInterval(()=>void refresh(), 2500); return()=>clearInterval(id); }, []);
+
+  async function refreshQualifications(nodeId=qualificationNodeId) {
+    if (!nodeId) { setQualifications([]); return; }
+    const response = await fetch(`${api}/v0/nodes/${encodeURIComponent(nodeId)}/qualifications`);
+    if (!response.ok) return;
+    const body = await response.json() as { qualifications:Qualification[] };
+    setQualifications(body.qualifications);
+  }
+  useEffect(() => {
+    if (!qualificationNodeId) { setQualifications([]); return; }
+    void refreshQualifications(qualificationNodeId);
+    const id=setInterval(()=>void refreshQualifications(qualificationNodeId), 2500);
+    return()=>clearInterval(id);
+  }, [qualificationNodeId]);
+
+  async function runQualification() {
+    if (!qualificationNodeId) return;
+    setQualificationMessage("Testing real outbound connectivity…");
+    const response = await fetch(`${api}/v0/nodes/${encodeURIComponent(qualificationNodeId)}/qualifications`, {method:"POST"});
+    const body = await response.json();
+    setQualificationMessage(response.ok ? "Qualification started on the selected node." : body.error ?? "Qualification could not start");
+    if (response.ok) void refreshQualifications(qualificationNodeId);
+  }
 
   async function refreshVariables() {
     if (!form.serviceName.trim()) { setSavedVariables([]); return; }
@@ -77,6 +107,9 @@ function App() {
     if (response.ok) void refresh();
   }
 
+  const latestQualification=qualifications[0];
+  const selectedNode=nodes.find(node=>node.id===qualificationNodeId);
+
   return <div className="shell">
     <aside><div className="brand">Rundea</div><nav><button className="active">Deployments</button><button>Projects</button><button>Nodes</button><button>Domains</button></nav><div className="foot">infrastructure, without the tax</div></aside>
     <main>
@@ -102,7 +135,21 @@ function App() {
 
           <button className="deploy" type="submit">Deploy</button>{message && <p className="message">{message}</p>}
         </form>
-        <div className="card list"><div className="cardTitle"><h2>Deployments</h2><span>live state</span></div>{deployments.length===0?<div className="empty">No deployments yet.</div>:deployments.map(d=><article key={d.id}><div><strong>{d.service_name}</strong><small>{d.source_ref} · {new Date(d.created_at).toLocaleString()}</small></div><span className={`status ${d.status.toLowerCase()}`}>{d.status}</span></article>)}</div>
+
+        <div className="rightStack">
+          <div className="card readiness">
+            <div className="cardTitle"><div><h2>Node readiness</h2><p>Prove network access before moving Sendina.</p></div>{latestQualification&&<span className={`status ${latestQualification.status.toLowerCase()}`}>{latestQualification.status}</span>}</div>
+            <label>Node<select value={qualificationNodeId} onChange={e=>{setQualificationNodeId(e.target.value);setQualificationMessage("");}}><option value="">Select node</option>{nodes.map(n=><option key={n.id} value={n.id}>{n.name} · {n.status}</option>)}</select></label>
+            <div className="readinessAction"><div>{selectedNode?<><strong>{selectedNode.name}</strong><small>{selectedNode.status==='ONLINE'?"Agent connected":"Agent offline"}</small></>:<><strong>Sendina egress</strong><small>SMTP 465/587 · IMAP 993</small></>}</div><button type="button" className="qualify" disabled={!qualificationNodeId||selectedNode?.status!=="ONLINE"||latestQualification?.status==="RUNNING"} onClick={()=>void runQualification()}>{latestQualification?.status==="RUNNING"?"Testing…":"Test egress"}</button></div>
+            {latestQualification?<>
+              <div className="probeGrid">{latestQualification.probes.length?latestQualification.probes.map(probe=><div className={`probe ${probe.ok?"pass":"fail"}`} key={probe.name}><div><strong>{probeLabels[probe.name]??probe.name}</strong><small>{probe.host}:{probe.port}</small></div><div className="probeResult"><b>{probe.ok?"PASS":"FAIL"}</b><small>{probe.latencyMs!=null?`${probe.latencyMs} ms`:probe.error??"—"}</small></div></div>):<div className="probePending">{latestQualification.status==="RUNNING"?"Agent is testing the three required routes…":latestQualification.failure_reason??"No probe results returned."}</div>}</div>
+              <div className="qualificationMeta"><span>{latestQualification.status==="PASSED"?"This node passes the current Sendina network gate.":latestQualification.status==="FAILED"?"Do not migrate Sendina to this node yet.":"Qualification is running on the node."}</span><time>{new Date(latestQualification.completed_at??latestQualification.started_at).toLocaleString()}</time></div>
+            </>:<div className="empty compact">No qualification yet. Run the real egress test on an online node.</div>}
+            {qualificationMessage&&<p className="message">{qualificationMessage}</p>}
+          </div>
+
+          <div className="card list"><div className="cardTitle"><h2>Deployments</h2><span>live state</span></div>{deployments.length===0?<div className="empty">No deployments yet.</div>:deployments.map(d=><article key={d.id}><div><strong>{d.service_name}</strong><small>{d.source_ref} · {new Date(d.created_at).toLocaleString()}</small></div><span className={`status ${d.status.toLowerCase()}`}>{d.status}</span></article>)}</div>
+        </div>
       </section>
     </main>
   </div>;
