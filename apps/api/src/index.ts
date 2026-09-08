@@ -22,9 +22,15 @@ import {
   registerNodeQualificationRoutes,
 } from "./node-qualification";
 import {
+  failRunningRuntimeActionsForNode,
+  recordRuntimeAction,
+  registerRuntimeControlRoutes,
+} from "./runtime-controls";
+import {
+  captureDeploymentEnvironment,
   deleteServiceVariable,
   listServiceVariables,
-  loadServiceEnvironment,
+  loadDeploymentEnvironment,
   upsertServiceVariables,
   type ServiceVariableInput,
 } from "./service-variables";
@@ -45,13 +51,20 @@ const app = Fastify({ logger: true });
 await app.register(cors, { origin: process.env.RUNDEA_WEB_ORIGIN ?? "http://localhost:5173" });
 await app.register(websocket);
 
-for (const migration of ["001_init.sql", "002_service_variables_and_auto_build.sql", "003_node_qualification.sql", "004_service_domains.sql"]) {
+for (const migration of [
+  "001_init.sql",
+  "002_service_variables_and_auto_build.sql",
+  "003_node_qualification.sql",
+  "004_service_domains.sql",
+  "005_runtime_controls.sql",
+]) {
   const migrationUrl = new URL(`../migrations/${migration}`, import.meta.url);
   await pool.query(await readFile(migrationUrl, "utf8"));
 }
 await pool.query("UPDATE nodes SET status='OFFLINE'");
 await pool.query("UPDATE node_qualifications SET status='FAILED', failure_reason='control plane restarted during qualification', completed_at=now() WHERE status='RUNNING'");
 await pool.query("UPDATE node_ingress_reconciliations SET status='FAILED',error='control plane restarted during ingress reconciliation',completed_at=now() WHERE status='RUNNING'");
+await pool.query("UPDATE runtime_actions SET status='FAILED',error='control plane restarted during runtime action',completed_at=now() WHERE status='RUNNING'");
 await pool.query(
   `UPDATE service_domains
       SET status=CASE WHEN status='DELETING' THEN 'DELETING' ELSE 'PENDING' END,
@@ -61,6 +74,8 @@ await pool.query(
 
 const sockets = new Map<string, NodeSocket>();
 const serviceNamePattern = /^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/;
+const sourceCommitPattern = /^[0-9a-f]{40}$/;
+const imageIdPattern = /^sha256:[0-9a-f]{64}$/;
 
 function bearer(header: string | undefined): string | null {
   if (!header?.startsWith("Bearer ")) return null;
@@ -84,6 +99,29 @@ function safeServiceName(value: string): string {
   return cleaned || "service";
 }
 
+async function failQueuedBeforeDispatch(deploymentId: string, reason: string): Promise<void> {
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const updated = await client.query(
+      "UPDATE deployments SET status='FAILED',dispatch_lease_until=NULL,updated_at=now() WHERE id=$1 AND status='QUEUED' RETURNING id",
+      [deploymentId],
+    );
+    if (updated.rowCount === 1) {
+      await client.query(
+        "INSERT INTO deployment_events(deployment_id,kind,status,message) VALUES($1,'STATUS','FAILED',$2)",
+        [deploymentId, reason],
+      );
+    }
+    await client.query("COMMIT");
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
 async function dispatchQueued(nodeId: string): Promise<void> {
   const socket = sockets.get(nodeId);
   if (!socket) return;
@@ -91,8 +129,14 @@ async function dispatchQueued(nodeId: string): Promise<void> {
   let row: Record<string, any> | undefined;
   try {
     await client.query("BEGIN");
+    const nodeLock = await client.query("SELECT id FROM nodes WHERE id=$1 FOR UPDATE", [nodeId]);
+    if (nodeLock.rowCount !== 1) {
+      await client.query("ROLLBACK");
+      return;
+    }
     const result = await client.query(
-      `SELECT id, service_name, source_repository, source_ref, dockerfile, container_port, host_port, healthcheck_path
+      `SELECT id,service_name,source_repository,source_ref,dockerfile,container_port,host_port,healthcheck_path,
+              operation,rollback_target_id,image_id
          FROM deployments
         WHERE node_id=$1 AND status='QUEUED' AND (dispatch_lease_until IS NULL OR dispatch_lease_until < now())
           AND NOT EXISTS (
@@ -103,13 +147,20 @@ async function dispatchQueued(nodeId: string): Promise<void> {
                  OR (active.status='QUEUED' AND active.dispatch_lease_until >= now())
                )
           )
+          AND NOT EXISTS (
+            SELECT 1 FROM runtime_actions action
+             WHERE action.node_id=$1 AND action.status='RUNNING'
+          )
         ORDER BY created_at ASC FOR UPDATE SKIP LOCKED LIMIT 1`,
       [nodeId],
     );
     row = result.rows[0];
-    if (!row) { await client.query("COMMIT"); return; }
+    if (!row) {
+      await client.query("COMMIT");
+      return;
+    }
     await client.query(
-      "UPDATE deployments SET dispatch_attempt=dispatch_attempt+1, dispatch_lease_until=now()+interval '30 seconds', updated_at=now() WHERE id=$1",
+      "UPDATE deployments SET dispatch_attempt=dispatch_attempt+1,dispatch_lease_until=now()+interval '30 seconds',updated_at=now() WHERE id=$1",
       [row.id],
     );
     await client.query("COMMIT");
@@ -123,29 +174,48 @@ async function dispatchQueued(nodeId: string): Promise<void> {
 
   let environment: Record<string, string>;
   try {
-    environment = await loadServiceEnvironment(pool, masterKey, row.service_name);
+    environment = await loadDeploymentEnvironment(pool, masterKey, row.id, row.service_name);
   } catch (error) {
     await pool.query("UPDATE deployments SET dispatch_lease_until=NULL WHERE id=$1 AND status='QUEUED'", [row.id]);
     throw error;
   }
 
-  const command: AgentCommand = {
-    type: "deploy",
-    deploymentId: row.id,
-    serviceName: row.service_name,
-    source: {
-      repository: row.source_repository,
-      ref: row.source_ref,
-      ...(row.dockerfile ? { dockerfile: row.dockerfile } : {}),
-    },
-    runtime: {
-      containerName: `rundea-${safeServiceName(row.service_name)}`,
-      containerPort: row.container_port,
-      hostPort: row.host_port,
-      environment,
-      healthcheck: { path: row.healthcheck_path ?? "", timeoutSeconds: 60 },
-    },
+  const runtime = {
+    containerName: `rundea-${safeServiceName(row.service_name)}`,
+    containerPort: row.container_port,
+    hostPort: row.host_port,
+    environment,
+    healthcheck: { path: row.healthcheck_path ?? "", timeoutSeconds: 60 },
   };
+
+  let command: AgentCommand;
+  if (row.operation === "ROLLBACK") {
+    if (!row.rollback_target_id || !row.image_id) {
+      await failQueuedBeforeDispatch(row.id, "rollback deployment is missing retained artifact identity");
+      return;
+    }
+    command = {
+      type: "rollback",
+      deploymentId: row.id,
+      targetDeploymentId: row.rollback_target_id,
+      expectedImageId: row.image_id,
+      serviceName: row.service_name,
+      runtime,
+    };
+  } else {
+    command = {
+      type: "deploy",
+      deploymentId: row.id,
+      serviceName: row.service_name,
+      source: {
+        repository: row.source_repository,
+        ref: row.source_ref,
+        ...(row.dockerfile ? { dockerfile: row.dockerfile } : {}),
+      },
+      runtime,
+    };
+  }
+
   try {
     socket.send(JSON.stringify(command));
   } catch (error) {
@@ -154,18 +224,38 @@ async function dispatchQueued(nodeId: string): Promise<void> {
   }
 }
 
+async function recordArtifact(nodeId: string, event: Extract<AgentEvent, { type: "artifact" }>): Promise<void> {
+  if (!sourceCommitPattern.test(event.sourceCommitSha)) throw new Error("invalid source commit identity");
+  if (!imageIdPattern.test(event.imageId)) throw new Error("invalid Docker image identity");
+  if (!event.healthcheckPath.startsWith("/") || event.healthcheckPath.length > 512 || /[\r\n]/.test(event.healthcheckPath)) {
+    throw new Error("invalid resolved healthcheck path");
+  }
+  const updated = await pool.query(
+    `UPDATE deployments
+        SET source_commit_sha=$3,image_id=$4,healthcheck_path=$5,updated_at=now()
+      WHERE id=$1 AND node_id=$2 AND operation='DEPLOY' AND status='BUILDING'`,
+    [event.deploymentId, nodeId, event.sourceCommitSha, event.imageId, event.healthcheckPath],
+  );
+  if (updated.rowCount !== 1) throw new Error("artifact identity rejected for authenticated node or deployment state");
+}
+
 async function recordStatus(nodeId: string, event: Extract<AgentEvent, { type: "status" }>): Promise<string> {
   if (!deploymentStatuses.includes(event.status)) throw new Error("unknown deployment status");
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
-    const currentResult = await client.query("SELECT status,service_name FROM deployments WHERE id=$1 AND node_id=$2 FOR UPDATE", [event.deploymentId, nodeId]);
+    const currentResult = await client.query(
+      "SELECT status,service_name,operation FROM deployments WHERE id=$1 AND node_id=$2 FOR UPDATE",
+      [event.deploymentId, nodeId],
+    );
     if (currentResult.rowCount !== 1) throw new Error("deployment not found for authenticated node");
     const current = currentResult.rows[0].status as DeploymentStatus;
     const serviceName = currentResult.rows[0].service_name as string;
+    const operation = currentResult.rows[0].operation as string;
     if (current !== event.status) assertTransition(current, event.status);
     const updated = await client.query(
-      `UPDATE deployments SET status=$3, runtime_container_id=COALESCE($4,runtime_container_id), dispatch_lease_until=NULL, updated_at=now() WHERE id=$1 AND node_id=$2`,
+      `UPDATE deployments SET status=$3,runtime_container_id=COALESCE($4,runtime_container_id),dispatch_lease_until=NULL,updated_at=now()
+        WHERE id=$1 AND node_id=$2`,
       [event.deploymentId, nodeId, event.status, event.containerId ?? null],
     );
     if (updated.rowCount !== 1) throw new Error("deployment update lost node ownership");
@@ -173,6 +263,24 @@ async function recordStatus(nodeId: string, event: Extract<AgentEvent, { type: "
       `INSERT INTO deployment_events(deployment_id,kind,status,message) VALUES($1,'STATUS',$2,$3)`,
       [event.deploymentId, event.status, event.message ?? null],
     );
+
+    if (operation === "ROLLBACK" && event.status === "READY") {
+      const previous = await client.query(
+        `SELECT id FROM deployments
+          WHERE service_name=$1 AND node_id=$2 AND id<>$3 AND status='READY'
+          ORDER BY created_at DESC,id DESC LIMIT 1 FOR UPDATE`,
+        [serviceName, nodeId, event.deploymentId],
+      );
+      if (previous.rowCount === 1) {
+        await client.query("UPDATE deployments SET status='ROLLED_BACK',updated_at=now() WHERE id=$1", [previous.rows[0].id]);
+        await client.query(
+          `INSERT INTO deployment_events(deployment_id,kind,status,message)
+           VALUES($1,'STATUS','ROLLED_BACK',$2)`,
+          [previous.rows[0].id, `replaced by rollback deployment ${event.deploymentId}`],
+        );
+      }
+    }
+
     await client.query("COMMIT");
     return serviceName;
   } catch (error) {
@@ -198,7 +306,7 @@ async function failActiveDeploymentsForNode(nodeId: string, message: string): Pr
     await client.query("BEGIN");
     const failed = await client.query(
       `UPDATE deployments
-          SET status='FAILED', dispatch_lease_until=NULL, updated_at=now()
+          SET status='FAILED',dispatch_lease_until=NULL,updated_at=now()
         WHERE node_id=$1 AND status IN ('BUILDING','DEPLOYING','HEALTHCHECK')
         RETURNING id`,
       [nodeId],
@@ -239,6 +347,7 @@ app.get("/v0/nodes", { preHandler: requireControl }, async () => {
 
 registerNodeQualificationRoutes(app, pool, sockets, requireControl);
 registerDomainRoutes(app, pool, sockets, requireControl);
+registerRuntimeControlRoutes(app, pool, sockets, requireControl, dispatchQueued);
 
 app.put<{ Params: { serviceName: string }; Body: { variables?: ServiceVariableInput[] } }>(
   "/v0/services/:serviceName/variables",
@@ -285,7 +394,9 @@ app.delete<{ Params: { serviceName: string; key: string } }>(
 
 app.get("/v0/deployments", { preHandler: requireControl }, async () => {
   const result = await pool.query(
-    `SELECT id,service_name,node_id,source_repository,source_ref,dockerfile,container_port,host_port,healthcheck_path,status,runtime_container_id,created_at,updated_at
+    `SELECT id,service_name,node_id,source_repository,source_ref,dockerfile,container_port,host_port,healthcheck_path,
+            status,runtime_container_id,operation,rollback_target_id,environment_snapshot_at,source_commit_sha,image_id,
+            created_at,updated_at
        FROM deployments ORDER BY created_at DESC LIMIT 100`,
   );
   return result.rows;
@@ -304,26 +415,38 @@ app.post<{ Body: { serviceName?: string; nodeId?: string; sourceRepository?: str
   { preHandler: requireControl },
   async (request, reply) => {
     const body = request.body ?? {};
-    if (!body.serviceName || !body.nodeId || !body.sourceRepository || !body.sourceRef) return reply.code(400).send({ error: "serviceName, nodeId, sourceRepository and sourceRef are required" });
+    if (!body.serviceName || !body.nodeId || !body.sourceRepository || !body.sourceRef) {
+      return reply.code(400).send({ error: "serviceName, nodeId, sourceRepository and sourceRef are required" });
+    }
     try {
       requireServiceName(body.serviceName);
     } catch (error) {
       return reply.code(400).send({ error: error instanceof Error ? error.message : "invalid service name" });
     }
-    if (!Number.isInteger(body.containerPort) || !Number.isInteger(body.hostPort)) return reply.code(400).send({ error: "containerPort and hostPort must be integers" });
+    if (!Number.isInteger(body.containerPort) || !Number.isInteger(body.hostPort)) {
+      return reply.code(400).send({ error: "containerPort and hostPort must be integers" });
+    }
+
     const id = randomUUID();
+    const client = await pool.connect();
     try {
-      await pool.query(
-        `INSERT INTO deployments(id,service_name,node_id,source_repository,source_ref,dockerfile,container_port,host_port,healthcheck_path,status)
-         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,'QUEUED')`,
+      await client.query("BEGIN");
+      await client.query(
+        `INSERT INTO deployments(id,service_name,node_id,source_repository,source_ref,dockerfile,container_port,host_port,healthcheck_path,status,operation)
+         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,'QUEUED','DEPLOY')`,
         [id, body.serviceName, body.nodeId, body.sourceRepository, body.sourceRef, body.dockerfile?.trim() || null, body.containerPort, body.hostPort, body.healthcheckPath?.trim() ?? ""],
       );
+      await captureDeploymentEnvironment(client, id, body.serviceName);
+      await client.query("COMMIT");
     } catch (error) {
+      await client.query("ROLLBACK");
       request.log.error(error);
       return reply.code(400).send({ error: "deployment could not be created" });
+    } finally {
+      client.release();
     }
     await dispatchQueued(body.nodeId);
-    return reply.code(201).send({ id, status: "QUEUED", agentConnected: sockets.has(body.nodeId) });
+    return reply.code(201).send({ id, status: "QUEUED", operation: "DEPLOY", agentConnected: sockets.has(body.nodeId) });
   },
 );
 
@@ -333,50 +456,68 @@ app.get("/v0/agent/ws", { websocket: true }, async (socket, request) => {
   const token = bearer(request.headers.authorization);
   if (!nodeId || !token) return socket.close(1008, "missing node credentials");
   const result = await pool.query("SELECT token_hash FROM nodes WHERE id=$1", [nodeId]);
-  if (result.rowCount !== 1 || !equalTokenHash(result.rows[0].token_hash, hashToken(token))) return socket.close(1008, "invalid node credentials");
+  if (result.rowCount !== 1 || !equalTokenHash(result.rows[0].token_hash, hashToken(token))) {
+    return socket.close(1008, "invalid node credentials");
+  }
 
   const previous = sockets.get(nodeId);
   if (previous && previous !== socket) previous.close(1012, "replaced by newer agent connection");
   sockets.set(nodeId, socket);
-  await pool.query("UPDATE nodes SET status='ONLINE', last_seen_at=now() WHERE id=$1", [nodeId]);
+  await pool.query("UPDATE nodes SET status='ONLINE',last_seen_at=now() WHERE id=$1", [nodeId]);
   await dispatchQueued(nodeId);
   await reconcileNodeIngress(pool, sockets, nodeId);
 
-  socket.on("message", async (raw: Buffer) => {
-    try {
-      const event = JSON.parse(raw.toString()) as AgentEvent;
-      if (event.type === "heartbeat") {
-        await pool.query("UPDATE nodes SET status='ONLINE', last_seen_at=now() WHERE id=$1", [nodeId]);
-        await dispatchQueued(nodeId);
-        return;
-      }
-      if (event.type === "status") {
-        const serviceName = await recordStatus(nodeId, event);
-        if (event.status === "READY") await reconcileServiceDomainsAfterReady(pool, sockets, serviceName, nodeId);
-        if (["READY", "FAILED", "CANCELLED", "ROLLED_BACK"].includes(event.status)) await dispatchQueued(nodeId);
-        return;
-      }
-      if (event.type === "qualification") {
-        await recordNodeQualification(pool, nodeId, event);
-        return;
-      }
-      if (event.type === "ingress") {
-        await recordIngressResult(pool, nodeId, event);
-        return;
-      }
-      if (event.type === "log") {
-        await recordDeploymentLog(nodeId, event);
-      }
-    } catch (error) {
-      request.log.error(error, "invalid agent event");
-    }
+  let messageQueue = Promise.resolve();
+  socket.on("message", (raw: Buffer) => {
+    messageQueue = messageQueue
+      .then(async () => {
+        if (sockets.get(nodeId) !== socket) return;
+        const event = JSON.parse(raw.toString()) as AgentEvent;
+        if (event.type === "heartbeat") {
+          await pool.query("UPDATE nodes SET status='ONLINE',last_seen_at=now() WHERE id=$1", [nodeId]);
+          await dispatchQueued(nodeId);
+          return;
+        }
+        if (event.type === "artifact") {
+          await recordArtifact(nodeId, event);
+          return;
+        }
+        if (event.type === "status") {
+          const serviceName = await recordStatus(nodeId, event);
+          if (event.status === "READY") await reconcileServiceDomainsAfterReady(pool, sockets, serviceName, nodeId);
+          if (["READY", "FAILED", "CANCELLED", "ROLLED_BACK"].includes(event.status)) await dispatchQueued(nodeId);
+          return;
+        }
+        if (event.type === "runtimeAction") {
+          await recordRuntimeAction(pool, nodeId, event);
+          await dispatchQueued(nodeId);
+          return;
+        }
+        if (event.type === "qualification") {
+          await recordNodeQualification(pool, nodeId, event);
+          return;
+        }
+        if (event.type === "ingress") {
+          await recordIngressResult(pool, nodeId, event);
+          return;
+        }
+        if (event.type === "log") {
+          await recordDeploymentLog(nodeId, event);
+        }
+      })
+      .catch((error) => {
+        request.log.error(error, "invalid agent event");
+      });
   });
 
   socket.on("close", async () => {
     if (sockets.get(nodeId) === socket) {
+      await messageQueue;
+      if (sockets.get(nodeId) !== socket) return;
       sockets.delete(nodeId);
       await pool.query("UPDATE nodes SET status='OFFLINE' WHERE id=$1", [nodeId]).catch(() => undefined);
       await failActiveDeploymentsForNode(nodeId, "agent disconnected during deployment").catch((error) => request.log.error(error, "failed to reconcile disconnected deployment"));
+      await failRunningRuntimeActionsForNode(pool, nodeId).catch((error) => request.log.error(error, "failed to reconcile disconnected runtime action"));
       await failRunningQualificationsForNode(pool, nodeId).catch((error) => request.log.error(error, "failed to reconcile disconnected qualification"));
       await failRunningIngressForNode(pool, nodeId).catch((error) => request.log.error(error, "failed to reconcile disconnected ingress"));
     }

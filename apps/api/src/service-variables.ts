@@ -1,4 +1,4 @@
-import type { Pool } from "pg";
+import type { Pool, PoolClient } from "pg";
 import { decryptValue, encryptValue, type EncryptedValue } from "@rundea/crypto";
 
 export type ServiceVariableInput = {
@@ -90,6 +90,49 @@ export async function loadServiceEnvironment(pool: Pool, masterKey: Buffer, serv
     [serviceName],
   );
   return Object.fromEntries(result.rows.map((row) => [row.key, decryptValue(encryptedFromRow(row), masterKey)]));
+}
+
+export async function captureDeploymentEnvironment(client: PoolClient, deploymentId: string, serviceName: string): Promise<void> {
+  await client.query(
+    `INSERT INTO deployment_variables(deployment_id,key,encrypted_version,iv,ciphertext,auth_tag,is_secret)
+     SELECT $1,key,encrypted_version,iv,ciphertext,auth_tag,is_secret
+       FROM service_variables
+      WHERE service_name=$2
+     ON CONFLICT(deployment_id,key) DO NOTHING`,
+    [deploymentId, serviceName],
+  );
+  await client.query("UPDATE deployments SET environment_snapshot_at=now() WHERE id=$1", [deploymentId]);
+}
+
+export async function copyDeploymentEnvironment(client: PoolClient, sourceDeploymentId: string, destinationDeploymentId: string): Promise<void> {
+  const source = await client.query("SELECT environment_snapshot_at FROM deployments WHERE id=$1 FOR SHARE", [sourceDeploymentId]);
+  if (source.rowCount !== 1 || !source.rows[0].environment_snapshot_at) throw new Error("rollback target has no immutable environment snapshot");
+  await client.query(
+    `INSERT INTO deployment_variables(deployment_id,key,encrypted_version,iv,ciphertext,auth_tag,is_secret)
+     SELECT $2,key,encrypted_version,iv,ciphertext,auth_tag,is_secret
+       FROM deployment_variables
+      WHERE deployment_id=$1`,
+    [sourceDeploymentId, destinationDeploymentId],
+  );
+  await client.query("UPDATE deployments SET environment_snapshot_at=now() WHERE id=$1", [destinationDeploymentId]);
+}
+
+export async function loadDeploymentEnvironment(
+  pool: Pool,
+  masterKey: Buffer,
+  deploymentId: string,
+  serviceName: string,
+): Promise<Record<string, string>> {
+  const snapshot = await pool.query("SELECT environment_snapshot_at FROM deployments WHERE id=$1", [deploymentId]);
+  if (snapshot.rowCount === 1 && snapshot.rows[0].environment_snapshot_at) {
+    const result = await pool.query(
+      `SELECT key,encrypted_version,iv,ciphertext,auth_tag
+         FROM deployment_variables WHERE deployment_id=$1 ORDER BY key ASC`,
+      [deploymentId],
+    );
+    return Object.fromEntries(result.rows.map((row) => [row.key, decryptValue(encryptedFromRow(row), masterKey)]));
+  }
+  return loadServiceEnvironment(pool, masterKey, serviceName);
 }
 
 export async function deleteServiceVariable(pool: Pool, serviceName: string, key: string): Promise<boolean> {
