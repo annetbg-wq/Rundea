@@ -39,8 +39,12 @@ func sourceArchive(t *testing.T, entries []archiveEntry) []byte {
 			Typeflag: typeflag,
 			Linkname: entry.linkname,
 		}
-		if typeflag == tar.TypeDir || typeflag == tar.TypeSymlink || typeflag == tar.TypeLink || typeflag == tar.TypeXGlobalHeader {
+		if typeflag == tar.TypeDir || typeflag == tar.TypeSymlink || typeflag == tar.TypeLink {
 			hdr.Size = 0
+		}
+		if typeflag == tar.TypeXGlobalHeader {
+			hdr.Size = 0
+			hdr.PAXRecords = map[string]string{"comment": "rundea-test"}
 		}
 		if err := tw.WriteHeader(hdr); err != nil {
 			t.Fatal(err)
