@@ -129,6 +129,11 @@ async function dispatchQueued(nodeId: string): Promise<void> {
   let row: Record<string, any> | undefined;
   try {
     await client.query("BEGIN");
+    const nodeLock = await client.query("SELECT id FROM nodes WHERE id=$1 FOR UPDATE", [nodeId]);
+    if (nodeLock.rowCount !== 1) {
+      await client.query("ROLLBACK");
+      return;
+    }
     const result = await client.query(
       `SELECT id,service_name,source_repository,source_ref,dockerfile,container_port,host_port,healthcheck_path,
               operation,rollback_target_id,image_id
@@ -462,43 +467,46 @@ app.get("/v0/agent/ws", { websocket: true }, async (socket, request) => {
   await dispatchQueued(nodeId);
   await reconcileNodeIngress(pool, sockets, nodeId);
 
-  socket.on("message", async (raw: Buffer) => {
-    try {
-      const event = JSON.parse(raw.toString()) as AgentEvent;
-      if (event.type === "heartbeat") {
-        await pool.query("UPDATE nodes SET status='ONLINE',last_seen_at=now() WHERE id=$1", [nodeId]);
-        await dispatchQueued(nodeId);
-        return;
-      }
-      if (event.type === "artifact") {
-        await recordArtifact(nodeId, event);
-        return;
-      }
-      if (event.type === "status") {
-        const serviceName = await recordStatus(nodeId, event);
-        if (event.status === "READY") await reconcileServiceDomainsAfterReady(pool, sockets, serviceName, nodeId);
-        if (["READY", "FAILED", "CANCELLED", "ROLLED_BACK"].includes(event.status)) await dispatchQueued(nodeId);
-        return;
-      }
-      if (event.type === "runtimeAction") {
-        await recordRuntimeAction(pool, nodeId, event);
-        await dispatchQueued(nodeId);
-        return;
-      }
-      if (event.type === "qualification") {
-        await recordNodeQualification(pool, nodeId, event);
-        return;
-      }
-      if (event.type === "ingress") {
-        await recordIngressResult(pool, nodeId, event);
-        return;
-      }
-      if (event.type === "log") {
-        await recordDeploymentLog(nodeId, event);
-      }
-    } catch (error) {
-      request.log.error(error, "invalid agent event");
-    }
+  let messageQueue = Promise.resolve();
+  socket.on("message", (raw: Buffer) => {
+    messageQueue = messageQueue
+      .then(async () => {
+        const event = JSON.parse(raw.toString()) as AgentEvent;
+        if (event.type === "heartbeat") {
+          await pool.query("UPDATE nodes SET status='ONLINE',last_seen_at=now() WHERE id=$1", [nodeId]);
+          await dispatchQueued(nodeId);
+          return;
+        }
+        if (event.type === "artifact") {
+          await recordArtifact(nodeId, event);
+          return;
+        }
+        if (event.type === "status") {
+          const serviceName = await recordStatus(nodeId, event);
+          if (event.status === "READY") await reconcileServiceDomainsAfterReady(pool, sockets, serviceName, nodeId);
+          if (["READY", "FAILED", "CANCELLED", "ROLLED_BACK"].includes(event.status)) await dispatchQueued(nodeId);
+          return;
+        }
+        if (event.type === "runtimeAction") {
+          await recordRuntimeAction(pool, nodeId, event);
+          await dispatchQueued(nodeId);
+          return;
+        }
+        if (event.type === "qualification") {
+          await recordNodeQualification(pool, nodeId, event);
+          return;
+        }
+        if (event.type === "ingress") {
+          await recordIngressResult(pool, nodeId, event);
+          return;
+        }
+        if (event.type === "log") {
+          await recordDeploymentLog(nodeId, event);
+        }
+      })
+      .catch((error) => {
+        request.log.error(error, "invalid agent event");
+      });
   });
 
   socket.on("close", async () => {
