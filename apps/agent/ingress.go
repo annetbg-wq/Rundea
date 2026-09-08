@@ -48,10 +48,11 @@ func runIngressReconciliation(cfg config, w *writer, cmd reconcileIngressCommand
 	defer ingressMu.Unlock()
 
 	results := make([]ingressRouteResult, 0, len(cmd.Routes))
-	complete := func(ok bool, globalErr error) {
+	complete := func(applied, ok bool, globalErr error) {
 		event := map[string]any{
-			"type": "ingress", "reconciliationId": cmd.ReconciliationID, "ok": ok,
-			"routes": results, "completedAt": time.Now().UTC().Format(time.RFC3339Nano),
+			"type": "ingress", "reconciliationId": cmd.ReconciliationID,
+			"applied": applied, "ok": ok, "routes": results,
+			"completedAt": time.Now().UTC().Format(time.RFC3339Nano),
 		}
 		if globalErr != nil {
 			event["error"] = sanitizeProbeError(globalErr.Error())
@@ -59,23 +60,23 @@ func runIngressReconciliation(cfg config, w *writer, cmd reconcileIngressCommand
 		_ = w.send(event)
 	}
 	if !reconciliationIDPattern.MatchString(strings.ToLower(cmd.ReconciliationID)) {
-		complete(false, errors.New("invalid ingress reconciliation id"))
+		complete(false, false, errors.New("invalid ingress reconciliation id"))
 		return
 	}
 	if err := validateIngressRoutes(cmd.Routes); err != nil {
 		for _, route := range cmd.Routes {
 			results = append(results, ingressRouteResult{Hostname: route.Hostname, Error: sanitizeProbeError(err.Error())})
 		}
-		complete(false, err)
+		complete(false, false, err)
 		return
 	}
 	if len(cmd.Routes) == 0 {
 		out, err := exec.Command("docker", "rm", "-f", caddyContainer).CombinedOutput()
 		if err != nil && !strings.Contains(string(out), "No such container") {
-			complete(false, fmt.Errorf("remove empty ingress runtime: %w: %s", err, strings.TrimSpace(string(out))))
+			complete(false, false, fmt.Errorf("remove empty ingress runtime: %w: %s", err, strings.TrimSpace(string(out))))
 			return
 		}
-		complete(true, nil)
+		complete(true, true, nil)
 		return
 	}
 
@@ -87,7 +88,7 @@ func runIngressReconciliation(cfg config, w *writer, cmd reconcileIngressCommand
 			for _, route := range cmd.Routes {
 				results = append(results, ingressRouteResult{Hostname: route.Hostname, Error: sanitizeProbeError(err.Error())})
 			}
-			complete(false, err)
+			complete(false, false, err)
 			return
 		}
 	}
@@ -97,21 +98,21 @@ func runIngressReconciliation(cfg config, w *writer, cmd reconcileIngressCommand
 		for _, route := range cmd.Routes {
 			results = append(results, ingressRouteResult{Hostname: route.Hostname, Error: sanitizeProbeError(err.Error())})
 		}
-		complete(false, err)
+		complete(false, false, err)
 		return
 	}
 	if err := validateCaddyConfig(caddyDir); err != nil {
 		for _, route := range cmd.Routes {
 			results = append(results, ingressRouteResult{Hostname: route.Hostname, Error: sanitizeProbeError(err.Error())})
 		}
-		complete(false, err)
+		complete(false, false, err)
 		return
 	}
 	if err := ensureCaddy(caddyDir, dataDir, configDir); err != nil {
 		for _, route := range cmd.Routes {
 			results = append(results, ingressRouteResult{Hostname: route.Hostname, Error: sanitizeProbeError(err.Error())})
 		}
-		complete(false, err)
+		complete(false, false, err)
 		return
 	}
 
@@ -123,7 +124,7 @@ func runIngressReconciliation(cfg config, w *writer, cmd reconcileIngressCommand
 			break
 		}
 	}
-	complete(allOK, nil)
+	complete(true, allOK, nil)
 }
 
 func validateIngressRoutes(routes []ingressRoute) error {
@@ -178,13 +179,13 @@ func renderCaddyfile(routes []ingressRoute, reconciliationID string) string {
 	var builder strings.Builder
 	for _, route := range sorted {
 		builder.WriteString(route.Hostname)
-		builder.WriteString(" {\n\theader ")
+		builder.WriteString(" {\n\treverse_proxy 127.0.0.1:")
+		builder.WriteString(strconv.Itoa(route.HostPort))
+		builder.WriteString(" {\n\t\theader_down ")
 		builder.WriteString(ingressMarkerHeader)
 		builder.WriteByte(' ')
 		builder.WriteString(reconciliationID)
-		builder.WriteString("\n\treverse_proxy 127.0.0.1:")
-		builder.WriteString(strconv.Itoa(route.HostPort))
-		builder.WriteString("\n}\n\n")
+		builder.WriteString("\n\t}\n}\n\n")
 	}
 	return builder.String()
 }
