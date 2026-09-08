@@ -81,5 +81,6 @@ export type AgentEvent =
       reconciliationId: string;
       ok: boolean;
       routes: Array<{ hostname: string; ok: boolean; error?: string }>;
+      error?: string;
       completedAt: string;
     };
