@@ -39,7 +39,7 @@ func sourceArchive(t *testing.T, entries []archiveEntry) []byte {
 			Typeflag: typeflag,
 			Linkname: entry.linkname,
 		}
-		if typeflag == tar.TypeDir || typeflag == tar.TypeSymlink || typeflag == tar.TypeLink {
+		if typeflag == tar.TypeDir || typeflag == tar.TypeSymlink || typeflag == tar.TypeLink || typeflag == tar.TypeXGlobalHeader {
 			hdr.Size = 0
 		}
 		if err := tw.WriteHeader(hdr); err != nil {
@@ -83,6 +83,21 @@ func TestExtractSourceArchiveStripsGitHubRoot(t *testing.T) {
 	}
 	if info.Mode().Perm()&0o111 == 0 {
 		t.Fatal("expected executable bit to be retained")
+	}
+}
+
+func TestExtractSourceArchiveAcceptsGitHubPAXGlobalHeader(t *testing.T) {
+	destination := filepath.Join(t.TempDir(), "src")
+	archive := sourceArchive(t, []archiveEntry{
+		{name: "owner-repo-sha", typeflag: tar.TypeXGlobalHeader},
+		{name: "owner-repo-sha/", typeflag: tar.TypeDir},
+		{name: "owner-repo-sha/package.json", body: `{}`},
+	})
+	if err := extractSourceArchive(bytes.NewReader(archive), destination); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(destination, "package.json")); err != nil {
+		t.Fatal(err)
 	}
 }
 
