@@ -138,10 +138,15 @@ func extractSourceArchive(compressed io.Reader, destination string) error {
 			return errors.New("source bundle contains multiple archive roots")
 		}
 		if len(parts) == 1 {
-			if hdr.Typeflag != tar.TypeDir {
-				return errors.New("source bundle root entry must be a directory")
+			switch hdr.Typeflag {
+			case tar.TypeDir:
+				continue
+			case tar.TypeReg, tar.TypeRegA:
+				if hdr.Size == 0 {
+					continue
+				}
 			}
-			continue
+			return errors.New("source bundle root marker must be a directory or empty regular entry")
 		}
 
 		relSlash := strings.Join(parts[1:], "/")
