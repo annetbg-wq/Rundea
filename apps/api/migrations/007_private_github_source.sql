@@ -5,11 +5,9 @@ CREATE TABLE IF NOT EXISTS github_repository_installations (
   updated_at timestamptz NOT NULL DEFAULT now()
 );
 
-CREATE TABLE IF NOT EXISTS source_grants (
-  id uuid PRIMARY KEY,
-  deployment_id uuid NOT NULL UNIQUE REFERENCES deployments(id) ON DELETE CASCADE,
+CREATE TABLE IF NOT EXISTS source_fetches (
+  deployment_id uuid PRIMARY KEY REFERENCES deployments(id) ON DELETE CASCADE,
   node_id uuid NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
-  token_hash text NOT NULL,
   repository_full_name text NOT NULL REFERENCES github_repository_installations(repository_full_name) ON DELETE RESTRICT,
   source_commit_sha text NOT NULL CHECK (source_commit_sha ~ '^[0-9a-f]{40}$'),
   expires_at timestamptz NOT NULL,
@@ -18,6 +16,6 @@ CREATE TABLE IF NOT EXISTS source_grants (
   created_at timestamptz NOT NULL DEFAULT now()
 );
 
-CREATE INDEX IF NOT EXISTS source_grants_node_expiry_idx
-  ON source_grants(node_id, expires_at)
+CREATE INDEX IF NOT EXISTS source_fetches_node_expiry_idx
+  ON source_fetches(node_id, expires_at)
   WHERE consumed_at IS NULL;
