@@ -1,4 +1,4 @@
-import { createHmac, randomUUID, timingSafeEqual } from "node:crypto";
+import { createHash, createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { Pool } from "pg";
@@ -116,16 +116,25 @@ function deliveryIdFrom(request: FastifyRequest): string {
   return deliveryId;
 }
 
-async function duplicateResponse(pool: Pool, deliveryId: string): Promise<{ ok: true; duplicate: true; status: string; deploymentCount: number }> {
+async function duplicateResponse(
+  pool: Pool,
+  deliveryId: string,
+  bodySha256: string,
+): Promise<{ ok: true; duplicate: true; status: string; deploymentCount: number; originalDeliveryId?: string }> {
   const existing = await pool.query(
-    "SELECT status,deployment_count FROM github_webhook_deliveries WHERE delivery_id=$1",
-    [deliveryId],
+    `SELECT delivery_id,status,deployment_count
+       FROM github_webhook_deliveries
+      WHERE delivery_id=$1 OR body_sha256=$2
+      ORDER BY (delivery_id=$1) DESC,received_at ASC
+      LIMIT 1`,
+    [deliveryId, bodySha256],
   );
   return {
     ok: true,
     duplicate: true,
     status: existing.rows[0]?.status ?? "UNKNOWN",
     deploymentCount: Number(existing.rows[0]?.deployment_count ?? 0),
+    ...(existing.rows[0]?.delivery_id ? { originalDeliveryId: String(existing.rows[0].delivery_id) } : {}),
   };
 }
 
@@ -260,6 +269,7 @@ export function registerGitHubAutodeployRoutes(
       if (!Buffer.isBuffer(rawBody)) return reply.code(400).send({ error: "webhook body must be JSON" });
       const signature = singleHeader(request.headers["x-hub-signature-256"]);
       if (!verifyGitHubSignature(webhookSecret, rawBody, signature)) return reply.code(401).send({ error: "invalid webhook signature" });
+      const bodySha256 = createHash("sha256").update(rawBody).digest("hex");
 
       const eventName = singleHeader(request.headers["x-github-event"]);
       if (!eventName) return reply.code(400).send({ error: "X-GitHub-Event is required" });
@@ -295,15 +305,15 @@ export function registerGitHubAutodeployRoutes(
         await client.query("BEGIN");
         const inserted = await client.query(
           `INSERT INTO github_webhook_deliveries(
-             delivery_id,event_name,repository_full_name,source_branch,after_sha,status
-           ) VALUES($1,'push',$2,$3,$4,'RECEIVED')
-           ON CONFLICT(delivery_id) DO NOTHING
+             delivery_id,body_sha256,event_name,repository_full_name,source_branch,after_sha,status
+           ) VALUES($1,$2,'push',$3,$4,$5,'RECEIVED')
+           ON CONFLICT DO NOTHING
            RETURNING delivery_id`,
-          [deliveryId, repositoryFullName, branch, afterSha],
+          [deliveryId, bodySha256, repositoryFullName, branch, afterSha],
         );
         if (inserted.rowCount !== 1) {
           await client.query("ROLLBACK");
-          return reply.send(await duplicateResponse(pool, deliveryId));
+          return reply.send(await duplicateResponse(pool, deliveryId, bodySha256));
         }
 
         const deleted = payload.deleted === true || /^0{40}$/.test(afterSha);
