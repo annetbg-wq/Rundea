@@ -8,7 +8,7 @@ CREATE TABLE IF NOT EXISTS github_repository_installations (
 CREATE TABLE IF NOT EXISTS source_fetches (
   deployment_id uuid PRIMARY KEY REFERENCES deployments(id) ON DELETE CASCADE,
   node_id uuid NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
-  repository_full_name text NOT NULL REFERENCES github_repository_installations(repository_full_name) ON DELETE RESTRICT,
+  repository_full_name text NOT NULL REFERENCES github_repository_installations(repository_full_name) ON DELETE CASCADE,
   source_commit_sha text NOT NULL CHECK (source_commit_sha ~ '^[0-9a-f]{40}$'),
   expires_at timestamptz NOT NULL,
   lease_until timestamptz,
