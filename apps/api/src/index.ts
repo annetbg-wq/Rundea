@@ -9,7 +9,13 @@ import type { AgentCommand, AgentEvent, DeploymentStatus } from "@rundea/contrac
 import { deploymentStatuses } from "@rundea/contracts";
 import { createOpaqueToken, equalTokenHash, hashToken, parseMasterKey } from "@rundea/crypto";
 import { assertTransition } from "@rundea/deployer";
-import { recordIngressResult, reconcileNodeIngress, registerDomainRoutes } from "./domains";
+import {
+  failRunningIngressForNode,
+  recordIngressResult,
+  reconcileNodeIngress,
+  reconcileServiceDomainsAfterReady,
+  registerDomainRoutes,
+} from "./domains";
 import {
   failRunningQualificationsForNode,
   recordNodeQualification,
@@ -45,7 +51,13 @@ for (const migration of ["001_init.sql", "002_service_variables_and_auto_build.s
 }
 await pool.query("UPDATE nodes SET status='OFFLINE'");
 await pool.query("UPDATE node_qualifications SET status='FAILED', failure_reason='control plane restarted during qualification', completed_at=now() WHERE status='RUNNING'");
-await pool.query("UPDATE service_domains SET status='PENDING', last_error='awaiting node agent reconciliation', verified_at=NULL, updated_at=now() WHERE status='CONFIGURING'");
+await pool.query("UPDATE node_ingress_reconciliations SET status='FAILED',error='control plane restarted during ingress reconciliation',completed_at=now() WHERE status='RUNNING'");
+await pool.query(
+  `UPDATE service_domains
+      SET status=CASE WHEN status='DELETING' THEN 'DELETING' ELSE 'PENDING' END,
+          reconciliation_id=NULL,last_error='awaiting node agent reconciliation',verified_at=NULL,updated_at=now()
+    WHERE status IN ('CONFIGURING','DELETING')`,
+);
 
 const sockets = new Map<string, NodeSocket>();
 const serviceNamePattern = /^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/;
@@ -142,14 +154,15 @@ async function dispatchQueued(nodeId: string): Promise<void> {
   }
 }
 
-async function recordStatus(nodeId: string, event: Extract<AgentEvent, { type: "status" }>): Promise<void> {
+async function recordStatus(nodeId: string, event: Extract<AgentEvent, { type: "status" }>): Promise<string> {
   if (!deploymentStatuses.includes(event.status)) throw new Error("unknown deployment status");
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
-    const currentResult = await client.query("SELECT status FROM deployments WHERE id=$1 AND node_id=$2 FOR UPDATE", [event.deploymentId, nodeId]);
+    const currentResult = await client.query("SELECT status,service_name FROM deployments WHERE id=$1 AND node_id=$2 FOR UPDATE", [event.deploymentId, nodeId]);
     if (currentResult.rowCount !== 1) throw new Error("deployment not found for authenticated node");
     const current = currentResult.rows[0].status as DeploymentStatus;
+    const serviceName = currentResult.rows[0].service_name as string;
     if (current !== event.status) assertTransition(current, event.status);
     const updated = await client.query(
       `UPDATE deployments SET status=$3, runtime_container_id=COALESCE($4,runtime_container_id), dispatch_lease_until=NULL, updated_at=now() WHERE id=$1 AND node_id=$2`,
@@ -161,6 +174,7 @@ async function recordStatus(nodeId: string, event: Extract<AgentEvent, { type: "
       [event.deploymentId, event.status, event.message ?? null],
     );
     await client.query("COMMIT");
+    return serviceName;
   } catch (error) {
     await client.query("ROLLBACK");
     throw error;
@@ -337,8 +351,8 @@ app.get("/v0/agent/ws", { websocket: true }, async (socket, request) => {
         return;
       }
       if (event.type === "status") {
-        await recordStatus(nodeId, event);
-        if (event.status === "READY") await reconcileNodeIngress(pool, sockets, nodeId);
+        const serviceName = await recordStatus(nodeId, event);
+        if (event.status === "READY") await reconcileServiceDomainsAfterReady(pool, sockets, serviceName, nodeId);
         if (["READY", "FAILED", "CANCELLED", "ROLLED_BACK"].includes(event.status)) await dispatchQueued(nodeId);
         return;
       }
@@ -364,6 +378,7 @@ app.get("/v0/agent/ws", { websocket: true }, async (socket, request) => {
       await pool.query("UPDATE nodes SET status='OFFLINE' WHERE id=$1", [nodeId]).catch(() => undefined);
       await failActiveDeploymentsForNode(nodeId, "agent disconnected during deployment").catch((error) => request.log.error(error, "failed to reconcile disconnected deployment"));
       await failRunningQualificationsForNode(pool, nodeId).catch((error) => request.log.error(error, "failed to reconcile disconnected qualification"));
+      await failRunningIngressForNode(pool, nodeId).catch((error) => request.log.error(error, "failed to reconcile disconnected ingress"));
     }
   });
 });
