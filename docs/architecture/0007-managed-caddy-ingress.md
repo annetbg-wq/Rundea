@@ -20,7 +20,7 @@ Workload containers are not made public by this feature. Caddy is the only publi
 
 The Control Plane sends the Agent the complete desired route set for a node on every reconciliation. The Agent does not receive "add this host" or "remove this host" mutations. This makes reconnects and retries idempotent and allows a node to converge from unknown local state back to PostgreSQL source-of-truth state.
 
-Each reconciliation has a UUID. Domain rows participating in the operation carry that reconciliation ownership until the Agent result is accepted. Results from an old reconciliation are rejected.
+Each reconciliation has a UUID. At most one reconciliation may be `RUNNING` for a node. A newer reconciliation explicitly supersedes an older one, and domain rows participating in the current operation carry its reconciliation ownership until the Agent result is accepted. Results from stale or unknown reconciliations are rejected.
 
 A domain can be:
 
@@ -28,23 +28,34 @@ A domain can be:
 
 Deletion is explicit:
 
-`ACTIVE|FAILED|PENDING -> DELETING -> row removed only after successful Agent reconciliation`
+`ACTIVE|FAILED|PENDING -> DELETING -> row removed after the Agent confirms the desired Caddy configuration was applied`
 
-This prevents the Control Plane from forgetting a domain while a stale Caddy route may still exist on the node.
+Deletion acknowledgement depends on configuration application, not on unrelated domains passing their public HTTPS checks. This prevents a broken DNS record for one hostname from blocking cleanup of another hostname while still preventing the Control Plane from forgetting a domain before its route removal was applied.
 
 Global reconciliation history is stored separately from domain rows so an empty desired route set can still report a failed Caddy cleanup.
+
+## Decision: applied state and verified state are separate
+
+An ingress Agent result contains two distinct signals:
+
+- `applied=true` means the requested desired Caddy configuration, including route removals, was successfully applied on the node;
+- `ok=true` means every route in that applied desired configuration also passed public DNS/TLS/current-marker verification.
+
+`ok=true` is impossible when `applied=false`. A successfully applied configuration may have `ok=false` when one or more hostnames have not yet converged in DNS, TLS issuance has not completed, or the hostname does not reach the current Rundea ingress.
+
+This distinction lets the Control Plane acknowledge real route cleanup without falsely declaring unrelated routes healthy.
 
 ## Decision: READY deployment ownership
 
 A route is emitted only when its service has a `READY` deployment on the same node. A domain without a READY upstream stays `PENDING` with a diagnostic reason.
 
-If a later READY deployment moves a service to another node, non-deleting domains move with that service. The old node is reconciled first to remove the old route, then the new node receives the new desired route set.
+If a later READY deployment moves a service to another node, non-deleting domains move with that service. The old node is reconciled to remove its obsolete route set, and the new node receives the service's desired routes.
 
 ## Decision: what ACTIVE means
 
 A local Caddy reload is not enough to mark a domain ACTIVE. The Agent verifies the public hostname through DNS and HTTPS.
 
-For every reconciliation, Caddy injects an `X-Rundea-Reconciliation` response marker containing the current reconciliation UUID. The Agent resolves the hostname, discards private, loopback, link-local, multicast, CGNAT and benchmark addresses, pins the HTTP dial to the resulting public addresses, performs a TLS-validated HTTPS request for the hostname, and requires the response marker to match the current reconciliation.
+For every reconciliation, Caddy adds an `X-Rundea-Reconciliation` response header to responses returned through that route after reverse proxying to the managed loopback upstream. The Agent resolves the hostname, discards private, loopback, link-local, multicast, CGNAT and benchmark addresses, pins the HTTP dial to the resulting public addresses, performs a TLS-validated HTTPS request for the hostname, and requires the response marker to match the current reconciliation.
 
 This avoids two false positives:
 
@@ -60,6 +71,8 @@ The Control Plane does not perform arbitrary HTTP fetches to user-supplied hostn
 The Agent only receives hostname -> local managed host-port routes. It cannot be instructed by this protocol to reverse proxy to an arbitrary remote upstream.
 
 Wildcard domains are not supported in v0.
+
+Deployment status and log events are accepted only when the deployment belongs to the node authenticated by the Agent WebSocket. Ingress results likewise require the authenticated node and the current reconciliation ownership.
 
 The node operator remains inside the workload trust boundary: root/Docker access can inspect or alter local runtime and ingress state.
 
