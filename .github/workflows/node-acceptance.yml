@@ -76,10 +76,14 @@ jobs:
           RUNDEA_CONTROL_TOKEN: acceptance-control-token
           RUNDEA_MASTER_KEY: MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=
           RUNDEA_GITHUB_WEBHOOK_SECRET: acceptance-github-webhook-secret
+          RUNDEA_GITHUB_APP_ID: '123456'
+          RUNDEA_GITHUB_API_BASE_URL: http://127.0.0.1:19090
+          RUNDEA_ALLOW_TEST_GITHUB_BASE_URL: '1'
           RUNDEA_WEB_ORIGIN: http://127.0.0.1:5173
           PORT: '4000'
         run: |
           set -euo pipefail
+          export RUNDEA_GITHUB_APP_PRIVATE_KEY="$(openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 2>/dev/null)"
           npm run start -w @rundea/api > /tmp/rundea-api.log 2>&1 &
           echo $! > /tmp/rundea-api.pid
           for attempt in $(seq 1 60); do
@@ -104,6 +108,7 @@ jobs:
           RUNDEA_ACCEPTANCE_FIXTURE_REF: 039c34770852fb07cef7f9f0f8534c5de408b207
           RUNDEA_ACCEPTANCE_FIXTURE_SHA: 039c34770852fb07cef7f9f0f8534c5de408b207
           RUNDEA_ACCEPTANCE_HOST_PORT: '18081'
+          RUNDEA_ACCEPTANCE_FAKE_GITHUB_PORT: '19090'
         run: node infra/acceptance/node-e2e.mjs
       - name: Control Plane log
         if: always()
