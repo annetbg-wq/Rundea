@@ -1,11 +1,11 @@
 import { createHmac, randomUUID, timingSafeEqual } from "node:crypto";
+import { readFile } from "node:fs/promises";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { Pool } from "pg";
 import { captureDeploymentEnvironment } from "./service-variables";
 
 type RequireControl = (request: FastifyRequest, reply: FastifyReply) => Promise<void>;
 type DispatchQueued = (nodeId: string) => Promise<void>;
-type ServiceNameValidator = (value: string) => string;
 
 type AutodeployInput = {
   nodeId?: string;
@@ -28,9 +28,15 @@ type PushPayload = {
 const fullCommitPattern = /^[0-9a-fA-F]{40}$/;
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const repoPartPattern = /^[A-Za-z0-9_.-]+$/;
+const serviceNamePattern = /^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/;
 
 function singleHeader(value: string | string[] | undefined): string | undefined {
   return Array.isArray(value) ? value[0] : value;
+}
+
+function requireServiceName(value: string): string {
+  if (!serviceNamePattern.test(value)) throw new Error("invalid service name");
+  return value;
 }
 
 export function canonicalGitHubRepository(input: string): { fullName: string; cloneUrl: string } {
@@ -127,15 +133,18 @@ export function registerGitHubAutodeployRoutes(
   app: FastifyInstance,
   pool: Pool,
   requireControl: RequireControl,
-  requireServiceName: ServiceNameValidator,
   dispatchQueued: DispatchQueued,
   webhookSecret: string | undefined,
 ): void {
+  const migrationUrl = new URL("../migrations/006_github_autodeploy.sql", import.meta.url);
+  const schemaReady = readFile(migrationUrl, "utf8").then((sql) => pool.query(sql)).then(() => undefined);
+
   app.put<{ Params: { serviceName: string }; Body: AutodeployInput }>(
     "/v0/services/:serviceName/autodeploy",
     { preHandler: requireControl },
     async (request, reply) => {
       try {
+        await schemaReady;
         const serviceName = requireServiceName(request.params.serviceName);
         const body = request.body ?? {};
         if (!body.nodeId || !uuidPattern.test(body.nodeId)) throw new Error("nodeId must be a UUID");
@@ -184,6 +193,7 @@ export function registerGitHubAutodeployRoutes(
         );
         return reply.send({ autodeploy: result.rows[0] });
       } catch (error) {
+        request.log.error(error, "autodeploy configuration rejected");
         return reply.code(400).send({ error: error instanceof Error ? error.message : "invalid autodeploy configuration" });
       }
     },
@@ -194,6 +204,7 @@ export function registerGitHubAutodeployRoutes(
     { preHandler: requireControl },
     async (request, reply) => {
       try {
+        await schemaReady;
         const serviceName = requireServiceName(request.params.serviceName);
         const result = await pool.query(
           `SELECT service_name,node_id,repository_full_name,source_repository,source_branch,dockerfile,
@@ -213,6 +224,7 @@ export function registerGitHubAutodeployRoutes(
     { preHandler: requireControl },
     async (request, reply) => {
       try {
+        await schemaReady;
         const serviceName = requireServiceName(request.params.serviceName);
         const result = await pool.query("DELETE FROM service_autodeploys WHERE service_name=$1", [serviceName]);
         return result.rowCount === 1 ? reply.code(204).send() : reply.code(404).send({ error: "autodeploy not configured" });
@@ -223,6 +235,7 @@ export function registerGitHubAutodeployRoutes(
   );
 
   app.get("/v0/github/deliveries", { preHandler: requireControl }, async () => {
+    await schemaReady;
     const result = await pool.query(
       `SELECT d.delivery_id,d.event_name,d.repository_full_name,d.source_branch,d.after_sha,d.status,
               d.deployment_count,d.received_at,d.completed_at,
@@ -253,6 +266,7 @@ export function registerGitHubAutodeployRoutes(
       if (eventName === "ping") return reply.send({ ok: true, event: "ping" });
       if (eventName !== "push") return reply.code(202).send({ ok: true, ignored: true, reason: "unsupported event" });
 
+      await schemaReady;
       let deliveryId: string;
       let payload: PushPayload;
       try {
