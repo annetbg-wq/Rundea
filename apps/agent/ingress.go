@@ -6,18 +6,25 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
 const caddyImage = "caddy:2.11.4@sha256:df7f1c2fb114453b951de51a98efc010db1655a92c2e86be6706714e2417a78d"
 const caddyContainer = "rundea-caddy"
+const ingressMarkerHeader = "X-Rundea-Reconciliation"
+
+var ingressMu sync.Mutex
+var reconciliationIDPattern = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
 
 type ingressRoute struct {
 	Hostname string `json:"hostname"`
@@ -37,27 +44,38 @@ type ingressRouteResult struct {
 }
 
 func runIngressReconciliation(cfg config, w *writer, cmd reconcileIngressCommand) {
+	ingressMu.Lock()
+	defer ingressMu.Unlock()
+
 	results := make([]ingressRouteResult, 0, len(cmd.Routes))
-	complete := func(ok bool) {
-		_ = w.send(map[string]any{
+	complete := func(ok bool, globalErr error) {
+		event := map[string]any{
 			"type": "ingress", "reconciliationId": cmd.ReconciliationID, "ok": ok,
 			"routes": results, "completedAt": time.Now().UTC().Format(time.RFC3339Nano),
-		})
+		}
+		if globalErr != nil {
+			event["error"] = sanitizeProbeError(globalErr.Error())
+		}
+		_ = w.send(event)
 	}
-	if cmd.ReconciliationID == "" {
-		complete(false)
+	if !reconciliationIDPattern.MatchString(strings.ToLower(cmd.ReconciliationID)) {
+		complete(false, errors.New("invalid ingress reconciliation id"))
 		return
 	}
 	if err := validateIngressRoutes(cmd.Routes); err != nil {
 		for _, route := range cmd.Routes {
 			results = append(results, ingressRouteResult{Hostname: route.Hostname, Error: sanitizeProbeError(err.Error())})
 		}
-		complete(false)
+		complete(false, err)
 		return
 	}
 	if len(cmd.Routes) == 0 {
-		_ = exec.Command("docker", "rm", "-f", caddyContainer).Run()
-		complete(true)
+		out, err := exec.Command("docker", "rm", "-f", caddyContainer).CombinedOutput()
+		if err != nil && !strings.Contains(string(out), "No such container") {
+			complete(false, fmt.Errorf("remove empty ingress runtime: %w: %s", err, strings.TrimSpace(string(out))))
+			return
+		}
+		complete(true, nil)
 		return
 	}
 
@@ -69,45 +87,43 @@ func runIngressReconciliation(cfg config, w *writer, cmd reconcileIngressCommand
 			for _, route := range cmd.Routes {
 				results = append(results, ingressRouteResult{Hostname: route.Hostname, Error: sanitizeProbeError(err.Error())})
 			}
-			complete(false)
+			complete(false, err)
 			return
 		}
 	}
 
-	config := renderCaddyfile(cmd.Routes)
+	config := renderCaddyfile(cmd.Routes, cmd.ReconciliationID)
 	if err := writeAtomic(filepath.Join(caddyDir, "Caddyfile"), []byte(config), 0o600); err != nil {
 		for _, route := range cmd.Routes {
 			results = append(results, ingressRouteResult{Hostname: route.Hostname, Error: sanitizeProbeError(err.Error())})
 		}
-		complete(false)
+		complete(false, err)
 		return
 	}
 	if err := validateCaddyConfig(caddyDir); err != nil {
 		for _, route := range cmd.Routes {
 			results = append(results, ingressRouteResult{Hostname: route.Hostname, Error: sanitizeProbeError(err.Error())})
 		}
-		complete(false)
+		complete(false, err)
 		return
 	}
 	if err := ensureCaddy(caddyDir, dataDir, configDir); err != nil {
 		for _, route := range cmd.Routes {
 			results = append(results, ingressRouteResult{Hostname: route.Hostname, Error: sanitizeProbeError(err.Error())})
 		}
-		complete(false)
+		complete(false, err)
 		return
 	}
 
+	results = verifyIngressRoutes(cmd.Routes, cmd.ReconciliationID)
 	allOK := true
-	for _, route := range cmd.Routes {
-		err := verifyHTTPSRoute(route.Hostname, 75*time.Second)
-		result := ingressRouteResult{Hostname: route.Hostname, OK: err == nil}
-		if err != nil {
-			result.Error = sanitizeProbeError(err.Error())
+	for _, result := range results {
+		if !result.OK {
 			allOK = false
+			break
 		}
-		results = append(results, result)
 	}
-	complete(allOK)
+	complete(allOK, nil)
 }
 
 func validateIngressRoutes(routes []ingressRoute) error {
@@ -156,13 +172,17 @@ func validHostname(host string) bool {
 	return true
 }
 
-func renderCaddyfile(routes []ingressRoute) string {
+func renderCaddyfile(routes []ingressRoute, reconciliationID string) string {
 	sorted := append([]ingressRoute(nil), routes...)
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Hostname < sorted[j].Hostname })
 	var builder strings.Builder
 	for _, route := range sorted {
 		builder.WriteString(route.Hostname)
-		builder.WriteString(" {\n\treverse_proxy 127.0.0.1:")
+		builder.WriteString(" {\n\theader ")
+		builder.WriteString(ingressMarkerHeader)
+		builder.WriteByte(' ')
+		builder.WriteString(reconciliationID)
+		builder.WriteString("\n\treverse_proxy 127.0.0.1:")
 		builder.WriteString(strconv.Itoa(route.HostPort))
 		builder.WriteString("\n}\n\n")
 	}
@@ -226,29 +246,126 @@ func ensureCaddy(caddyDir, dataDir, configDir string) error {
 	return nil
 }
 
-func verifyHTTPSRoute(hostname string, deadline time.Duration) error {
-	transport := &http.Transport{TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12}}
-	client := &http.Client{
-		Timeout: 5 * time.Second,
-		Transport: transport,
-		CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse },
+func verifyIngressRoutes(routes []ingressRoute, reconciliationID string) []ingressRouteResult {
+	results := make([]ingressRouteResult, len(routes))
+	semaphore := make(chan struct{}, 8)
+	var wg sync.WaitGroup
+	for i, route := range routes {
+		wg.Add(1)
+		go func(index int, current ingressRoute) {
+			defer wg.Done()
+			semaphore <- struct{}{}
+			defer func() { <-semaphore }()
+			err := verifyHTTPSRoute(current.Hostname, reconciliationID, 75*time.Second)
+			result := ingressRouteResult{Hostname: current.Hostname, OK: err == nil}
+			if err != nil {
+				result.Error = sanitizeProbeError(err.Error())
+			}
+			results[index] = result
+		}(i, route)
 	}
-	defer transport.CloseIdleConnections()
+	wg.Wait()
+	return results
+}
+
+func resolveSafePublicIPs(ctx context.Context, hostname string) ([]net.IP, error) {
+	addresses, err := net.DefaultResolver.LookupIPAddr(ctx, hostname)
+	if err != nil {
+		return nil, fmt.Errorf("resolve %s: %w", hostname, err)
+	}
+	seen := map[string]struct{}{}
+	ips := make([]net.IP, 0, len(addresses))
+	for _, address := range addresses {
+		if !isSafePublicIP(address.IP) {
+			continue
+		}
+		key := address.IP.String()
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		ips = append(ips, address.IP)
+	}
+	if len(ips) == 0 {
+		return nil, fmt.Errorf("%s does not resolve to a safe public address", hostname)
+	}
+	return ips, nil
+}
+
+func isSafePublicIP(ip net.IP) bool {
+	if ip == nil || !ip.IsGlobalUnicast() || ip.IsPrivate() || ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified() || ip.IsMulticast() {
+		return false
+	}
+	for _, cidr := range []string{"100.64.0.0/10", "198.18.0.0/15"} {
+		_, network, err := net.ParseCIDR(cidr)
+		if err == nil && network.Contains(ip) {
+			return false
+		}
+	}
+	return true
+}
+
+func verifyHTTPSRoute(hostname, reconciliationID string, deadline time.Duration) error {
 	end := time.Now().Add(deadline)
 	var lastErr error
 	for time.Now().Before(end) {
+		resolveCtx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+		ips, resolveErr := resolveSafePublicIPs(resolveCtx, hostname)
+		cancel()
+		if resolveErr != nil {
+			lastErr = resolveErr
+			time.Sleep(3 * time.Second)
+			continue
+		}
+
+		transport := &http.Transport{
+			TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12, ServerName: hostname},
+		}
+		transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+			_, port, splitErr := net.SplitHostPort(address)
+			if splitErr != nil {
+				port = "443"
+			}
+			var dialErr error
+			dialer := &net.Dialer{Timeout: 3 * time.Second}
+			for _, ip := range ips {
+				conn, err := dialer.DialContext(ctx, "tcp", net.JoinHostPort(ip.String(), port))
+				if err == nil {
+					return conn, nil
+				}
+				dialErr = err
+			}
+			if dialErr == nil {
+				dialErr = errors.New("no public address could be dialed")
+			}
+			return nil, dialErr
+		}
+		client := &http.Client{
+			Timeout:   5 * time.Second,
+			Transport: transport,
+			CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
+		}
 		req, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, "https://"+hostname+"/", nil)
 		resp, err := client.Do(req)
 		if err == nil {
 			_, _ = io.Copy(io.Discard, resp.Body)
 			resp.Body.Close()
-			if resp.StatusCode < 500 {
+			marker := resp.Header.Get(ingressMarkerHeader)
+			if resp.StatusCode < 500 && marker == reconciliationID {
+				transport.CloseIdleConnections()
 				return nil
 			}
-			lastErr = fmt.Errorf("HTTPS returned %s", resp.Status)
+			if marker != reconciliationID {
+				lastErr = fmt.Errorf("DNS does not reach the current Rundea ingress reconciliation")
+			} else {
+				lastErr = fmt.Errorf("HTTPS returned %s", resp.Status)
+			}
 		} else {
 			lastErr = err
 		}
+		transport.CloseIdleConnections()
 		time.Sleep(3 * time.Second)
 	}
 	if lastErr == nil {
