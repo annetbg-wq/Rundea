@@ -118,6 +118,12 @@ func extractSourceArchive(compressed io.Reader, destination string) error {
 		if entries > maxSourceBundleEntries {
 			return errors.New("source bundle contains too many entries")
 		}
+		if hdr.Typeflag == tar.TypeXGlobalHeader {
+			if hdr.Size != 0 {
+				return errors.New("source bundle contains non-empty global PAX metadata")
+			}
+			continue
+		}
 		if strings.ContainsRune(hdr.Name, '\x00') || strings.ContainsRune(hdr.Name, '\\') {
 			return errors.New("source bundle contains an unsafe path")
 		}
