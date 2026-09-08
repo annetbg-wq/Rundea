@@ -79,6 +79,7 @@ export type AgentEvent =
   | {
       type: "ingress";
       reconciliationId: string;
+      applied: boolean;
       ok: boolean;
       routes: Array<{ hostname: string; ok: boolean; error?: string }>;
       error?: string;
