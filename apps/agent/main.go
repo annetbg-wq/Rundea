@@ -192,6 +192,18 @@ func connectAndServe(cfg config) error {
 				continue
 			}
 			go runDeployment(cfg, w, cmd)
+		case "rollback":
+			var cmd rollbackCommand
+			if err := json.Unmarshal(payload, &cmd); err != nil {
+				continue
+			}
+			go runRollback(cfg, w, cmd)
+		case "restart":
+			var cmd restartCommand
+			if err := json.Unmarshal(payload, &cmd); err != nil {
+				continue
+			}
+			go runRestart(w, cmd)
 		case "qualify":
 			var cmd qualifyCommand
 			if err := json.Unmarshal(payload, &cmd); err != nil || cmd.QualificationID == "" || cmd.Profile == "" {
@@ -209,6 +221,9 @@ func connectAndServe(cfg config) error {
 }
 
 func runDeployment(cfg config, w *writer, cmd deployCommand) {
+	runtimeMu.Lock()
+	defer runtimeMu.Unlock()
+
 	ctx := context.Background()
 	fail := func(err error) {
 		w.log(cmd.DeploymentID, "system", err.Error())
@@ -234,6 +249,11 @@ func runDeployment(cfg config, w *writer, cmd deployCommand) {
 		fail(fmt.Errorf("git clone: %w", err))
 		return
 	}
+	sourceSHA, err := sourceCommitSHA(ctx, sourceDir)
+	if err != nil {
+		fail(err)
+		return
+	}
 
 	dockerfile, plan, err := prepareDockerfile(sourceDir, cmd.Source.Dockerfile)
 	if err != nil {
@@ -246,6 +266,20 @@ func runDeployment(cfg config, w *writer, cmd deployCommand) {
 	imageTag := "rundea/" + strings.ToLower(cmd.DeploymentID) + ":build"
 	if err := runStreamingIn(ctx, sourceDir, w, cmd.DeploymentID, "build", "docker", "build", "--pull", "-f", dockerfile, "-t", imageTag, "."); err != nil {
 		fail(fmt.Errorf("docker build: %w", err))
+		return
+	}
+	imageID, err := inspectImageID(ctx, imageTag)
+	if err != nil {
+		fail(err)
+		return
+	}
+	if err := w.send(map[string]any{
+		"type": "artifact",
+		"deploymentId": cmd.DeploymentID,
+		"sourceCommitSha": sourceSHA,
+		"imageId": imageID,
+		"healthcheckPath": healthcheckPath,
+	}); err != nil {
 		return
 	}
 
@@ -288,7 +322,7 @@ func runDeployment(cfg config, w *writer, cmd deployCommand) {
 		cleanupContainer(ctx, w, cmd.DeploymentID, cmd.Runtime.ContainerName)
 		return
 	}
-	go streamRuntimeLogs(ctx, w, cmd.DeploymentID, cmd.Runtime.ContainerName)
+	go streamRuntimeLogs(context.Background(), w, cmd.DeploymentID, cmd.Runtime.ContainerName)
 }
 
 func cleanupContainer(ctx context.Context, w *writer, deploymentID, containerName string) {
