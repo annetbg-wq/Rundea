@@ -74,3 +74,35 @@ CREATE UNIQUE INDEX IF NOT EXISTS runtime_actions_one_restart_idx
 CREATE UNIQUE INDEX IF NOT EXISTS runtime_actions_one_node_idx
   ON runtime_actions(node_id) WHERE status='RUNNING';
 CREATE INDEX IF NOT EXISTS runtime_actions_created_idx ON runtime_actions(created_at DESC);
+
+CREATE OR REPLACE FUNCTION rundea_guard_dispatch_against_runtime_action()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  IF NEW.dispatch_lease_until IS NOT NULL
+     AND OLD.dispatch_lease_until IS DISTINCT FROM NEW.dispatch_lease_until THEN
+    PERFORM 1 FROM nodes WHERE id=NEW.node_id FOR UPDATE;
+    IF NOT FOUND THEN
+      RAISE EXCEPTION 'deployment node does not exist';
+    END IF;
+    IF EXISTS (
+      SELECT 1 FROM runtime_actions WHERE node_id=NEW.node_id AND status='RUNNING'
+    ) THEN
+      RAISE EXCEPTION 'node has a running runtime action';
+    END IF;
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_trigger WHERE tgname='deployments_guard_dispatch_before_update' AND NOT tgisinternal
+  ) THEN
+    CREATE TRIGGER deployments_guard_dispatch_before_update
+      BEFORE UPDATE OF dispatch_lease_until ON deployments
+      FOR EACH ROW EXECUTE FUNCTION rundea_guard_dispatch_against_runtime_action();
+  END IF;
+END $$;
