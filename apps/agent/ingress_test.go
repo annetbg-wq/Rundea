@@ -33,7 +33,7 @@ func TestRenderCaddyfileIsDeterministicAndMarksReconciliation(t *testing.T) {
 		{Hostname: "z.example.com", HostPort: 19000},
 		{Hostname: "a.example.com", HostPort: 18000},
 	}, marker)
-	want := "a.example.com {\n\theader X-Rundea-Reconciliation " + marker + "\n\treverse_proxy 127.0.0.1:18000\n}\n\nz.example.com {\n\theader X-Rundea-Reconciliation " + marker + "\n\treverse_proxy 127.0.0.1:19000\n}\n\n"
+	want := "a.example.com {\n\treverse_proxy 127.0.0.1:18000 {\n\t\theader_down X-Rundea-Reconciliation " + marker + "\n\t}\n}\n\nz.example.com {\n\treverse_proxy 127.0.0.1:19000 {\n\t\theader_down X-Rundea-Reconciliation " + marker + "\n\t}\n}\n\n"
 	if got != want {
 		t.Fatalf("unexpected Caddyfile:\n%s", got)
 	}
