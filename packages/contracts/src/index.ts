@@ -92,7 +92,7 @@ export type NodeProbeResult = {
 export type AgentEvent =
   | { type: "heartbeat"; at: string }
   | { type: "status"; deploymentId: string; status: DeploymentStatus; message?: string; containerId?: string }
-  | { type: "artifact"; deploymentId: string; sourceCommitSha: string; imageId: string }
+  | { type: "artifact"; deploymentId: string; sourceCommitSha: string; imageId: string; healthcheckPath: string }
   | { type: "log"; deploymentId: string; stream: "build" | "runtime" | "system"; message: string; at: string }
   | {
       type: "qualification";
