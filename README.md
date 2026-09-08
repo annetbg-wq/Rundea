@@ -8,6 +8,10 @@ Rundea is an infrastructure-agnostic deployment platform: Railway-like developer
 GitHub push -> Control Plane API -> outbound Agent connection -> Docker -> User Service
                     |                                  |
                 PostgreSQL                         managed Caddy
+                    |
+             Source Broker
+                    |
+          GitHub / GitHub App
 ```
 
 The Control Plane owns desired state, encrypted service configuration, GitHub push delivery state, domains and deployment history. A small Go Agent runs on each VPS, opens an authenticated outbound WebSocket to the Control Plane, and executes explicit deployment/runtime commands against the local Docker runtime.
@@ -22,15 +26,17 @@ The current vertical path is small but executable end to end:
 4. save service variables/secrets encrypted at rest;
 5. create a deployment through the API or web UI;
 6. resolve a public GitHub branch/tag or an exact 40-hex commit SHA;
-7. if a Dockerfile is present, use it; otherwise generate a Node.js 24 build plan from `package.json`;
-8. run the container with a short-lived environment transport file;
-9. resolve and execute the healthcheck;
-10. persist Git SHA, Docker image identity, logs, state and immutable deployment environment snapshot;
-11. attach custom domains through managed Caddy and automatic HTTPS;
-12. restart the current READY revision with a required healthcheck;
-13. roll back to an exact retained historical image and its exact encrypted environment snapshot;
-14. qualify a node for workload-specific egress such as Sendina SMTP/IMAP connectivity;
-15. accept an HMAC-authenticated GitHub `push` event and create the matching service deployment at the exact pushed `after` commit SHA.
+7. optionally deliver an exact source archive through the Rundea Source Broker so the node receives no GitHub credential;
+8. if a Dockerfile is present, use it; otherwise generate a Node.js 24 build plan from `package.json`;
+9. run the container with a short-lived environment transport file;
+10. resolve and execute the healthcheck;
+11. persist Git SHA, Docker image identity, logs, state and immutable deployment environment snapshot;
+12. attach custom domains through managed Caddy and automatic HTTPS;
+13. restart the current READY revision with a required healthcheck;
+14. roll back to an exact retained historical image and its exact encrypted environment snapshot;
+15. qualify a node for workload-specific egress such as Sendina SMTP/IMAP connectivity;
+16. accept an HMAC-authenticated GitHub `push` event and create the matching service deployment at the exact pushed `after` commit SHA through the Source Broker;
+17. when a Rundea GitHub App is configured, authenticate private repository archive retrieval inside the Control Plane without forwarding GitHub credentials to the node.
 
 `READY` is emitted only after a successful healthcheck.
 
@@ -105,11 +111,16 @@ curl -sS -X PUT http://localhost:4000/v0/services/sendina/variables \
 
 ## Create a deployment
 
-The source repository must currently be an HTTPS GitHub repository cloneable by the Agent without interactive credentials. Private GitHub App source delivery remains a separate slice; Rundea will not require permanent GitHub PATs on nodes.
-
 `sourceRef` may be a named branch/tag or a full 40-hex commit SHA. Exact commit deployments use shallow fetch + detached checkout and verify that the checked-out `HEAD` is exactly the requested SHA.
 
+There are two source delivery modes:
+
+- `DIRECT` — the Agent clones the GitHub repository itself. In v0 this requires a repository that is cloneable without interactive credentials.
+- `BROKER` — requires an exact 40-hex commit SHA. The Control Plane issues a two-minute, single-use deployment/node-scoped Rundea ticket; the Agent downloads the exact source archive from Rundea and receives no GitHub repository credential.
+
 A Dockerfile is optional. When omitted, Rundea currently supports a Node.js 24 auto-build plan. Healthcheck path is also optional; compatible Railway metadata is read as a migration convenience before falling back to `/health`.
+
+Direct example:
 
 ```bash
 curl -sS -X POST http://localhost:4000/v0/deployments \
@@ -125,7 +136,51 @@ curl -sS -X POST http://localhost:4000/v0/deployments \
   }'
 ```
 
-For the current Sendina repository this selects the Node.js auto-build path and detects `/api/health` from its existing deployment metadata, without requiring a Rundea-specific commit in Sendina.
+Brokered exact-SHA example:
+
+```bash
+curl -sS -X POST http://localhost:4000/v0/deployments \
+  -H 'content-type: application/json' \
+  -H 'authorization: Bearer local-dev-only-control-token-0123456789abcdef' \
+  -d '{
+    "serviceName":"private-service",
+    "nodeId":"<node-id>",
+    "sourceRepository":"https://github.com/acme/private-service.git",
+    "sourceRef":"<exact-40-hex-commit-sha>",
+    "sourceDelivery":"BROKER",
+    "containerPort":3000,
+    "hostPort":18080
+  }'
+```
+
+For the current Sendina repository the Node.js auto-build path detects its existing health metadata without requiring a Rundea-specific commit in Sendina.
+
+## GitHub App private source
+
+Private GitHub repositories use the same `BROKER` Agent contract as public brokered source. GitHub authentication exists only in the Control Plane.
+
+Configure both values together:
+
+```text
+RUNDEA_GITHUB_APP_ID=<numeric-app-id>
+RUNDEA_GITHUB_APP_PRIVATE_KEY_BASE64=<base64-of-github-app-pem-private-key>
+```
+
+Never commit the real private key. The PEM is base64-encoded only to make secret/environment transport reliable; base64 is not encryption, so production must keep this value in a proper secret-management boundary.
+
+When a brokered repository is not publicly downloadable, Rundea:
+
+1. creates a short-lived RS256 GitHub App JWT;
+2. resolves the App installation for the exact repository;
+3. requests an installation token restricted to that one repository and `contents:read`;
+4. requests the exact commit archive from `api.github.com` without automatically following redirects;
+5. accepts only an HTTPS `codeload.github.com` redirect;
+6. downloads that temporary URL in a new request **without** the installation token;
+7. applies the existing compressed-size limit before delivering the archive through the one-time Rundea Source Broker ticket.
+
+The GitHub App private key and installation token never go to the Agent, deployment environment or database. Installation tokens are not persisted.
+
+The adapter, JWT signing, least-privilege token request and credential-stripping rules are covered in CI. A claim of real GitHub private-repository operation still requires a live Rundea GitHub App installation acceptance run; until that is performed, the external private-source integration is implemented but not live-accepted.
 
 ## GitHub push autodeploy
 
@@ -146,11 +201,11 @@ curl -sS -X PUT http://localhost:4000/v0/services/sendina/autodeploy \
   }'
 ```
 
-Configure the GitHub repository webhook to send `push` events to `/v0/github/webhook` using the same secret. The endpoint is intentionally public, but it accepts a GitHub event only when `X-Hub-Signature-256` matches the HMAC-SHA256 of the exact raw request body.
+Configure the GitHub repository or Rundea GitHub App webhook to send `push` events to `/v0/github/webhook` using the same secret. The endpoint is intentionally public, but it accepts a GitHub event only when `X-Hub-Signature-256` matches the HMAC-SHA256 of the exact raw request body.
 
-Rundea matches the authenticated push by canonical repository + branch, then creates the deployment using the repository URL stored in the service configuration and `sourceRef=<push.after>`. It does **not** trust a clone URL supplied by the webhook payload. `X-GitHub-Delivery` is persisted as an idempotency key, so GitHub redelivery cannot create a duplicate deployment for the same delivery id.
+Rundea matches the authenticated push by canonical repository + branch, then creates the deployment using the repository URL stored in the service configuration and `sourceRef=<push.after>`. It does **not** trust a clone URL supplied by the webhook payload. `X-GitHub-Delivery` and the raw-body digest provide idempotency/replay protection.
 
-This path currently covers public GitHub repositories. GitHub App installation credentials and private-source delivery remain separate; no long-lived GitHub PAT is placed on the node.
+Webhook-triggered deployments are forced into `BROKER` source delivery before dispatch. A GitHub push is already pinned to an exact commit SHA, so the node has no reason to perform a mutable branch clone. This also means the same autodeploy path can use the GitHub App adapter for private repositories without changing the Agent.
 
 ## Runtime controls
 
@@ -166,12 +221,12 @@ The gate verifies:
 
 - Agent enrollment and `ONLINE` state;
 - a signed GitHub `push` creating the deployment at the exact pushed commit;
-- duplicate `X-GitHub-Delivery` idempotency and delivery-to-deployment observability;
+- duplicate `X-GitHub-Delivery` idempotency, raw-body replay protection and delivery-to-deployment observability;
+- one-time Source Broker ticket delivery and safe GitHub archive extraction;
 - Node.js auto-build and real Docker container startup;
 - healthcheck and actual HTTP response;
 - persisted source SHA/image identity/environment snapshot;
 - Restart;
-- second deployment;
 - exact rollback;
 - rollback chaining.
 
@@ -179,14 +234,17 @@ CI also produces Linux amd64/arm64 Agent binaries and a verified `SHA256SUMS` ma
 
 This is stronger than unit testing but is still not a claim that an independently provisioned Internet VPS has passed provider-specific networking, DNS and ingress checks. A real production-candidate node must run the same product path plus any workload-specific qualification on that actual host.
 
+The public fixture proves the Source Broker runtime mechanics. GitHub App unit/integration tests prove the private credential boundary, but real private-repository GitHub acceptance is a separate external gate because CI does not contain a production Rundea GitHub App private key.
+
 ## Current scope boundary
 
-Rundea now has the core Control Plane -> Agent -> Docker path, encrypted configuration, Node.js auto-build, exact Git commit resolution, signed push autodeploy for public GitHub repositories, node egress qualification, custom domains/managed HTTPS, deployment history, Restart and exact node-local Rollback.
+Rundea now has the core Control Plane -> Agent -> Docker path, encrypted configuration, Node.js auto-build, exact Git commit resolution, signed push autodeploy through Source Broker, optional GitHub App private-source retrieval, node egress qualification, custom domains/managed HTTPS, deployment history, Restart and exact node-local Rollback.
 
 Still outside the current v0 proof boundary:
 
 - production user/org authentication and authorization;
-- GitHub App private-source delivery, automatic App/webhook installation and short-lived private-source credential brokering;
+- live acceptance against a real installed Rundea GitHub App + private repository;
+- automatic GitHub App installation/connect UX;
 - public production Agent binary distribution;
 - external-VPS acceptance on a real provider node;
 - cross-node artifact storage/rollback;
