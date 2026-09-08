@@ -12,15 +12,9 @@ import (
 	"os"
 	"path"
 	"path/filepath"
-	"regexp"
 	"strings"
+	"time"
 )
-
-type sourceAccess struct {
-	Kind    string `json:"kind"`
-	GrantID string `json:"grantId"`
-	Token   string `json:"token"`
-}
 
 const (
 	maxCompressedSourceBytes   int64 = 64 * 1024 * 1024
@@ -28,31 +22,22 @@ const (
 	maxSourceArchiveEntries          = 100000
 )
 
-var grantIDPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$`)
-
 func materializeSource(ctx context.Context, cfg config, w *writer, cmd deployCommand, destination string) (string, error) {
-	if cmd.Source.Access == nil {
-		if err := cloneSource(ctx, w, cmd.DeploymentID, cmd.Source.Repository, cmd.Source.Ref, destination); err != nil {
-			return "", err
-		}
-		return sourceCommitSHA(ctx, destination)
-	}
-	if cmd.Source.Access.Kind != "rundeaGrant" {
-		return "", fmt.Errorf("unsupported source access kind %q", cmd.Source.Access.Kind)
-	}
-	if !isFullGitCommit(cmd.Source.Ref) {
-		return "", errors.New("brokered private source requires an exact commit SHA")
-	}
-	if !grantIDPattern.MatchString(cmd.Source.Access.GrantID) || cmd.Source.Access.Token == "" || len(cmd.Source.Access.Token) > 512 {
-		return "", errors.New("invalid private source grant")
-	}
-	if err := downloadSourceGrant(ctx, cfg, cmd.Source.Access, strings.ToLower(cmd.Source.Ref), destination); err != nil {
+	handled, sourceSHA, err := tryBrokeredSource(ctx, cfg, cmd.DeploymentID, cmd.Source.Ref, destination)
+	if err != nil {
 		return "", err
 	}
-	return strings.ToLower(cmd.Source.Ref), nil
+	if handled {
+		w.log(cmd.DeploymentID, "system", "source delivered through Rundea private-source broker")
+		return sourceSHA, nil
+	}
+	if err := cloneSource(ctx, w, cmd.DeploymentID, cmd.Source.Repository, cmd.Source.Ref, destination); err != nil {
+		return "", err
+	}
+	return sourceCommitSHA(ctx, destination)
 }
 
-func sourceGrantURL(controlPlane, grantID string) (string, error) {
+func sourceArchiveURL(controlPlane, deploymentID string) (string, error) {
 	u, err := url.Parse(controlPlane)
 	if err != nil {
 		return "", err
@@ -60,45 +45,55 @@ func sourceGrantURL(controlPlane, grantID string) (string, error) {
 	if u.Scheme != "http" && u.Scheme != "https" {
 		return "", fmt.Errorf("unsupported control plane scheme %q", u.Scheme)
 	}
-	u.Path = strings.TrimRight(u.Path, "/") + "/v0/source-grants/" + url.PathEscape(grantID) + "/archive"
+	u.Path = strings.TrimRight(u.Path, "/") + "/v0/deployments/" + url.PathEscape(deploymentID) + "/source-archive"
 	u.RawQuery = ""
 	u.Fragment = ""
 	return u.String(), nil
 }
 
-func downloadSourceGrant(ctx context.Context, cfg config, access *sourceAccess, expectedSHA, destination string) error {
-	endpoint, err := sourceGrantURL(cfg.ControlPlane, access.GrantID)
+func tryBrokeredSource(ctx context.Context, cfg config, deploymentID, sourceRef, destination string) (bool, string, error) {
+	endpoint, err := sourceArchiveURL(cfg.ControlPlane, deploymentID)
 	if err != nil {
-		return err
+		return false, "", err
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
-		return err
+		return false, "", err
 	}
 	req.Header.Set("Authorization", "Bearer "+cfg.Token)
 	req.Header.Set("X-Rundea-Node-Id", cfg.NodeID)
-	req.Header.Set("X-Rundea-Source-Grant", access.Token)
-	client := &http.Client{Timeout: 2 * 60 * 1000000000}
+	client := &http.Client{Timeout: 2 * time.Minute}
 	resp, err := client.Do(req)
 	if err != nil {
-		return fmt.Errorf("source grant download: %w", err)
+		return false, "", fmt.Errorf("private source broker request: %w", err)
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+		return false, "", nil
+	}
 	if resp.StatusCode != http.StatusOK {
 		io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
-		return fmt.Errorf("source grant download returned HTTP %d", resp.StatusCode)
+		return true, "", fmt.Errorf("private source broker returned HTTP %d", resp.StatusCode)
 	}
+	if !isFullGitCommit(sourceRef) {
+		return true, "", errors.New("brokered private source requires an exact commit SHA")
+	}
+	expectedSHA := strings.ToLower(sourceRef)
 	if actual := strings.ToLower(resp.Header.Get("X-Rundea-Source-Sha")); actual != expectedSHA {
-		return fmt.Errorf("source grant identity mismatch: expected %s, received %s", expectedSHA, actual)
+		return true, "", fmt.Errorf("private source identity mismatch: expected %s, received %s", expectedSHA, actual)
+	}
+	if declared := resp.ContentLength; declared > maxCompressedSourceBytes {
+		return true, "", errors.New("compressed private source exceeds 64 MiB")
 	}
 	limited := &io.LimitedReader{R: resp.Body, N: maxCompressedSourceBytes + 1}
 	if err := extractSourceArchive(limited, destination); err != nil {
-		return err
+		return true, "", err
 	}
 	if limited.N <= 0 {
-		return errors.New("compressed private source exceeds 64 MiB")
+		return true, "", errors.New("compressed private source exceeds 64 MiB")
 	}
-	return nil
+	return true, expectedSHA, nil
 }
 
 func extractSourceArchive(compressed io.Reader, destination string) error {
