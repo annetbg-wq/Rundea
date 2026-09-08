@@ -32,8 +32,10 @@ type deployCommand struct {
 	DeploymentID string `json:"deploymentId"`
 	ServiceName  string `json:"serviceName"`
 	Source       struct {
+		Mode       string `json:"mode"`
 		Repository string `json:"repository"`
 		Ref        string `json:"ref"`
+		Ticket     string `json:"ticket"`
 		Dockerfile string `json:"dockerfile"`
 	} `json:"source"`
 	Runtime struct {
@@ -245,14 +247,25 @@ func runDeployment(cfg config, w *writer, cmd deployCommand) {
 	if err := w.status(cmd.DeploymentID, "BUILDING", "checking out source", ""); err != nil {
 		return
 	}
-	if err := cloneSource(ctx, w, cmd.DeploymentID, cmd.Source.Repository, cmd.Source.Ref, sourceDir); err != nil {
-		fail(fmt.Errorf("source checkout: %w", err))
-		return
-	}
-	sourceSHA, err := sourceCommitSHA(ctx, sourceDir)
-	if err != nil {
-		fail(err)
-		return
+	var sourceSHA string
+	if cmd.Source.Mode == "bundle" {
+		if err := fetchBrokeredSource(ctx, cfg, cmd.DeploymentID, cmd.Source.Ticket, cmd.Source.Ref, sourceDir); err != nil {
+			fail(fmt.Errorf("brokered source checkout: %w", err))
+			return
+		}
+		sourceSHA = strings.ToLower(cmd.Source.Ref)
+		w.log(cmd.DeploymentID, "system", "source delivered through Rundea broker")
+	} else {
+		if err := cloneSource(ctx, w, cmd.DeploymentID, cmd.Source.Repository, cmd.Source.Ref, sourceDir); err != nil {
+			fail(fmt.Errorf("source checkout: %w", err))
+			return
+		}
+		resolvedSHA, err := sourceCommitSHA(ctx, sourceDir)
+		if err != nil {
+			fail(err)
+			return
+		}
+		sourceSHA = resolvedSHA
 	}
 
 	dockerfile, plan, err := prepareDockerfile(sourceDir, cmd.Source.Dockerfile)
@@ -333,16 +346,31 @@ func cleanupContainer(ctx context.Context, w *writer, deploymentID, containerNam
 }
 
 func validateCommand(cmd deployCommand) error {
-	if cmd.DeploymentID == "" || cmd.Source.Repository == "" || cmd.Source.Ref == "" {
+	if cmd.DeploymentID == "" || cmd.Source.Ref == "" {
 		return errors.New("deployment command is missing source fields")
 	}
-	repoURL, err := url.Parse(cmd.Source.Repository)
-	if err != nil || repoURL.Scheme != "https" || !strings.EqualFold(repoURL.Hostname(), "github.com") || repoURL.User != nil {
-		return errors.New("source repository must be an HTTPS github.com URL without embedded credentials")
-	}
-	if !isFullGitCommit(cmd.Source.Ref) {
-		if err := validateNamedGitRef(cmd.Source.Ref); err != nil {
-			return err
+	if cmd.Source.Mode == "bundle" {
+		if cmd.Source.Ticket == "" || !isFullGitCommit(cmd.Source.Ref) {
+			return errors.New("brokered source requires a ticket and exact commit SHA")
+		}
+		if cmd.Source.Repository != "" {
+			return errors.New("brokered source must not expose repository credentials or clone URLs to the Agent")
+		}
+	} else {
+		if cmd.Source.Mode != "" && cmd.Source.Mode != "git" {
+			return errors.New("deployment command contains an unknown source mode")
+		}
+		if cmd.Source.Repository == "" {
+			return errors.New("direct git source is missing repository")
+		}
+		repoURL, err := url.Parse(cmd.Source.Repository)
+		if err != nil || repoURL.Scheme != "https" || !strings.EqualFold(repoURL.Hostname(), "github.com") || repoURL.User != nil {
+			return errors.New("source repository must be an HTTPS github.com URL without embedded credentials")
+		}
+		if !isFullGitCommit(cmd.Source.Ref) {
+			if err := validateNamedGitRef(cmd.Source.Ref); err != nil {
+				return err
+			}
 		}
 	}
 	if cmd.Source.Dockerfile != "" {
