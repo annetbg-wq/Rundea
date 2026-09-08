@@ -28,24 +28,30 @@ func sourceArchive(t *testing.T, entries []archiveEntry) []byte {
 		if typeflag == 0 {
 			typeflag = tar.TypeReg
 		}
-		mode := entry.mode
-		if mode == 0 {
-			mode = 0o644
-		}
-		hdr := &tar.Header{
-			Name: entry.name,
-			Mode: mode,
-			Size: int64(len(entry.body)),
-			Typeflag: typeflag,
-			Linkname: entry.linkname,
-		}
-		if typeflag == tar.TypeDir || typeflag == tar.TypeSymlink || typeflag == tar.TypeLink {
-			hdr.Size = 0
-		}
+
+		var hdr *tar.Header
 		if typeflag == tar.TypeXGlobalHeader {
-			hdr.Size = 0
-			hdr.PAXRecords = map[string]string{"comment": "rundea-test"}
+			hdr = &tar.Header{
+				Typeflag: tar.TypeXGlobalHeader,
+				PAXRecords: map[string]string{"comment": "rundea-test"},
+			}
+		} else {
+			mode := entry.mode
+			if mode == 0 {
+				mode = 0o644
+			}
+			hdr = &tar.Header{
+				Name: entry.name,
+				Mode: mode,
+				Size: int64(len(entry.body)),
+				Typeflag: typeflag,
+				Linkname: entry.linkname,
+			}
+			if typeflag == tar.TypeDir || typeflag == tar.TypeSymlink || typeflag == tar.TypeLink {
+				hdr.Size = 0
+			}
 		}
+
 		if err := tw.WriteHeader(hdr); err != nil {
 			t.Fatal(err)
 		}
@@ -93,7 +99,7 @@ func TestExtractSourceArchiveStripsGitHubRoot(t *testing.T) {
 func TestExtractSourceArchiveAcceptsGitHubPAXGlobalHeader(t *testing.T) {
 	destination := filepath.Join(t.TempDir(), "src")
 	archive := sourceArchive(t, []archiveEntry{
-		{name: "owner-repo-sha", typeflag: tar.TypeXGlobalHeader},
+		{typeflag: tar.TypeXGlobalHeader},
 		{name: "owner-repo-sha/", typeflag: tar.TypeDir},
 		{name: "owner-repo-sha/package.json", body: `{}`},
 	})
