@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { Pool, PoolClient } from "pg";
 import type { AgentCommand, AgentEvent } from "@rundea/contracts";
+import { registerGitHubAutodeployRoutes } from "./github-autodeploy";
 import type { NodeCommandSocket } from "./node-qualification";
 import { copyDeploymentEnvironment } from "./service-variables";
 
@@ -52,6 +53,8 @@ export function registerRuntimeControlRoutes(
   requireControl: ControlPreHandler,
   dispatchQueued: DispatchQueued,
 ): void {
+  registerGitHubAutodeployRoutes(app, pool, requireControl, dispatchQueued, process.env.RUNDEA_GITHUB_WEBHOOK_SECRET);
+
   app.get("/v0/runtime-actions", { preHandler: requireControl }, async () => {
     const result = await pool.query(
       `SELECT id,deployment_id,node_id,kind,status,error,created_at,completed_at

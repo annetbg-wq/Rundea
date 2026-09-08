@@ -5,12 +5,12 @@ Rundea is an infrastructure-agnostic deployment platform: Railway-like developer
 ## v0 architecture
 
 ```text
-Rundea Web -> Control Plane API -> outbound Agent connection -> Docker -> User Service
-                      |                                  |
-                  PostgreSQL                         managed Caddy
+GitHub push -> Control Plane API -> outbound Agent connection -> Docker -> User Service
+                    |                                  |
+                PostgreSQL                         managed Caddy
 ```
 
-The Control Plane owns desired state, encrypted service configuration, domains and deployment history. A small Go Agent runs on each VPS, opens an authenticated outbound WebSocket to the Control Plane, and executes explicit deployment/runtime commands against the local Docker runtime.
+The Control Plane owns desired state, encrypted service configuration, GitHub push delivery state, domains and deployment history. A small Go Agent runs on each VPS, opens an authenticated outbound WebSocket to the Control Plane, and executes explicit deployment/runtime commands against the local Docker runtime.
 
 ## What runs today
 
@@ -21,7 +21,7 @@ The current vertical path is small but executable end to end:
 3. the Agent connects outbound to the Control Plane;
 4. save service variables/secrets encrypted at rest;
 5. create a deployment through the API or web UI;
-6. the Agent clones the requested public GitHub ref;
+6. resolve a public GitHub branch/tag or an exact 40-hex commit SHA;
 7. if a Dockerfile is present, use it; otherwise generate a Node.js 24 build plan from `package.json`;
 8. run the container with a short-lived environment transport file;
 9. resolve and execute the healthcheck;
@@ -29,7 +29,8 @@ The current vertical path is small but executable end to end:
 11. attach custom domains through managed Caddy and automatic HTTPS;
 12. restart the current READY revision with a required healthcheck;
 13. roll back to an exact retained historical image and its exact encrypted environment snapshot;
-14. qualify a node for workload-specific egress such as Sendina SMTP/IMAP connectivity.
+14. qualify a node for workload-specific egress such as Sendina SMTP/IMAP connectivity;
+15. accept an HMAC-authenticated GitHub `push` event and create the matching service deployment at the exact pushed `after` commit SHA.
 
 `READY` is emitted only after a successful healthcheck.
 
@@ -106,6 +107,8 @@ curl -sS -X PUT http://localhost:4000/v0/services/sendina/variables \
 
 The source repository must currently be an HTTPS GitHub repository cloneable by the Agent without interactive credentials. Private GitHub App source delivery remains a separate slice; Rundea will not require permanent GitHub PATs on nodes.
 
+`sourceRef` may be a named branch/tag or a full 40-hex commit SHA. Exact commit deployments use shallow fetch + detached checkout and verify that the checked-out `HEAD` is exactly the requested SHA.
+
 A Dockerfile is optional. When omitted, Rundea currently supports a Node.js 24 auto-build plan. Healthcheck path is also optional; compatible Railway metadata is read as a migration convenience before falling back to `/health`.
 
 ```bash
@@ -124,6 +127,31 @@ curl -sS -X POST http://localhost:4000/v0/deployments \
 
 For the current Sendina repository this selects the Node.js auto-build path and detects `/api/health` from its existing deployment metadata, without requiring a Rundea-specific commit in Sendina.
 
+## GitHub push autodeploy
+
+Set `RUNDEA_GITHUB_WEBHOOK_SECRET` to a high-entropy secret on the Control Plane. Configure a service once:
+
+```bash
+curl -sS -X PUT http://localhost:4000/v0/services/sendina/autodeploy \
+  -H 'content-type: application/json' \
+  -H 'authorization: Bearer local-dev-only-control-token-0123456789abcdef' \
+  -d '{
+    "nodeId":"<node-id>",
+    "repository":"https://github.com/annetbg-wq/sendina.git",
+    "branch":"main",
+    "containerPort":3001,
+    "hostPort":18080,
+    "healthcheckPath":"/api/health",
+    "enabled":true
+  }'
+```
+
+Configure the GitHub repository webhook to send `push` events to `/v0/github/webhook` using the same secret. The endpoint is intentionally public, but it accepts a GitHub event only when `X-Hub-Signature-256` matches the HMAC-SHA256 of the exact raw request body.
+
+Rundea matches the authenticated push by canonical repository + branch, then creates the deployment using the repository URL stored in the service configuration and `sourceRef=<push.after>`. It does **not** trust a clone URL supplied by the webhook payload. `X-GitHub-Delivery` is persisted as an idempotency key, so GitHub redelivery cannot create a duplicate deployment for the same delivery id.
+
+This path currently covers public GitHub repositories. GitHub App installation credentials and private-source delivery remain separate; no long-lived GitHub PAT is placed on the node.
+
 ## Runtime controls
 
 A successful normal deployment records the exact resolved Git SHA and content-addressed Docker image ID. Restart operates only on the current READY revision and requires the service healthcheck to pass again.
@@ -137,6 +165,8 @@ Rollback creates a new auditable deployment from a historical READY/ROLLED_BACK 
 The gate verifies:
 
 - Agent enrollment and `ONLINE` state;
+- a signed GitHub `push` creating the deployment at the exact pushed commit;
+- duplicate `X-GitHub-Delivery` idempotency and delivery-to-deployment observability;
 - Node.js auto-build and real Docker container startup;
 - healthcheck and actual HTTP response;
 - persisted source SHA/image identity/environment snapshot;
@@ -151,12 +181,12 @@ This is stronger than unit testing but is still not a claim that an independentl
 
 ## Current scope boundary
 
-Rundea now has the core Control Plane -> Agent -> Docker path, encrypted configuration, Node.js auto-build, node egress qualification, custom domains/managed HTTPS, deployment history, Restart and exact node-local Rollback.
+Rundea now has the core Control Plane -> Agent -> Docker path, encrypted configuration, Node.js auto-build, exact Git commit resolution, signed push autodeploy for public GitHub repositories, node egress qualification, custom domains/managed HTTPS, deployment history, Restart and exact node-local Rollback.
 
 Still outside the current v0 proof boundary:
 
 - production user/org authentication and authorization;
-- GitHub App private-source delivery and deployment-on-push;
+- GitHub App private-source delivery, automatic App/webhook installation and short-lived private-source credential brokering;
 - public production Agent binary distribution;
 - external-VPS acceptance on a real provider node;
 - cross-node artifact storage/rollback;
