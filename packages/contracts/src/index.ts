@@ -14,6 +14,17 @@ export type DeploymentStatus = (typeof deploymentStatuses)[number];
 export const nodeQualificationProfiles = ["sendina-egress-v1"] as const;
 export type NodeQualificationProfile = (typeof nodeQualificationProfiles)[number];
 
+export type RuntimeSpec = {
+  containerName: string;
+  containerPort: number;
+  hostPort: number;
+  environment: Record<string, string>;
+  healthcheck: {
+    path: string;
+    timeoutSeconds: number;
+  };
+};
+
 export type DeployCommand = {
   type: "deploy";
   deploymentId: string;
@@ -23,11 +34,25 @@ export type DeployCommand = {
     ref: string;
     dockerfile?: string;
   };
+  runtime: RuntimeSpec;
+};
+
+export type RollbackCommand = {
+  type: "rollback";
+  deploymentId: string;
+  targetDeploymentId: string;
+  serviceName: string;
+  runtime: RuntimeSpec;
+};
+
+export type RestartCommand = {
+  type: "restart";
+  actionId: string;
+  deploymentId: string;
+  serviceName: string;
   runtime: {
     containerName: string;
-    containerPort: number;
     hostPort: number;
-    environment: Record<string, string>;
     healthcheck: {
       path: string;
       timeoutSeconds: number;
@@ -52,7 +77,7 @@ export type ReconcileIngressCommand = {
   routes: IngressRoute[];
 };
 
-export type AgentCommand = DeployCommand | QualifyNodeCommand | ReconcileIngressCommand;
+export type AgentCommand = DeployCommand | RollbackCommand | RestartCommand | QualifyNodeCommand | ReconcileIngressCommand;
 
 export type NodeProbeResult = {
   name: string;
@@ -82,6 +107,15 @@ export type AgentEvent =
       applied: boolean;
       ok: boolean;
       routes: Array<{ hostname: string; ok: boolean; error?: string }>;
+      error?: string;
+      completedAt: string;
+    }
+  | {
+      type: "runtimeAction";
+      actionId: string;
+      deploymentId: string;
+      kind: "RESTART";
+      ok: boolean;
       error?: string;
       completedAt: string;
     };
