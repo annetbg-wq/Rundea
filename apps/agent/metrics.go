@@ -18,6 +18,7 @@ var metricDeploymentIDPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{
 var dockerSizePattern = regexp.MustCompile(`^([0-9]+(?:\.[0-9]+)?)\s*([kmgtpe]?i?b)$`)
 
 const defaultMetricsInterval = 15 * time.Second
+const maxSafeMetricCounter uint64 = 9007199254740991
 
 func durationEnv(key string, fallback time.Duration) time.Duration {
 	value := strings.TrimSpace(os.Getenv(key))
@@ -95,6 +96,20 @@ type dockerMetricSample struct {
 	NetworkTxBytes   uint64
 }
 
+func (sample dockerMetricSample) validateTransportRange() error {
+	for name, value := range map[string]uint64{
+		"memory usage": sample.MemoryUsageBytes,
+		"memory limit": sample.MemoryLimitBytes,
+		"network receive": sample.NetworkRxBytes,
+		"network transmit": sample.NetworkTxBytes,
+	} {
+		if value > maxSafeMetricCounter {
+			return fmt.Errorf("%s metric exceeds JSON-safe integer range", name)
+		}
+	}
+	return nil
+}
+
 func listManagedContainers(ctx context.Context) ([]managedContainer, error) {
 	out, err := exec.CommandContext(ctx, "docker", "ps", "--filter", "label=rundea.managed=true", "--format", `{{.ID}}\t{{.Label "rundea.deployment"}}`).CombinedOutput()
 	if err != nil {
@@ -136,13 +151,17 @@ func sampleDockerContainer(ctx context.Context, containerID string) (dockerMetri
 	if err != nil {
 		return dockerMetricSample{}, fmt.Errorf("network stats: %w", err)
 	}
-	return dockerMetricSample{
+	sample := dockerMetricSample{
 		CPUPercent:       cpu,
 		MemoryUsageBytes: memoryUsage,
 		MemoryLimitBytes: memoryLimit,
 		NetworkRxBytes:   rx,
 		NetworkTxBytes:   tx,
-	}, nil
+	}
+	if err := sample.validateTransportRange(); err != nil {
+		return dockerMetricSample{}, err
+	}
+	return sample, nil
 }
 
 func collectRuntimeMetrics(ctx context.Context, w *writer) error {
