@@ -16,7 +16,7 @@ import (
 	"time"
 )
 
-const caddyImage = "caddy:2.10.2-alpine@sha256:4c6e91c6ed0e2fa03efd5b44747b625fec79bc9cd06ac5235a779726618e530d"
+const caddyImage = "caddy:2.11.4@sha256:df7f1c2fb114453b951de51a98efc010db1655a92c2e86be6706714e2417a78d"
 const caddyContainer = "rundea-caddy"
 
 type ingressRoute struct {
@@ -196,7 +196,7 @@ func writeAtomic(path string, content []byte, mode os.FileMode) error {
 
 func validateCaddyConfig(caddyDir string) error {
 	mount := caddyDir + ":/etc/caddy:ro"
-	out, err := exec.Command("docker", "run", "--rm", "-v", mount, caddyImage, "caddy", "validate", "--config", "/etc/caddy/Caddyfile", "--adapter", "caddyfile").CombinedOutput()
+	out, err := exec.Command("docker", "run", "--rm", "-v", mount, caddyImage, "validate", "--config", "/etc/caddy/Caddyfile", "--adapter", "caddyfile").CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("Caddy config validation failed: %w: %s", err, strings.TrimSpace(string(out)))
 	}
@@ -217,7 +217,7 @@ func ensureCaddy(caddyDir, dataDir, configDir string) error {
 		"run", "-d", "--name", caddyContainer, "--restart", "unless-stopped", "--network", "host",
 		"--label", "rundea.managed=true", "--label", "rundea.role=ingress",
 		"-v", caddyDir + ":/etc/caddy:ro", "-v", dataDir + ":/data", "-v", configDir + ":/config",
-		caddyImage, "caddy", "run", "--config", "/etc/caddy/Caddyfile", "--adapter", "caddyfile",
+		caddyImage, "run", "--config", "/etc/caddy/Caddyfile", "--adapter", "caddyfile",
 	}
 	out, runErr := exec.Command("docker", args...).CombinedOutput()
 	if runErr != nil {
