@@ -19,6 +19,7 @@ CREATE INDEX IF NOT EXISTS service_autodeploys_repo_branch_idx
 
 CREATE TABLE IF NOT EXISTS github_webhook_deliveries (
   delivery_id text PRIMARY KEY CHECK (length(delivery_id) BETWEEN 1 AND 200),
+  body_sha256 text CHECK (body_sha256 IS NULL OR body_sha256 ~ '^[0-9a-f]{64}$'),
   event_name text NOT NULL CHECK (length(event_name) BETWEEN 1 AND 80),
   repository_full_name text,
   source_branch text,
@@ -28,6 +29,13 @@ CREATE TABLE IF NOT EXISTS github_webhook_deliveries (
   received_at timestamptz NOT NULL DEFAULT now(),
   completed_at timestamptz
 );
+
+ALTER TABLE github_webhook_deliveries
+  ADD COLUMN IF NOT EXISTS body_sha256 text;
+
+CREATE UNIQUE INDEX IF NOT EXISTS github_webhook_deliveries_body_sha256_idx
+  ON github_webhook_deliveries(body_sha256)
+  WHERE body_sha256 IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS github_webhook_deployments (
   delivery_id text NOT NULL REFERENCES github_webhook_deliveries(delivery_id) ON DELETE CASCADE,
