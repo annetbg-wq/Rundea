@@ -43,3 +43,31 @@ CREATE TABLE IF NOT EXISTS github_webhook_deployments (
   deployment_id uuid NOT NULL UNIQUE REFERENCES deployments(id) ON DELETE CASCADE,
   PRIMARY KEY (delivery_id, service_name)
 );
+
+-- A GitHub push is already pinned to an exact commit SHA, so nodes never need
+-- direct GitHub credentials or a mutable branch clone for webhook-triggered work.
+-- Enforce broker delivery transactionally before the mapping row can exist.
+CREATE OR REPLACE FUNCTION enforce_github_webhook_broker_delivery()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  UPDATE deployments
+     SET source_delivery='BROKER', updated_at=now()
+   WHERE id=NEW.deployment_id
+     AND status='QUEUED'
+     AND operation='DEPLOY'
+     AND source_ref ~ '^[0-9a-f]{40}$';
+
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'GitHub webhook deployment must be a queued exact-SHA DEPLOY';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS github_webhook_deployments_broker_guard ON github_webhook_deployments;
+CREATE TRIGGER github_webhook_deployments_broker_guard
+BEFORE INSERT ON github_webhook_deployments
+FOR EACH ROW
+EXECUTE FUNCTION enforce_github_webhook_broker_delivery();
