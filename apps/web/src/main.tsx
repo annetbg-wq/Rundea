@@ -262,14 +262,15 @@ function App() {
               const current=currentReadyByService.get(d.service_name);
               const isCurrent=d.status==="READY"&&current?.id===d.id;
               const nodeBusy=runningActionByNode.has(d.node_id);
-              const rollbackable=d.status==="READY"&&!isCurrent&&Boolean(d.environment_snapshot_at&&d.source_commit_sha&&d.image_id&&current&&current.node_id===d.node_id);
-              const legacyReady=d.status==="READY"&&!d.environment_snapshot_at;
+              const wasHealthy=d.status==="READY"||d.status==="ROLLED_BACK";
+              const rollbackable=wasHealthy&&!isCurrent&&Boolean(d.environment_snapshot_at&&d.source_commit_sha&&d.image_id&&current&&current.node_id===d.node_id);
+              const legacyHealthy=wasHealthy&&!d.environment_snapshot_at;
               return <article key={d.id} className="deploymentRow">
                 <div className="deploymentInfo">
                   <div className="deploymentTitle"><strong>{d.service_name}</strong>{isCurrent&&<span className="revisionTag current">CURRENT</span>}{d.operation==="ROLLBACK"&&<span className="revisionTag">ROLLBACK</span>}</div>
                   <small>{d.source_ref} · {shortSha(d.source_commit_sha)} · {new Date(d.created_at).toLocaleString()}</small>
-                  {legacyReady&&<small className="revisionNote">legacy revision · no immutable rollback snapshot</small>}
-                  {d.status==="READY"&&!isCurrent&&!legacyReady&&current?.node_id!==d.node_id&&<small className="revisionNote">cross-node rollback is not available in v0</small>}
+                  {legacyHealthy&&<small className="revisionNote">legacy revision · no immutable rollback snapshot</small>}
+                  {wasHealthy&&!isCurrent&&!legacyHealthy&&current?.node_id!==d.node_id&&<small className="revisionNote">cross-node rollback is not available in v0</small>}
                 </div>
                 <div className="deploymentSide">
                   <span className={`status ${d.status.toLowerCase()}`}>{d.status}</span>
