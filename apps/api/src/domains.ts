@@ -82,6 +82,12 @@ export async function reconcileNodeIngress(pool: Pool, sockets: Map<string, Node
   try {
     await client.query("BEGIN");
     await client.query(
+      `UPDATE node_ingress_reconciliations
+          SET status='FAILED',error='superseded by newer ingress reconciliation',completed_at=now()
+        WHERE node_id=$1 AND status='RUNNING'`,
+      [nodeId],
+    );
+    await client.query(
       "INSERT INTO node_ingress_reconciliations(id,node_id,status) VALUES($1,$2,'RUNNING')",
       [reconciliationId, nodeId],
     );
@@ -186,14 +192,15 @@ export async function recordIngressResult(
   }
   if (seen.size !== expected.size) throw new Error("ingress result does not cover current reconciliation set");
   const routesPassed = event.routes.every((route) => route.ok);
-  if (event.ok && (!routesPassed || event.error)) throw new Error("successful ingress result contains a failed route or global error");
-  if (!event.ok && routesPassed && !event.error) throw new Error("failed ingress result has no failure evidence");
+  if (!event.applied && event.ok) throw new Error("unapplied ingress result cannot be successful");
+  if (!event.applied && !event.error) throw new Error("unapplied ingress result must contain a global error");
+  if (event.applied && event.ok !== routesPassed) throw new Error("ingress aggregate result does not match route verification");
 
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
     for (const route of event.routes) {
-      const active = event.ok && route.ok;
+      const active = event.applied && route.ok;
       const updated = await client.query(
         `UPDATE service_domains
             SET status=$4,reconciliation_id=NULL,last_error=$5,
@@ -203,7 +210,7 @@ export async function recordIngressResult(
       );
       if (updated.rowCount !== 1) throw new Error("ingress route result lost reconciliation ownership");
     }
-    if (event.ok) {
+    if (event.applied) {
       await client.query(
         "DELETE FROM service_domains WHERE node_id=$1 AND reconciliation_id=$2 AND status='DELETING'",
         [nodeId, event.reconciliationId],
@@ -213,14 +220,15 @@ export async function recordIngressResult(
         `UPDATE service_domains
             SET reconciliation_id=NULL,last_error=$3,verified_at=NULL,updated_at=now()
           WHERE node_id=$1 AND reconciliation_id=$2 AND status='DELETING'`,
-        [nodeId, event.reconciliationId, event.error ?? "ingress reconciliation failed"],
+        [nodeId, event.reconciliationId, event.error ?? "ingress reconciliation was not applied"],
       );
     }
+    const reconciliationError = event.error ?? (event.ok ? null : "one or more ingress routes failed verification");
     await client.query(
       `UPDATE node_ingress_reconciliations
           SET status=$3,error=$4,completed_at=now()
         WHERE id=$1 AND node_id=$2 AND status='RUNNING'`,
-      [event.reconciliationId, nodeId, event.ok ? "SUCCEEDED" : "FAILED", event.error ?? null],
+      [event.reconciliationId, nodeId, event.applied && event.ok ? "SUCCEEDED" : "FAILED", reconciliationError],
     );
     await client.query("COMMIT");
   } catch (error) {
