@@ -26,6 +26,7 @@ import {
   recordRuntimeAction,
   registerRuntimeControlRoutes,
 } from "./runtime-controls";
+import { recordRuntimeMetric, registerRuntimeMetricRoutes } from "./runtime-metrics";
 import {
   captureDeploymentEnvironment,
   deleteServiceVariable,
@@ -63,6 +64,7 @@ for (const migration of [
   "004_service_domains.sql",
   "005_runtime_controls.sql",
   "007_source_broker.sql",
+  "008_runtime_metrics.sql",
 ]) {
   const migrationUrl = new URL(`../migrations/${migration}`, import.meta.url);
   await pool.query(await readFile(migrationUrl, "utf8"));
@@ -375,6 +377,7 @@ registerNodeQualificationRoutes(app, pool, sockets, requireControl);
 registerDomainRoutes(app, pool, sockets, requireControl);
 registerRuntimeControlRoutes(app, pool, sockets, requireControl, dispatchQueued);
 registerSourceBrokerRoutes(app, pool);
+registerRuntimeMetricRoutes(app, pool, requireControl);
 
 app.put<{ Params: { serviceName: string }; Body: { variables?: ServiceVariableInput[] } }>(
   "/v0/services/:serviceName/variables",
@@ -532,6 +535,10 @@ app.get("/v0/agent/ws", { websocket: true }, async (socket, request) => {
         }
         if (event.type === "ingress") {
           await recordIngressResult(pool, nodeId, event);
+          return;
+        }
+        if (event.type === "metric") {
+          await recordRuntimeMetric(pool, nodeId, event);
           return;
         }
         if (event.type === "log") {
