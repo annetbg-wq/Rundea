@@ -22,13 +22,15 @@ The initial sample set is:
 
 The Control Plane validates numeric bounds and accepts a sample only when the deployment belongs to the authenticated node and is in an active runtime state (`DEPLOYING`, `HEALTHCHECK`, or `READY`). The Agent timestamp is syntax-validated, but PostgreSQL `now()` is authoritative for persisted sample time so a bad node clock cannot corrupt the timeline.
 
-Raw samples are retained for 48 hours in v0. The read API accepts windows from 5 minutes through 48 hours and uses PostgreSQL `date_bin` aggregation to keep responses to roughly 240 points rather than returning an unbounded series.
+Raw samples are retained for 48 hours in v0. The read API accepts windows from 5 minutes through 48 hours and uses PostgreSQL `date_bin` aggregation to keep responses to roughly 240 points rather than returning an unbounded series. `latest` is read separately from the newest raw sample so graph downsampling can never make a live runtime appear stale.
 
 The console renders only values returned by this API. Before the first sample it shows a no-data state, not zeroes. A sample older than 45 seconds is marked stale. Network throughput is derived client-side from deltas between cumulative Docker counters; a counter reset produces an unknown rate rather than a negative value.
 
 ## Sampling
 
 The default Agent interval is 15 seconds. `RUNDEA_METRICS_INTERVAL` exists for controlled environments such as CI; the Agent clamps effective intervals to 1 second through 5 minutes. Production configuration should normally use the default.
+
+The Control Plane persists at most one sample per deployment every five seconds. Faster valid events are silently coalesced at the storage boundary, limiting database amplification even if a connected Agent is misconfigured or compromised.
 
 Sampling errors are non-fatal to deployment execution. Repeated identical sampler failures are log-deduplicated so a broken Docker stats call cannot flood node logs.
 
