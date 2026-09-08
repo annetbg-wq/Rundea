@@ -38,7 +38,7 @@ Only one runtime action may be RUNNING on a node at a time, and deployment dispa
 
 ## Decision: rollback creates a new deployment
 
-Rollback does not rewrite historical state. Selecting an older READY revision creates a new deployment row with:
+Rollback does not rewrite historical source/configuration. Selecting a revision that previously reached READY — currently represented by `READY` or `ROLLED_BACK` — creates a new deployment row with:
 
 - `operation = ROLLBACK`;
 - `rollback_target_id` pointing to the selected revision;
@@ -56,11 +56,13 @@ The new rollback deployment then traverses the normal auditable state machine:
 
 The v0 Agent expects the target image to still exist on the target node under the target deployment's retained image tag. Before starting it, the Agent inspects the image and requires its content-addressed image ID to exactly equal the ID stored in PostgreSQL.
 
+After validating it, the Agent also creates the new rollback deployment's own retained image tag pointing at that same verified image ID. This means a successful rollback revision can itself be selected later, including rollback-of-a-rollback chains, without rebuilding source.
+
 If the artifact is absent or the identity differs, rollback fails. Rundea does not silently rebuild an approximation of the target revision.
 
 This makes artifact retention/garbage collection part of the future rollback-retention policy.
 
-## Decision: preserve the current revision until rollback is acknowledged
+## Decision: preserve the current revision during rollback promotion
 
 Because v0 services use a stable container name and host port, the current service container must release that port before the rollback revision can start.
 
@@ -71,12 +73,14 @@ The Agent therefore:
 3. starts the exact rollback artifact with the target environment snapshot;
 4. removes the temporary environment file immediately after Docker consumes it;
 5. waits for the rollback healthcheck;
-6. reports READY to the Control Plane;
-7. only after READY is successfully written, deletes the backup container.
+6. writes the READY event to the authenticated Control Plane WebSocket;
+7. only after that WebSocket write succeeds, deletes the backup container.
 
-If startup, healthcheck, or READY acknowledgement fails, the Agent removes the attempted rollback container and restores the previous container under the stable service name.
+If startup, healthcheck, or the READY WebSocket write fails, the Agent removes the attempted rollback container and restores the previous container under the stable service name.
 
-After a rollback deployment becomes READY, the previously current READY deployment is recorded as `ROLLED_BACK`. The selected historical target remains historical evidence; the new rollback deployment is the new current revision.
+The current protocol does not yet include an application-level acknowledgement message for each Agent event; a successful WebSocket write is the delivery boundary used by the existing deployment protocol. A later protocol-hardening slice may add explicit event acknowledgements/idempotency.
+
+After a rollback deployment becomes READY in PostgreSQL, the previously current READY deployment is recorded as `ROLLED_BACK`. That revision remains a valid rollback target if its immutable snapshot and retained artifact still exist. The selected historical target remains historical evidence; the new rollback deployment is the new current revision.
 
 ## Availability consequence
 
@@ -88,4 +92,4 @@ Zero-downtime promotion requires deployment-specific containers plus an atomic p
 
 Rollback in v0 is node-local because images are retained only in the selected node's Docker image store. Cross-node rollback requires a shared artifact registry or another content-addressed artifact store.
 
-This ADR does not introduce GitHub App private-source delivery, cross-node artifact replication, zero-downtime deployment, or a live Sendina migration.
+This ADR does not introduce GitHub App private-source delivery, cross-node artifact replication, zero-downtime deployment, explicit Agent event acknowledgements, or a live Sendina migration.
