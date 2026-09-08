@@ -123,7 +123,7 @@ async function dispatchQueued(nodeId: string): Promise<void> {
       containerPort: row.container_port,
       hostPort: row.host_port,
       environment,
-      healthcheck: { path: row.healthcheck_path, timeoutSeconds: 60 },
+      healthcheck: { path: row.healthcheck_path ?? "", timeoutSeconds: 60 },
     },
   };
   try {
@@ -281,7 +281,7 @@ app.post<{ Body: { serviceName?: string; nodeId?: string; sourceRepository?: str
       await pool.query(
         `INSERT INTO deployments(id,service_name,node_id,source_repository,source_ref,dockerfile,container_port,host_port,healthcheck_path,status)
          VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,'QUEUED')`,
-        [id, body.serviceName, body.nodeId, body.sourceRepository, body.sourceRef, body.dockerfile?.trim() || null, body.containerPort, body.hostPort, body.healthcheckPath ?? "/health"],
+        [id, body.serviceName, body.nodeId, body.sourceRepository, body.sourceRef, body.dockerfile?.trim() || null, body.containerPort, body.hostPort, body.healthcheckPath?.trim() ?? ""],
       );
     } catch (error) {
       request.log.error(error);
