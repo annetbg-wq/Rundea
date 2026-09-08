@@ -27,12 +27,13 @@ type DesiredDomainRow = {
   id: string;
   hostname: string;
   service_name: string;
+  status: string;
   host_port: number | null;
 };
 
 async function desiredDomainRows(pool: Pool, nodeId: string): Promise<DesiredDomainRow[]> {
   const result = await pool.query(
-    `SELECT d.id,d.hostname,d.service_name,active.host_port
+    `SELECT d.id,d.hostname,d.service_name,d.status,active.host_port
        FROM service_domains d
        LEFT JOIN LATERAL (
          SELECT host_port
@@ -48,26 +49,63 @@ async function desiredDomainRows(pool: Pool, nodeId: string): Promise<DesiredDom
   return result.rows as DesiredDomainRow[];
 }
 
-export async function reconcileNodeIngress(pool: Pool, sockets: Map<string, NodeCommandSocket>, nodeId: string): Promise<boolean> {
-  const rows = await desiredDomainRows(pool, nodeId);
-  const routable = rows.filter((row) => Number.isInteger(row.host_port));
-  const reconciliationId = randomUUID();
+async function failReconciliationBeforeSend(pool: Pool, nodeId: string, reconciliationId: string, reason: string): Promise<void> {
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
     await client.query(
       `UPDATE service_domains
-          SET status='PENDING', reconciliation_id=NULL,
-              last_error='service has no READY deployment on this node', verified_at=NULL, updated_at=now()
-        WHERE node_id=$1`,
+          SET status=CASE WHEN status='DELETING' THEN 'DELETING' ELSE 'PENDING' END,
+              reconciliation_id=NULL,last_error=$3,verified_at=NULL,updated_at=now()
+        WHERE node_id=$1 AND reconciliation_id=$2`,
+      [nodeId, reconciliationId, reason],
+    );
+    await client.query(
+      "UPDATE node_ingress_reconciliations SET status='FAILED',error=$3,completed_at=now() WHERE id=$2 AND node_id=$1 AND status='RUNNING'",
+      [nodeId, reconciliationId, reason],
+    );
+    await client.query("COMMIT");
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+export async function reconcileNodeIngress(pool: Pool, sockets: Map<string, NodeCommandSocket>, nodeId: string): Promise<boolean> {
+  const rows = await desiredDomainRows(pool, nodeId);
+  const routable = rows.filter((row) => row.status !== "DELETING" && Number.isInteger(row.host_port));
+  const deleting = rows.filter((row) => row.status === "DELETING");
+  const reconciliationId = randomUUID();
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query(
+      "INSERT INTO node_ingress_reconciliations(id,node_id,status) VALUES($1,$2,'RUNNING')",
+      [reconciliationId, nodeId],
+    );
+    await client.query(
+      `UPDATE service_domains
+          SET status='PENDING',reconciliation_id=NULL,
+              last_error='service has no READY deployment on this node',verified_at=NULL,updated_at=now()
+        WHERE node_id=$1 AND status<>'DELETING'`,
       [nodeId],
     );
     if (routable.length > 0) {
       await client.query(
         `UPDATE service_domains
-            SET status='CONFIGURING', reconciliation_id=$2, last_error=NULL, verified_at=NULL, updated_at=now()
+            SET status='CONFIGURING',reconciliation_id=$2,last_error=NULL,verified_at=NULL,updated_at=now()
           WHERE node_id=$1 AND id = ANY($3::uuid[])`,
         [nodeId, reconciliationId, routable.map((row) => row.id)],
+      );
+    }
+    if (deleting.length > 0) {
+      await client.query(
+        `UPDATE service_domains
+            SET reconciliation_id=$2,last_error=NULL,verified_at=NULL,updated_at=now()
+          WHERE node_id=$1 AND id = ANY($3::uuid[]) AND status='DELETING'`,
+        [nodeId, reconciliationId, deleting.map((row) => row.id)],
       );
     }
     await client.query("COMMIT");
@@ -80,12 +118,7 @@ export async function reconcileNodeIngress(pool: Pool, sockets: Map<string, Node
 
   const socket = sockets.get(nodeId);
   if (!socket) {
-    await pool.query(
-      `UPDATE service_domains
-          SET status='PENDING', reconciliation_id=NULL, last_error='node agent is not connected', updated_at=now()
-        WHERE node_id=$1 AND reconciliation_id=$2`,
-      [nodeId, reconciliationId],
-    );
+    await failReconciliationBeforeSend(pool, nodeId, reconciliationId, "node agent is not connected");
     return false;
   }
 
@@ -98,12 +131,7 @@ export async function reconcileNodeIngress(pool: Pool, sockets: Map<string, Node
     socket.send(JSON.stringify(command));
     return true;
   } catch {
-    await pool.query(
-      `UPDATE service_domains
-          SET status='FAILED', reconciliation_id=NULL, last_error='ingress command could not be sent', updated_at=now()
-        WHERE node_id=$1 AND reconciliation_id=$2`,
-      [nodeId, reconciliationId],
-    );
+    await failReconciliationBeforeSend(pool, nodeId, reconciliationId, "ingress command could not be sent");
     return false;
   }
 }
@@ -115,13 +143,13 @@ export async function reconcileServiceDomainsAfterReady(
   readyNodeId: string,
 ): Promise<void> {
   const oldNodes = await pool.query(
-    "SELECT DISTINCT node_id FROM service_domains WHERE service_name=$1 AND node_id<>$2",
+    "SELECT DISTINCT node_id FROM service_domains WHERE service_name=$1 AND node_id<>$2 AND status<>'DELETING'",
     [serviceName, readyNodeId],
   );
   await pool.query(
     `UPDATE service_domains
         SET node_id=$2,status='PENDING',reconciliation_id=NULL,last_error='service deployment moved to another node',verified_at=NULL,updated_at=now()
-      WHERE service_name=$1 AND node_id<>$2`,
+      WHERE service_name=$1 AND node_id<>$2 AND status<>'DELETING'`,
     [serviceName, readyNodeId],
   );
   for (const row of oldNodes.rows) {
@@ -136,8 +164,15 @@ export async function recordIngressResult(
   event: Extract<AgentEvent, { type: "ingress" }>,
 ): Promise<void> {
   if (!validUuid(event.reconciliationId) || !Array.isArray(event.routes) || event.routes.length > 100) throw new Error("invalid ingress result");
+  if (event.error && event.error.length > 500) throw new Error("ingress reconciliation error is too long");
+  const reconciliation = await pool.query(
+    "SELECT status FROM node_ingress_reconciliations WHERE id=$1 AND node_id=$2",
+    [event.reconciliationId, nodeId],
+  );
+  if (reconciliation.rowCount !== 1 || reconciliation.rows[0].status !== "RUNNING") throw new Error("stale or unknown ingress reconciliation");
+
   const known = await pool.query(
-    "SELECT hostname FROM service_domains WHERE node_id=$1 AND reconciliation_id=$2 ORDER BY hostname",
+    "SELECT hostname FROM service_domains WHERE node_id=$1 AND reconciliation_id=$2 AND status='CONFIGURING' ORDER BY hostname",
     [nodeId, event.reconciliationId],
   );
   const expected = new Set<string>(known.rows.map((row) => row.hostname));
@@ -150,21 +185,73 @@ export async function recordIngressResult(
     seen.add(hostname);
   }
   if (seen.size !== expected.size) throw new Error("ingress result does not cover current reconciliation set");
-  const aggregate = event.routes.every((route) => route.ok);
-  if (event.ok !== aggregate) throw new Error("ingress aggregate result does not match routes");
+  const routesPassed = event.routes.every((route) => route.ok);
+  if (event.ok && (!routesPassed || event.error)) throw new Error("successful ingress result contains a failed route or global error");
+  if (!event.ok && routesPassed && !event.error) throw new Error("failed ingress result has no failure evidence");
 
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
     for (const route of event.routes) {
+      const active = event.ok && route.ok;
       const updated = await client.query(
         `UPDATE service_domains
-            SET status=$4, reconciliation_id=NULL, last_error=$5,
-                verified_at=CASE WHEN $4='ACTIVE' THEN now() ELSE NULL END, updated_at=now()
-          WHERE node_id=$1 AND reconciliation_id=$2 AND hostname=$3`,
-        [nodeId, event.reconciliationId, route.hostname, route.ok ? "ACTIVE" : "FAILED", route.error ?? null],
+            SET status=$4,reconciliation_id=NULL,last_error=$5,
+                verified_at=CASE WHEN $4='ACTIVE' THEN now() ELSE NULL END,updated_at=now()
+          WHERE node_id=$1 AND reconciliation_id=$2 AND hostname=$3 AND status='CONFIGURING'`,
+        [nodeId, event.reconciliationId, route.hostname, active ? "ACTIVE" : "FAILED", route.error ?? event.error ?? null],
       );
       if (updated.rowCount !== 1) throw new Error("ingress route result lost reconciliation ownership");
+    }
+    if (event.ok) {
+      await client.query(
+        "DELETE FROM service_domains WHERE node_id=$1 AND reconciliation_id=$2 AND status='DELETING'",
+        [nodeId, event.reconciliationId],
+      );
+    } else {
+      await client.query(
+        `UPDATE service_domains
+            SET reconciliation_id=NULL,last_error=$3,verified_at=NULL,updated_at=now()
+          WHERE node_id=$1 AND reconciliation_id=$2 AND status='DELETING'`,
+        [nodeId, event.reconciliationId, event.error ?? "ingress reconciliation failed"],
+      );
+    }
+    await client.query(
+      `UPDATE node_ingress_reconciliations
+          SET status=$3,error=$4,completed_at=now()
+        WHERE id=$1 AND node_id=$2 AND status='RUNNING'`,
+      [event.reconciliationId, nodeId, event.ok ? "SUCCEEDED" : "FAILED", event.error ?? null],
+    );
+    await client.query("COMMIT");
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+export async function failRunningIngressForNode(pool: Pool, nodeId: string): Promise<void> {
+  const reason = "agent disconnected during ingress reconciliation";
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const running = await client.query(
+      "SELECT id FROM node_ingress_reconciliations WHERE node_id=$1 AND status='RUNNING' FOR UPDATE",
+      [nodeId],
+    );
+    for (const row of running.rows) {
+      await client.query(
+        `UPDATE service_domains
+            SET status=CASE WHEN status='DELETING' THEN 'DELETING' ELSE 'PENDING' END,
+                reconciliation_id=NULL,last_error=$3,verified_at=NULL,updated_at=now()
+          WHERE node_id=$1 AND reconciliation_id=$2`,
+        [nodeId, row.id, reason],
+      );
+      await client.query(
+        "UPDATE node_ingress_reconciliations SET status='FAILED',error=$3,completed_at=now() WHERE id=$2 AND node_id=$1",
+        [nodeId, row.id, reason],
+      );
     }
     await client.query("COMMIT");
   } catch (error) {
@@ -234,10 +321,10 @@ export function registerDomainRoutes(
     { preHandler: requireControl },
     async (request, reply) => {
       if (!validUuid(request.params.id)) return reply.code(400).send({ error: "invalid domain id" });
-      const domain = await pool.query("SELECT node_id FROM service_domains WHERE id=$1", [request.params.id]);
+      const domain = await pool.query("SELECT node_id,status FROM service_domains WHERE id=$1", [request.params.id]);
       if (domain.rowCount !== 1) return reply.code(404).send({ error: "domain not found" });
       const sent = await reconcileNodeIngress(pool, sockets, domain.rows[0].node_id);
-      return reply.code(sent ? 202 : 409).send({ status: sent ? "CONFIGURING" : "PENDING" });
+      return reply.code(sent ? 202 : 409).send({ status: sent ? domain.rows[0].status === "DELETING" ? "DELETING" : "CONFIGURING" : domain.rows[0].status });
     },
   );
 
@@ -246,10 +333,15 @@ export function registerDomainRoutes(
     { preHandler: requireControl },
     async (request, reply) => {
       if (!validUuid(request.params.id)) return reply.code(400).send({ error: "invalid domain id" });
-      const result = await pool.query("DELETE FROM service_domains WHERE id=$1 RETURNING node_id", [request.params.id]);
+      const result = await pool.query(
+        `UPDATE service_domains
+            SET status='DELETING',reconciliation_id=NULL,last_error=NULL,verified_at=NULL,updated_at=now()
+          WHERE id=$1 RETURNING node_id`,
+        [request.params.id],
+      );
       if (result.rowCount !== 1) return reply.code(404).send({ error: "domain not found" });
-      await reconcileNodeIngress(pool, sockets, result.rows[0].node_id);
-      return reply.code(204).send();
+      const sent = await reconcileNodeIngress(pool, sockets, result.rows[0].node_id);
+      return reply.code(202).send({ status: "DELETING", agentConnected: sent });
     },
   );
 }
