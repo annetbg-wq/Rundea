@@ -4,6 +4,7 @@ import type { Pool, PoolClient } from "pg";
 import type { AgentCommand, AgentEvent } from "@rundea/contracts";
 import { registerGitHubAutodeployRoutes } from "./github-autodeploy";
 import type { NodeCommandSocket } from "./node-qualification";
+import { registerRuntimeMetricsRoutes } from "./runtime-metrics";
 import { copyDeploymentEnvironment } from "./service-variables";
 
 type ControlPreHandler = (request: FastifyRequest, reply: FastifyReply) => Promise<void>;
@@ -53,6 +54,7 @@ export function registerRuntimeControlRoutes(
   requireControl: ControlPreHandler,
   dispatchQueued: DispatchQueued,
 ): void {
+  registerRuntimeMetricsRoutes(app, pool, requireControl);
   registerGitHubAutodeployRoutes(app, pool, requireControl, dispatchQueued, process.env.RUNDEA_GITHUB_WEBHOOK_SECRET);
 
   app.get("/v0/runtime-actions", { preHandler: requireControl }, async () => {
