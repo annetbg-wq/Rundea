@@ -1,0 +1,114 @@
+name: node-acceptance
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  agent-bundle:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/agent
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.x'
+          cache-dependency-path: apps/agent/go.sum
+      - name: Build Linux agent bundles
+        run: |
+          set -euo pipefail
+          mkdir -p ../../dist
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags='-s -w' -o ../../dist/rundea-agent-linux-amd64 .
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags='-s -w' -o ../../dist/rundea-agent-linux-arm64 .
+          cd ../../dist
+          sha256sum rundea-agent-linux-amd64 rundea-agent-linux-arm64 > SHA256SUMS
+          sha256sum --check SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rundea-agent-linux
+          path: |
+            dist/rundea-agent-linux-amd64
+            dist/rundea-agent-linux-arm64
+            dist/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 14
+
+  node-e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: rundea
+          POSTGRES_PASSWORD: rundea
+          POSTGRES_DB: rundea
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U rundea -d rundea"
+          --health-interval 2s
+          --health-timeout 2s
+          --health-retries 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.x'
+          cache-dependency-path: apps/agent/go.sum
+      - run: npm ci --ignore-scripts
+      - name: Build acceptance Agent
+        working-directory: apps/agent
+        run: CGO_ENABLED=0 go build -trimpath -o /tmp/rundea-agent .
+      - name: Start Control Plane
+        env:
+          DATABASE_URL: postgres://rundea:rundea@127.0.0.1:5432/rundea
+          RUNDEA_CONTROL_TOKEN: acceptance-control-token
+          RUNDEA_MASTER_KEY: MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=
+          RUNDEA_WEB_ORIGIN: http://127.0.0.1:5173
+          PORT: '4000'
+        run: |
+          set -euo pipefail
+          npm run start -w @rundea/api > /tmp/rundea-api.log 2>&1 &
+          echo $! > /tmp/rundea-api.pid
+          for attempt in $(seq 1 60); do
+            if curl --fail --silent http://127.0.0.1:4000/health >/dev/null; then
+              exit 0
+            fi
+            if ! kill -0 "$(cat /tmp/rundea-api.pid)" 2>/dev/null; then
+              cat /tmp/rundea-api.log
+              exit 1
+            fi
+            sleep 1
+          done
+          cat /tmp/rundea-api.log
+          echo 'Control Plane did not become healthy' >&2
+          exit 1
+      - name: Run Control Plane → Agent → Docker acceptance
+        env:
+          RUNDEA_ACCEPTANCE_API_URL: http://127.0.0.1:4000
+          RUNDEA_CONTROL_TOKEN: acceptance-control-token
+          RUNDEA_AGENT_BINARY: /tmp/rundea-agent
+          RUNDEA_ACCEPTANCE_FIXTURE_REF: main
+          RUNDEA_ACCEPTANCE_FIXTURE_SHA: 039c34770852fb07cef7f9f0f8534c5de408b207
+          RUNDEA_ACCEPTANCE_HOST_PORT: '18081'
+        run: node infra/acceptance/node-e2e.mjs
+      - name: Control Plane log
+        if: always()
+        run: cat /tmp/rundea-api.log || true
+      - name: Stop Control Plane
+        if: always()
+        run: |
+          if [[ -f /tmp/rundea-api.pid ]]; then
+            kill "$(cat /tmp/rundea-api.pid)" 2>/dev/null || true
+          fi
