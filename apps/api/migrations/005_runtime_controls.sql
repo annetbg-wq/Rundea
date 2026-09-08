@@ -20,6 +20,30 @@ BEGIN
   END IF;
 END $$;
 
+CREATE OR REPLACE FUNCTION rundea_lock_node_on_deployment_insert()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  PERFORM 1 FROM nodes WHERE id=NEW.node_id FOR UPDATE;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'deployment node does not exist';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_trigger WHERE tgname='deployments_lock_node_before_insert' AND NOT tgisinternal
+  ) THEN
+    CREATE TRIGGER deployments_lock_node_before_insert
+      BEFORE INSERT ON deployments
+      FOR EACH ROW EXECUTE FUNCTION rundea_lock_node_on_deployment_insert();
+  END IF;
+END $$;
+
 CREATE TABLE IF NOT EXISTS deployment_variables (
   deployment_id uuid NOT NULL REFERENCES deployments(id) ON DELETE CASCADE,
   key text NOT NULL,
