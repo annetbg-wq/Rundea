@@ -86,6 +86,31 @@ func TestExtractSourceArchiveStripsGitHubRoot(t *testing.T) {
 	}
 }
 
+func TestExtractSourceArchiveAcceptsEmptyRegularRootMarker(t *testing.T) {
+	destination := filepath.Join(t.TempDir(), "src")
+	archive := sourceArchive(t, []archiveEntry{
+		{name: "owner-repo-sha", typeflag: tar.TypeReg, body: ""},
+		{name: "owner-repo-sha/package.json", body: `{"scripts":{"start":"node index.js"}}`},
+	})
+	if err := extractSourceArchive(bytes.NewReader(archive), destination); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(destination, "package.json")); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestExtractSourceArchiveRejectsNonEmptyRegularRootMarker(t *testing.T) {
+	destination := filepath.Join(t.TempDir(), "src")
+	archive := sourceArchive(t, []archiveEntry{
+		{name: "owner-repo-sha", typeflag: tar.TypeReg, body: "not-a-root-marker"},
+		{name: "owner-repo-sha/package.json", body: `{}`},
+	})
+	if err := extractSourceArchive(bytes.NewReader(archive), destination); err == nil {
+		t.Fatal("expected non-empty root file to be rejected")
+	}
+}
+
 func TestExtractSourceArchiveRejectsTraversal(t *testing.T) {
 	destination := filepath.Join(t.TempDir(), "src")
 	archive := sourceArchive(t, []archiveEntry{
