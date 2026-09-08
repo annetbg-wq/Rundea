@@ -198,6 +198,12 @@ func connectAndServe(cfg config) error {
 				continue
 			}
 			go runQualification(w, cmd)
+		case "reconcileIngress":
+			var cmd reconcileIngressCommand
+			if err := json.Unmarshal(payload, &cmd); err != nil || cmd.ReconciliationID == "" {
+				continue
+			}
+			go runIngressReconciliation(cfg, w, cmd)
 		}
 	}
 }
