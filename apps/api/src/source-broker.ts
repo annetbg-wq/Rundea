@@ -54,6 +54,32 @@ export function canonicalGitHubRepository(input: string): RepositoryIdentity {
   return { owner, repository, fullName: `${owner}/${repository}` };
 }
 
+export async function readResponseBodyWithLimit(response: Response, maxBytes: number): Promise<Buffer> {
+  if (!Number.isSafeInteger(maxBytes) || maxBytes <= 0) throw new Error("invalid source archive size limit");
+  if (!response.body) throw new Error("source archive response has no body");
+
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!value?.byteLength) continue;
+      total += value.byteLength;
+      if (total > maxBytes) {
+        await reader.cancel("source archive size limit exceeded").catch(() => undefined);
+        throw new Error("source archive exceeds v0 compressed size limit");
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  if (total === 0) throw new Error("source archive is empty");
+  return Buffer.concat(chunks, total);
+}
+
 const schemaReadyByPool = new WeakMap<Pool, Promise<void>>();
 
 function ensureSchema(pool: Pool): Promise<void> {
@@ -156,13 +182,10 @@ async function fetchPublicGitHubArchive(repositoryFullName: string, commitSha: s
   if (!response.ok) throw new Error(`GitHub source archive returned ${response.status}`);
   const declaredLength = Number(response.headers.get("content-length") ?? "0");
   if (Number.isFinite(declaredLength) && declaredLength > maxCompressedBundleBytes) {
+    response.body?.cancel().catch(() => undefined);
     throw new Error("source archive exceeds v0 compressed size limit");
   }
-  const archive = Buffer.from(await response.arrayBuffer());
-  if (archive.length === 0 || archive.length > maxCompressedBundleBytes) {
-    throw new Error("source archive is empty or exceeds v0 compressed size limit");
-  }
-  return archive;
+  return await readResponseBodyWithLimit(response, maxCompressedBundleBytes);
 }
 
 export function registerSourceBrokerRoutes(app: FastifyInstance, pool: Pool): void {
