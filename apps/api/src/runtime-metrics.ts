@@ -47,13 +47,21 @@ async function maybeCleanup(pool: Pool): Promise<void> {
 
 export async function recordRuntimeMetric(pool: Pool, nodeId: string, rawEvent: RuntimeMetricEvent): Promise<void> {
   const event = validateRuntimeMetricEvent(rawEvent);
-  const inserted = await pool.query(
+  const eligible = await pool.query(
+    "SELECT 1 FROM deployments WHERE id=$1 AND node_id=$2 AND status IN ('DEPLOYING','HEALTHCHECK','READY')",
+    [event.deploymentId, nodeId],
+  );
+  if (eligible.rowCount !== 1) throw new Error("runtime metric rejected for authenticated node or inactive deployment");
+
+  await pool.query(
     `INSERT INTO runtime_metrics(
        deployment_id,node_id,sampled_at,cpu_percent,memory_usage_bytes,memory_limit_bytes,network_rx_bytes,network_tx_bytes
      )
-     SELECT id,$2,now(),$3,$4,$5,$6,$7
-       FROM deployments
-      WHERE id=$1 AND node_id=$2 AND status IN ('DEPLOYING','HEALTHCHECK','READY')`,
+     SELECT $1,$2,now(),$3,$4,$5,$6,$7
+      WHERE NOT EXISTS (
+        SELECT 1 FROM runtime_metrics
+         WHERE deployment_id=$1 AND sampled_at > now() - interval '5 seconds'
+      )`,
     [
       event.deploymentId,
       nodeId,
@@ -64,7 +72,6 @@ export async function recordRuntimeMetric(pool: Pool, nodeId: string, rawEvent: 
       event.networkTxBytes,
     ],
   );
-  if (inserted.rowCount !== 1) throw new Error("runtime metric rejected for authenticated node or inactive deployment");
   await maybeCleanup(pool).catch(() => undefined);
 }
 
