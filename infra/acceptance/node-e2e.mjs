@@ -154,6 +154,12 @@ async function createDeploymentFromPush() {
     throw new Error(`duplicate GitHub delivery was not idempotent: ${JSON.stringify(duplicate)}`);
   }
 
+  const replayDeliveryId = `${deliveryId}-replay`;
+  const replay = await signedPush(replayDeliveryId);
+  if (replay.duplicate !== true || replay.status !== "TRIGGERED" || replay.deploymentCount !== 1 || replay.originalDeliveryId !== deliveryId) {
+    throw new Error(`replayed signed GitHub body created a new event: ${JSON.stringify(replay)}`);
+  }
+
   const deliveries = await request("/v0/github/deliveries", { headers });
   const recorded = deliveries.deliveries?.find((item) => item.delivery_id === deliveryId);
   if (!recorded || recorded.status !== "TRIGGERED" || Number(recorded.deployment_count) !== 1) {
@@ -161,6 +167,9 @@ async function createDeploymentFromPush() {
   }
   if (!recorded.deployments?.some((item) => item.serviceName === serviceName && item.deploymentId === deploymentId)) {
     throw new Error(`GitHub delivery is not linked to triggered deployment: ${JSON.stringify(recorded)}`);
+  }
+  if (deliveries.deliveries?.some((item) => item.delivery_id === replayDeliveryId)) {
+    throw new Error("replayed signed GitHub body should not create a second delivery record");
   }
   return deploymentId;
 }
@@ -266,6 +275,7 @@ try {
       "agent-online",
       "signed-github-push",
       "github-delivery-idempotency",
+      "github-body-replay-protection",
       "github-delivery-observability",
       "exact-source-commit",
       "node-auto-build",
