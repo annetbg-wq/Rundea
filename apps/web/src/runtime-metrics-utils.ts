@@ -18,7 +18,8 @@ export function formatMetricBytes(value: number): string {
     unit += 1;
   }
   const digits = scaled >= 100 || unit === 0 ? 0 : scaled >= 10 ? 1 : 2;
-  return `${scaled.toFixed(digits)} ${units[unit]}`;
+  const display = Number(scaled.toFixed(digits)).toString();
+  return `${display} ${units[unit]}`;
 }
 
 export function networkRateBytesPerSecond(points: MetricPoint[]): number | null {
