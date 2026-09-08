@@ -146,7 +146,7 @@ func extractSourceArchive(compressed io.Reader, destination string) error {
 					continue
 				}
 			}
-			return errors.New("source bundle root marker must be a directory or empty regular entry")
+			return fmt.Errorf("source bundle root marker rejected: type=%d size=%d mode=%o", hdr.Typeflag, hdr.Size, hdr.Mode)
 		}
 
 		relSlash := strings.Join(parts[1:], "/")
