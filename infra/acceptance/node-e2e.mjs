@@ -71,12 +71,29 @@ async function deploymentEvents(id) {
   return await request(`/v0/deployments/${id}/events`, { headers });
 }
 
+function conciseEvents(events) {
+  return events.slice(-12).map((event) => ({
+    kind: event.kind,
+    status: event.status,
+    stream: event.stream,
+    message: typeof event.message === "string" ? event.message.slice(0, 1200) : event.message,
+  }));
+}
+
 async function waitDeployment(id, label) {
   return await poll(label, async () => {
     const row = await deployment(id);
     if (!row) return { last: "deployment not visible yet" };
     if (row.status === "READY") return { done: true, value: row };
-    if (terminal.has(row.status)) throw new FatalPollError(`${label} reached ${row.status}`);
+    if (terminal.has(row.status)) {
+      let diagnostics = [];
+      try {
+        diagnostics = conciseEvents(await deploymentEvents(id));
+      } catch (error) {
+        diagnostics = [{ kind: "DIAGNOSTIC", message: error instanceof Error ? error.message : String(error) }];
+      }
+      throw new FatalPollError(`${label} reached ${row.status}; events=${JSON.stringify(diagnostics)}`);
+    }
     return { last: row.status };
   }, 240_000, 1500);
 }
