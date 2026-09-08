@@ -108,14 +108,27 @@ func runRollback(cfg config, w *writer, cmd rollbackCommand) {
 		return
 	}
 
-	imageTag := "rundea/" + strings.ToLower(cmd.TargetDeploymentID) + ":build"
-	actualImageID, err := inspectImageID(ctx, imageTag)
+	targetImageTag := "rundea/" + strings.ToLower(cmd.TargetDeploymentID) + ":build"
+	actualImageID, err := inspectImageID(ctx, targetImageTag)
 	if err != nil {
 		fail(err)
 		return
 	}
 	if actualImageID != cmd.ExpectedImageID {
 		fail(fmt.Errorf("retained rollback artifact identity mismatch: expected %s, found %s", cmd.ExpectedImageID, actualImageID))
+		return
+	}
+	rollbackImageTag := "rundea/" + strings.ToLower(cmd.DeploymentID) + ":build"
+	if out, err := exec.CommandContext(ctx, "docker", "image", "tag", targetImageTag, rollbackImageTag).CombinedOutput(); err != nil {
+		fail(fmt.Errorf("retain rollback artifact under new revision: %w: %s", err, strings.TrimSpace(string(out))))
+		return
+	}
+	if retainedID, err := inspectImageID(ctx, rollbackImageTag); err != nil || retainedID != cmd.ExpectedImageID {
+		if err != nil {
+			fail(err)
+		} else {
+			fail(fmt.Errorf("new rollback artifact identity mismatch: expected %s, found %s", cmd.ExpectedImageID, retainedID))
+		}
 		return
 	}
 	if err := w.status(cmd.DeploymentID, "DEPLOYING", "starting retained rollback revision", ""); err != nil {
@@ -172,7 +185,7 @@ func runRollback(cfg config, w *writer, cmd rollbackCommand) {
 		"--label", "rundea.managed=true",
 		"--label", "rundea.deployment="+cmd.DeploymentID,
 		"--label", "rundea.rollback_target="+cmd.TargetDeploymentID,
-		"--name", cmd.Runtime.ContainerName, "-p", port, "--env-file", envFile, imageTag,
+		"--name", cmd.Runtime.ContainerName, "-p", port, "--env-file", envFile, rollbackImageTag,
 	).CombinedOutput()
 	if removeErr := os.Remove(envFile); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
 		w.log(cmd.DeploymentID, "system", "failed to remove temporary rollback environment file: "+removeErr.Error())
@@ -204,10 +217,6 @@ func runRollback(cfg config, w *writer, cmd rollbackCommand) {
 		}
 		return
 	}
-
-	// Keep the previous healthy container until the Control Plane has accepted READY.
-	// If the WebSocket write fails, restore the previous revision so runtime truth and
-	// Control Plane truth cannot silently diverge.
 	if err := w.status(cmd.DeploymentID, "READY", "rollback revision is healthy", containerID); err != nil {
 		_ = restoreBackup()
 		return
