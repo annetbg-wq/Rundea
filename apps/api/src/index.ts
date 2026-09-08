@@ -34,6 +34,11 @@ import {
   upsertServiceVariables,
   type ServiceVariableInput,
 } from "./service-variables";
+import {
+  issueSourceBundleTicket,
+  registerSourceBrokerRoutes,
+  validateSourceDelivery,
+} from "./source-broker";
 
 type NodeSocket = { send(payload: string): void; close(code?: number, reason?: string): void };
 
@@ -57,6 +62,7 @@ for (const migration of [
   "003_node_qualification.sql",
   "004_service_domains.sql",
   "005_runtime_controls.sql",
+  "007_source_broker.sql",
 ]) {
   const migrationUrl = new URL(`../migrations/${migration}`, import.meta.url);
   await pool.query(await readFile(migrationUrl, "utf8"));
@@ -135,7 +141,7 @@ async function dispatchQueued(nodeId: string): Promise<void> {
       return;
     }
     const result = await client.query(
-      `SELECT id,service_name,source_repository,source_ref,dockerfile,container_port,host_port,healthcheck_path,
+      `SELECT id,service_name,source_repository,source_ref,source_delivery,dockerfile,container_port,host_port,healthcheck_path,
               operation,rollback_target_id,image_id
          FROM deployments
         WHERE node_id=$1 AND status='QUEUED' AND (dispatch_lease_until IS NULL OR dispatch_lease_until < now())
@@ -202,12 +208,32 @@ async function dispatchQueued(nodeId: string): Promise<void> {
       serviceName: row.service_name,
       runtime,
     };
+  } else if (row.source_delivery === "BROKER") {
+    try {
+      const ticket = await issueSourceBundleTicket(pool, row.id, nodeId, row.source_repository, row.source_ref);
+      command = {
+        type: "deploy",
+        deploymentId: row.id,
+        serviceName: row.service_name,
+        source: {
+          mode: "bundle",
+          ref: row.source_ref,
+          ticket,
+          ...(row.dockerfile ? { dockerfile: row.dockerfile } : {}),
+        },
+        runtime,
+      };
+    } catch (error) {
+      await failQueuedBeforeDispatch(row.id, error instanceof Error ? error.message : "source bundle ticket could not be issued");
+      return;
+    }
   } else {
     command = {
       type: "deploy",
       deploymentId: row.id,
       serviceName: row.service_name,
       source: {
+        mode: "git",
         repository: row.source_repository,
         ref: row.source_ref,
         ...(row.dockerfile ? { dockerfile: row.dockerfile } : {}),
@@ -348,6 +374,7 @@ app.get("/v0/nodes", { preHandler: requireControl }, async () => {
 registerNodeQualificationRoutes(app, pool, sockets, requireControl);
 registerDomainRoutes(app, pool, sockets, requireControl);
 registerRuntimeControlRoutes(app, pool, sockets, requireControl, dispatchQueued);
+registerSourceBrokerRoutes(app, pool);
 
 app.put<{ Params: { serviceName: string }; Body: { variables?: ServiceVariableInput[] } }>(
   "/v0/services/:serviceName/variables",
@@ -394,7 +421,7 @@ app.delete<{ Params: { serviceName: string; key: string } }>(
 
 app.get("/v0/deployments", { preHandler: requireControl }, async () => {
   const result = await pool.query(
-    `SELECT id,service_name,node_id,source_repository,source_ref,dockerfile,container_port,host_port,healthcheck_path,
+    `SELECT id,service_name,node_id,source_repository,source_ref,source_delivery,dockerfile,container_port,host_port,healthcheck_path,
             status,runtime_container_id,operation,rollback_target_id,environment_snapshot_at,source_commit_sha,image_id,
             created_at,updated_at
        FROM deployments ORDER BY created_at DESC LIMIT 100`,
@@ -410,7 +437,7 @@ app.get<{ Params: { id: string } }>("/v0/deployments/:id/events", { preHandler: 
   return result.rows;
 });
 
-app.post<{ Body: { serviceName?: string; nodeId?: string; sourceRepository?: string; sourceRef?: string; dockerfile?: string; containerPort?: number; hostPort?: number; healthcheckPath?: string } }>(
+app.post<{ Body: { serviceName?: string; nodeId?: string; sourceRepository?: string; sourceRef?: string; sourceDelivery?: string; dockerfile?: string; containerPort?: number; hostPort?: number; healthcheckPath?: string } }>(
   "/v0/deployments",
   { preHandler: requireControl },
   async (request, reply) => {
@@ -426,15 +453,21 @@ app.post<{ Body: { serviceName?: string; nodeId?: string; sourceRepository?: str
     if (!Number.isInteger(body.containerPort) || !Number.isInteger(body.hostPort)) {
       return reply.code(400).send({ error: "containerPort and hostPort must be integers" });
     }
+    let sourceDelivery: "DIRECT" | "BROKER";
+    try {
+      sourceDelivery = validateSourceDelivery(body.sourceDelivery, body.sourceRef);
+    } catch (error) {
+      return reply.code(400).send({ error: error instanceof Error ? error.message : "invalid source delivery" });
+    }
 
     const id = randomUUID();
     const client = await pool.connect();
     try {
       await client.query("BEGIN");
       await client.query(
-        `INSERT INTO deployments(id,service_name,node_id,source_repository,source_ref,dockerfile,container_port,host_port,healthcheck_path,status,operation)
-         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,'QUEUED','DEPLOY')`,
-        [id, body.serviceName, body.nodeId, body.sourceRepository, body.sourceRef, body.dockerfile?.trim() || null, body.containerPort, body.hostPort, body.healthcheckPath?.trim() ?? ""],
+        `INSERT INTO deployments(id,service_name,node_id,source_repository,source_ref,source_delivery,dockerfile,container_port,host_port,healthcheck_path,status,operation)
+         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'QUEUED','DEPLOY')`,
+        [id, body.serviceName, body.nodeId, body.sourceRepository, body.sourceRef, sourceDelivery, body.dockerfile?.trim() || null, body.containerPort, body.hostPort, body.healthcheckPath?.trim() ?? ""],
       );
       await captureDeploymentEnvironment(client, id, body.serviceName);
       await client.query("COMMIT");
@@ -446,7 +479,7 @@ app.post<{ Body: { serviceName?: string; nodeId?: string; sourceRepository?: str
       client.release();
     }
     await dispatchQueued(body.nodeId);
-    return reply.code(201).send({ id, status: "QUEUED", operation: "DEPLOY", agentConnected: sockets.has(body.nodeId) });
+    return reply.code(201).send({ id, status: "QUEUED", operation: "DEPLOY", sourceDelivery, agentConnected: sockets.has(body.nodeId) });
   },
 );
 

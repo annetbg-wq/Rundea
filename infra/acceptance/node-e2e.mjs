@@ -67,17 +67,38 @@ async function deployment(id) {
   return (await deployments()).find((item) => item.id === id);
 }
 
+async function deploymentEvents(id) {
+  return await request(`/v0/deployments/${id}/events`, { headers });
+}
+
+function conciseEvents(events) {
+  return events.slice(-12).map((event) => ({
+    kind: event.kind,
+    status: event.status,
+    stream: event.stream,
+    message: typeof event.message === "string" ? event.message.slice(0, 1200) : event.message,
+  }));
+}
+
 async function waitDeployment(id, label) {
   return await poll(label, async () => {
     const row = await deployment(id);
     if (!row) return { last: "deployment not visible yet" };
     if (row.status === "READY") return { done: true, value: row };
-    if (terminal.has(row.status)) throw new FatalPollError(`${label} reached ${row.status}`);
+    if (terminal.has(row.status)) {
+      let diagnostics = [];
+      try {
+        diagnostics = conciseEvents(await deploymentEvents(id));
+      } catch (error) {
+        diagnostics = [{ kind: "DIAGNOSTIC", message: error instanceof Error ? error.message : String(error) }];
+      }
+      throw new FatalPollError(`${label} reached ${row.status}; events=${JSON.stringify(diagnostics)}`);
+    }
     return { last: row.status };
   }, 240_000, 1500);
 }
 
-async function createDeployment() {
+async function createBrokeredDeployment() {
   const body = await request("/v0/deployments", {
     method: "POST",
     headers: jsonHeaders,
@@ -85,12 +106,16 @@ async function createDeployment() {
       serviceName,
       nodeId,
       sourceRepository: fixtureRepository,
-      sourceRef: fixtureRef,
+      sourceRef: expectedFixtureSha,
+      sourceDelivery: "BROKER",
       containerPort: 3001,
       hostPort,
       healthcheckPath: "/",
     }),
   });
+  if (body.sourceDelivery !== "BROKER") {
+    throw new Error(`brokered deployment was not accepted as BROKER: ${JSON.stringify(body)}`);
+  }
   deploymentIds.push(body.id);
   return body.id;
 }
@@ -191,6 +216,17 @@ async function assertService(label) {
   }
 }
 
+async function assertBrokeredSource(id) {
+  const row = await deployment(id);
+  if (row?.source_delivery !== "BROKER") {
+    throw new Error(`deployment ${id} did not persist BROKER source delivery`);
+  }
+  const events = await deploymentEvents(id);
+  if (!events.some((event) => event.kind === "LOG" && event.stream === "system" && event.message?.includes("source delivered through Rundea broker"))) {
+    throw new Error("brokered deployment did not prove Agent bundle delivery path");
+  }
+}
+
 async function restart(deploymentId) {
   const action = await request(`/v0/deployments/${deploymentId}/restart`, { method: "POST", headers });
   return await poll("restart action", async () => {
@@ -247,10 +283,11 @@ try {
   await restart(firstId);
   await assertService("restart");
 
-  const secondId = await createDeployment();
-  const second = await waitDeployment(secondId, "second deployment");
-  assertArtifact(second, "second deployment");
-  await assertService("second deployment");
+  const secondId = await createBrokeredDeployment();
+  const second = await waitDeployment(secondId, "brokered source deployment");
+  assertArtifact(second, "brokered source deployment");
+  await assertBrokeredSource(secondId);
+  await assertService("brokered source deployment");
 
   const rollbackOne = await rollback(firstId, "rollback to first revision");
   assertArtifact(rollbackOne, "rollback to first revision");
@@ -278,6 +315,8 @@ try {
       "github-body-replay-protection",
       "github-delivery-observability",
       "exact-source-commit",
+      "brokered-source-ticket",
+      "brokered-source-extraction",
       "node-auto-build",
       "artifact-identity",
       "http-health",

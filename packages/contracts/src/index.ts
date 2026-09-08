@@ -25,15 +25,25 @@ export type RuntimeSpec = {
   };
 };
 
+export type DirectGitSourceSpec = {
+  mode?: "git";
+  repository: string;
+  ref: string;
+  dockerfile?: string;
+};
+
+export type BrokeredSourceSpec = {
+  mode: "bundle";
+  ref: string;
+  ticket: string;
+  dockerfile?: string;
+};
+
 export type DeployCommand = {
   type: "deploy";
   deploymentId: string;
   serviceName: string;
-  source: {
-    repository: string;
-    ref: string;
-    dockerfile?: string;
-  };
+  source: DirectGitSourceSpec | BrokeredSourceSpec;
   runtime: RuntimeSpec;
 };
 
