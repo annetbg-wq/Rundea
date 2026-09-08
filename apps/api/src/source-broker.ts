@@ -2,11 +2,12 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { readFile } from "node:fs/promises";
 import type { Pool } from "pg";
 import { createOpaqueToken, equalTokenHash, hashToken } from "@rundea/crypto";
+import { createGitHubArchiveProviderFromEnv, type GitHubArchiveProvider } from "./github-app-source";
+export { readResponseBodyWithLimit } from "./source-archive";
 
 const fullCommitPattern = /^[0-9a-fA-F]{40}$/;
 const repoPartPattern = /^[A-Za-z0-9_.-]+$/;
 const bundleTicketTtlMs = 2 * 60 * 1000;
-const maxCompressedBundleBytes = 64 * 1024 * 1024;
 
 type SourceDelivery = "DIRECT" | "BROKER";
 
@@ -15,6 +16,8 @@ type RepositoryIdentity = {
   repository: string;
   fullName: string;
 };
+
+type ArchiveProvider = Pick<GitHubArchiveProvider, "fetchArchive">;
 
 function singleHeader(value: string | string[] | undefined): string | undefined {
   return Array.isArray(value) ? value[0] : value;
@@ -52,32 +55,6 @@ export function canonicalGitHubRepository(input: string): RepositoryIdentity {
     throw new Error("source repository owner/name contains unsupported characters");
   }
   return { owner, repository, fullName: `${owner}/${repository}` };
-}
-
-export async function readResponseBodyWithLimit(response: Response, maxBytes: number): Promise<Buffer> {
-  if (!Number.isSafeInteger(maxBytes) || maxBytes <= 0) throw new Error("invalid source archive size limit");
-  if (!response.body) throw new Error("source archive response has no body");
-
-  const reader = response.body.getReader();
-  const chunks: Uint8Array[] = [];
-  let total = 0;
-  try {
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      if (!value?.byteLength) continue;
-      total += value.byteLength;
-      if (total > maxBytes) {
-        await reader.cancel("source archive size limit exceeded").catch(() => undefined);
-        throw new Error("source archive exceeds v0 compressed size limit");
-      }
-      chunks.push(value);
-    }
-  } finally {
-    reader.releaseLock();
-  }
-  if (total === 0) throw new Error("source archive is empty");
-  return Buffer.concat(chunks, total);
 }
 
 const schemaReadyByPool = new WeakMap<Pool, Promise<void>>();
@@ -165,30 +142,11 @@ async function claimSourceBundleTicket(
   }
 }
 
-async function fetchPublicGitHubArchive(repositoryFullName: string, commitSha: string): Promise<Buffer> {
-  const [owner, repository] = repositoryFullName.split("/");
-  if (!owner || !repository || !repoPartPattern.test(owner) || !repoPartPattern.test(repository) || !fullCommitPattern.test(commitSha)) {
-    throw new Error("invalid source bundle identity");
-  }
-  const endpoint = `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repository)}/tarball/${commitSha.toLowerCase()}`;
-  const response = await fetch(endpoint, {
-    redirect: "follow",
-    headers: {
-      Accept: "application/vnd.github+json",
-      "User-Agent": "Rundea-Control-Plane",
-      "X-GitHub-Api-Version": "2022-11-28",
-    },
-  });
-  if (!response.ok) throw new Error(`GitHub source archive returned ${response.status}`);
-  const declaredLength = Number(response.headers.get("content-length") ?? "0");
-  if (Number.isFinite(declaredLength) && declaredLength > maxCompressedBundleBytes) {
-    response.body?.cancel().catch(() => undefined);
-    throw new Error("source archive exceeds v0 compressed size limit");
-  }
-  return await readResponseBodyWithLimit(response, maxCompressedBundleBytes);
-}
-
-export function registerSourceBrokerRoutes(app: FastifyInstance, pool: Pool): void {
+export function registerSourceBrokerRoutes(
+  app: FastifyInstance,
+  pool: Pool,
+  archiveProvider: ArchiveProvider = createGitHubArchiveProviderFromEnv(),
+): void {
   const schemaReady = ensureSchema(pool);
   app.get<{ Params: { deploymentId: string } }>("/v0/source-bundles/:deploymentId", async (request: FastifyRequest<{ Params: { deploymentId: string } }>, reply: FastifyReply) => {
     await schemaReady;
@@ -200,12 +158,19 @@ export function registerSourceBrokerRoutes(app: FastifyInstance, pool: Pool): vo
     if (!ticket) return reply.code(401).send({ error: "source bundle authorization failed" });
 
     try {
-      const archive = await fetchPublicGitHubArchive(ticket.repositoryFullName, ticket.commitSha);
+      const result = await archiveProvider.fetchArchive(ticket.repositoryFullName, ticket.commitSha);
+      if (result.authMode === "GITHUB_APP") {
+        await pool.query(
+          `INSERT INTO deployment_events(deployment_id,kind,stream,message)
+           VALUES($1,'LOG','system','source archive fetched through Rundea GitHub App')`,
+          [request.params.deploymentId],
+        );
+      }
       return reply
         .header("content-type", "application/gzip")
         .header("cache-control", "no-store")
         .header("x-rundea-source-sha", ticket.commitSha)
-        .send(archive);
+        .send(result.archive);
     } catch (error) {
       request.log.error(error, "source bundle upstream fetch failed");
       return reply.code(502).send({ error: "source bundle upstream fetch failed" });
