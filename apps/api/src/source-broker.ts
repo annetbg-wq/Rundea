@@ -171,8 +171,8 @@ export function registerSourceBrokerRoutes(
         .header("cache-control", "no-store")
         .header("x-rundea-source-sha", ticket.commitSha)
         .send(result.archive);
-    } catch (error) {
-      request.log.error(error, "source bundle upstream fetch failed");
+    } catch {
+      request.log.warn({ deploymentId: request.params.deploymentId }, "source bundle upstream fetch failed");
       return reply.code(502).send({ error: "source bundle upstream fetch failed" });
     }
   });
