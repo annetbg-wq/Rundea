@@ -8,6 +8,7 @@ import { copyDeploymentEnvironment } from "./service-variables";
 type ControlPreHandler = (request: FastifyRequest, reply: FastifyReply) => Promise<void>;
 type DispatchQueued = (nodeId: string) => Promise<void>;
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const rollbackTargetStatuses = new Set(["READY", "ROLLED_BACK"]);
 
 function validUuid(value: string): boolean {
   return uuidPattern.test(value);
@@ -27,6 +28,11 @@ async function latestReadyForService(pool: Pool, serviceName: string) {
     [serviceName],
   );
   return result.rows[0] as Record<string, any> | undefined;
+}
+
+async function nodeHasRuntimeAction(pool: Pool, nodeId: string): Promise<boolean> {
+  const result = await pool.query("SELECT id FROM runtime_actions WHERE node_id=$1 AND status='RUNNING' LIMIT 1", [nodeId]);
+  return (result.rowCount ?? 0) > 0;
 }
 
 export function registerRuntimeControlRoutes(
@@ -65,6 +71,7 @@ export function registerRuntimeControlRoutes(
         [row.node_id],
       );
       if ((activeWork.rowCount ?? 0) > 0) return reply.code(409).send({ error: "node has an active deployment operation" });
+      if (await nodeHasRuntimeAction(pool, row.node_id)) return reply.code(409).send({ error: "node already has a running runtime action" });
       const socket = sockets.get(row.node_id);
       if (!socket) return reply.code(409).send({ error: "node is not connected" });
 
@@ -75,7 +82,7 @@ export function registerRuntimeControlRoutes(
           [actionId, row.id, row.node_id],
         );
       } catch {
-        return reply.code(409).send({ error: "restart already running for this deployment" });
+        return reply.code(409).send({ error: "node already has a running runtime action" });
       }
       const command: AgentCommand = {
         type: "restart",
@@ -115,7 +122,9 @@ export function registerRuntimeControlRoutes(
       );
       if (targetResult.rowCount !== 1) return reply.code(404).send({ error: "rollback target not found" });
       const target = targetResult.rows[0];
-      if (target.status !== "READY") return reply.code(409).send({ error: "rollback target must be a previously READY deployment" });
+      if (!rollbackTargetStatuses.has(target.status)) {
+        return reply.code(409).send({ error: "rollback target must be a revision that previously reached READY" });
+      }
       if (!target.environment_snapshot_at || !target.image_id || !target.source_commit_sha) {
         return reply.code(409).send({ error: "deployment predates immutable rollback snapshots or has no retained artifact identity" });
       }
@@ -130,6 +139,7 @@ export function registerRuntimeControlRoutes(
         [target.node_id],
       );
       if ((activeWork.rowCount ?? 0) > 0) return reply.code(409).send({ error: "node already has an active deployment operation" });
+      if (await nodeHasRuntimeAction(pool, target.node_id)) return reply.code(409).send({ error: "node already has a running runtime action" });
 
       const id = randomUUID();
       const client = await pool.connect();
