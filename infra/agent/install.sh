@@ -1,24 +1,91 @@
 #!/usr/bin/env bash
 set -euo pipefail
-: "${RUNDEA_AGENT_URL:?set RUNDEA_AGENT_URL to a released rundea-agent binary}"
-: "${RUNDEA_AGENT_SHA256:?set RUNDEA_AGENT_SHA256 to the published SHA-256 checksum}"
+
 : "${RUNDEA_CONTROL_PLANE_URL:?set RUNDEA_CONTROL_PLANE_URL}"
 : "${RUNDEA_NODE_ID:?set RUNDEA_NODE_ID}"
-: "${RUNDEA_NODE_TOKEN:?set RUNDEA_NODE_TOKEN}"
+: "${RUNDEA_NODE_TOKEN:?set RUNDEA_NODE_TOKEN to the one-time bootstrap token}"
+
 if [[ ${EUID} -ne 0 ]]; then echo "run as root" >&2; exit 1; fi
+RUNDEA_CONTROL_PLANE_URL="${RUNDEA_CONTROL_PLANE_URL%/}"
 [[ "$RUNDEA_CONTROL_PLANE_URL" == https://* ]] || { echo "Installed Rundea nodes require an https:// control plane URL" >&2; exit 1; }
-command -v docker >/dev/null || { echo "Docker must be installed first" >&2; exit 1; }
-command -v git >/dev/null || { echo "Git must be installed first" >&2; exit 1; }
-command -v curl >/dev/null || { echo "curl must be installed first" >&2; exit 1; }
-command -v sha256sum >/dev/null || { echo "sha256sum must be installed first" >&2; exit 1; }
-[[ "$RUNDEA_AGENT_SHA256" =~ ^[a-fA-F0-9]{64}$ ]] || { echo "RUNDEA_AGENT_SHA256 must be a 64-character hex SHA-256" >&2; exit 1; }
+for command in docker git curl sha256sum systemctl head od tr; do
+  command -v "$command" >/dev/null || { echo "$command must be installed first" >&2; exit 1; }
+done
+
+if [[ -n "${RUNDEA_AGENT_URL:-}" || -n "${RUNDEA_AGENT_SHA256:-}" ]]; then
+  [[ -n "${RUNDEA_AGENT_URL:-}" && -n "${RUNDEA_AGENT_SHA256:-}" ]] || {
+    echo "RUNDEA_AGENT_URL and RUNDEA_AGENT_SHA256 must be provided together" >&2
+    exit 1
+  }
+  [[ "$RUNDEA_AGENT_URL" == https://* ]] || { echo "RUNDEA_AGENT_URL must use https://" >&2; exit 1; }
+  [[ "$RUNDEA_AGENT_SHA256" =~ ^[a-fA-F0-9]{64}$ ]] || { echo "RUNDEA_AGENT_SHA256 must be a 64-character hex SHA-256" >&2; exit 1; }
+fi
+
+case "$(uname -m)" in
+  x86_64|amd64) rundea_arch="amd64" ;;
+  aarch64|arm64) rundea_arch="arm64" ;;
+  *) echo "Unsupported architecture: $(uname -m). Rundea currently publishes linux/amd64 and linux/arm64 Agent binaries." >&2; exit 1 ;;
+esac
+
 install -d -m 0700 /etc/rundea /var/lib/rundea /var/lib/rundea/deployments
 
 tmp_agent="$(mktemp /tmp/rundea-agent.XXXXXX)"
-cleanup() { rm -f "$tmp_agent"; }
+tmp_bootstrap_config="$(mktemp /tmp/rundea-bootstrap-curl.XXXXXX)"
+tmp_node_config="$(mktemp /tmp/rundea-node-curl.XXXXXX)"
+cleanup() { rm -f "$tmp_agent" "$tmp_bootstrap_config" "$tmp_node_config"; }
 trap cleanup EXIT
-curl --fail --location --proto '=https' --tlsv1.2 "$RUNDEA_AGENT_URL" -o "$tmp_agent"
-printf '%s  %s\n' "$RUNDEA_AGENT_SHA256" "$tmp_agent" | sha256sum --check --status || { echo "Rundea Agent checksum verification failed" >&2; exit 1; }
+chmod 0600 "$tmp_bootstrap_config" "$tmp_node_config"
+
+# The token copied from the UI is a bootstrap credential, not the long-lived
+# Agent credential. Generate the permanent credential on the node and rotate
+# the server-side hash before downloading or starting the Agent.
+agent_token="$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+[[ "$agent_token" =~ ^[a-f0-9]{64}$ ]] || { echo "failed to generate Agent credential" >&2; exit 1; }
+
+cat >"$tmp_bootstrap_config" <<EOF
+silent
+show-error
+fail
+request = "POST"
+header = "Authorization: Bearer ${RUNDEA_NODE_TOKEN}"
+header = "Content-Type: application/json"
+data = "{\"agentToken\":\"${agent_token}\"}"
+EOF
+
+curl --config "$tmp_bootstrap_config" \
+  --proto '=https' --tlsv1.2 --max-redirs 0 \
+  "${RUNDEA_CONTROL_PLANE_URL}/v0/nodes/${RUNDEA_NODE_ID}/bootstrap/exchange" \
+  -o /dev/null
+
+# From this point the copied bootstrap token is invalid. Keep only the locally
+# generated permanent credential and never put it on a curl command line.
+unset RUNDEA_NODE_TOKEN
+RUNDEA_NODE_TOKEN="$agent_token"
+cat >"$tmp_node_config" <<EOF
+silent
+show-error
+fail
+header = "Authorization: Bearer ${RUNDEA_NODE_TOKEN}"
+header = "X-Rundea-Node-Id: ${RUNDEA_NODE_ID}"
+EOF
+
+if [[ -n "${RUNDEA_AGENT_URL:-}" ]]; then
+  expected_sha="${RUNDEA_AGENT_SHA256,,}"
+  curl --fail --location --proto '=https' --tlsv1.2 "$RUNDEA_AGENT_URL" -o "$tmp_agent"
+else
+  checksum_url="${RUNDEA_CONTROL_PLANE_URL}/v0/agent/releases/${rundea_arch}/sha256"
+  binary_url="${RUNDEA_CONTROL_PLANE_URL}/v0/agent/releases/${rundea_arch}"
+  expected_sha="$(curl --config "$tmp_node_config" --proto '=https' --tlsv1.2 --max-redirs 0 "$checksum_url")"
+  expected_sha="$(printf '%s' "$expected_sha" | tr -d '[:space:]')"
+  [[ "$expected_sha" =~ ^[a-fA-F0-9]{64}$ ]] || { echo "Control Plane returned an invalid Agent checksum" >&2; exit 1; }
+  expected_sha="${expected_sha,,}"
+  curl --config "$tmp_node_config" --proto '=https' --tlsv1.2 --max-redirs 0 "$binary_url" -o "$tmp_agent"
+fi
+
+printf '%s  %s\n' "$expected_sha" "$tmp_agent" | sha256sum --check --status || {
+  echo "Rundea Agent checksum verification failed" >&2
+  exit 1
+}
 install -m 0755 "$tmp_agent" /usr/local/bin/rundea-agent
 
 cat >/etc/rundea/agent.env <<EOF
