@@ -2,35 +2,60 @@ name: agent-release
 
 on:
   push:
-    tags:
-      - "agent-v*"
+    branches: [main]
+    paths:
+      - "apps/agent/VERSION"
 
 permissions:
   contents: write
+
+concurrency:
+  group: agent-release
+  cancel-in-progress: false
 
 jobs:
   release:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-go@v5
         with:
           go-version: "1.25.x"
           cache-dependency-path: apps/agent/go.sum
-      - name: Validate release tag
+      - name: Resolve immutable Agent version
+        id: version
         shell: bash
         run: |
           set -euo pipefail
-          [[ "${GITHUB_REF_NAME}" =~ ^agent-v[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9.-]+)?$ ]] || {
-            echo "Agent releases require an agent-vX.Y.Z style tag" >&2
+          version="$(tr -d '\r\n' < apps/agent/VERSION)"
+          [[ "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+            echo "apps/agent/VERSION must contain an exact X.Y.Z version" >&2
             exit 1
           }
-          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
-            echo "Release ${GITHUB_REF_NAME} already exists; immutable Agent releases are never overwritten" >&2
-            exit 1
-          fi
+          tag="agent-v${version}"
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+          echo "tag=${tag}" >> "${GITHUB_OUTPUT}"
+      - name: Guard immutable tag and release identity
+        shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          set -euo pipefail
+          git fetch --tags --force
+          if git show-ref --verify --quiet "refs/tags/${TAG}"; then
+            existing_sha="$(git rev-list -n 1 "${TAG}")"
+            if [[ "${existing_sha}" != "${GITHUB_SHA}" ]]; then
+              echo "${TAG} already points to ${existing_sha}; refusing to move an immutable Agent tag to ${GITHUB_SHA}" >&2
+              exit 1
+            fi
+          fi
+          if gh release view "${TAG}" >/dev/null 2>&1; then
+            release_target="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${TAG}" --jq '.target_commitish')"
+            echo "Release ${TAG} already exists (target ${release_target}); it will be verified but never overwritten."
+          fi
       - name: Build static Linux Agent binaries
         working-directory: apps/agent
         shell: bash
@@ -49,22 +74,60 @@ jobs:
       - name: Upload audit bundle
         uses: actions/upload-artifact@v4
         with:
-          name: rundea-agent-${{ github.ref_name }}
+          name: rundea-agent-${{ steps.version.outputs.tag }}-${{ github.sha }}
           path: |
             dist/agent/rundea-agent-linux-amd64
             dist/agent/rundea-agent-linux-arm64
             dist/agent/SHA256SUMS
           if-no-files-found: error
-      - name: Publish immutable private GitHub Release assets
+      - name: Create immutable tag at exact merge SHA
         shell: bash
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
         run: |
           set -euo pipefail
-          gh release create "${GITHUB_REF_NAME}" \
+          if git show-ref --verify --quiet "refs/tags/${TAG}"; then
+            [[ "$(git rev-list -n 1 "${TAG}")" == "${GITHUB_SHA}" ]]
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "${TAG}" "${GITHUB_SHA}" -m "Rundea Agent ${TAG}"
+          git push origin "refs/tags/${TAG}"
+      - name: Publish immutable private GitHub Release assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if gh release view "${TAG}" >/dev/null 2>&1; then
+            echo "Release ${TAG} already exists; immutable release assets will not be replaced."
+            exit 0
+          fi
+          gh release create "${TAG}" \
             dist/agent/rundea-agent-linux-amd64 \
             dist/agent/rundea-agent-linux-arm64 \
             dist/agent/SHA256SUMS \
             --verify-tag \
-            --title "Rundea Agent ${GITHUB_REF_NAME}" \
-            --notes "Static Linux Agent binaries for Rundea nodes. Download through the authenticated Rundea Control Plane bootstrap path; verify against SHA256SUMS."
+            --title "Rundea Agent ${TAG}" \
+            --notes "Static Linux Agent binaries for Rundea nodes, built from ${GITHUB_SHA}. Download through the authenticated Rundea Control Plane bootstrap path; verify against SHA256SUMS."
+      - name: Verify published release assets
+        shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          set -euo pipefail
+          rm -rf dist/published-agent
+          mkdir -p dist/published-agent
+          gh release download "${TAG}" \
+            --dir dist/published-agent \
+            --pattern 'rundea-agent-linux-amd64' \
+            --pattern 'rundea-agent-linux-arm64' \
+            --pattern 'SHA256SUMS'
+          cd dist/published-agent
+          test -f rundea-agent-linux-amd64
+          test -f rundea-agent-linux-arm64
+          test -f SHA256SUMS
+          sha256sum --check SHA256SUMS
