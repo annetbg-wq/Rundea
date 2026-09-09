@@ -161,6 +161,10 @@ func connectAndServe(cfg config) error {
 	w := &writer{conn: conn}
 	log.Printf("connected to %s as node %s", cfg.ControlPlane, cfg.NodeID)
 
+	if err := recoverInterruptedPromotions(context.Background(), cfg.WorkDir, w); err != nil {
+		return fmt.Errorf("recover interrupted runtime promotion: %w", err)
+	}
+
 	metricsCtx, cancelMetrics := context.WithCancel(context.Background())
 	defer cancelMetrics()
 	go runMetricsLoop(metricsCtx, w, durationEnv("RUNDEA_METRICS_INTERVAL", defaultMetricsInterval))
@@ -300,7 +304,7 @@ func runDeployment(cfg config, w *writer, cmd deployCommand) {
 		return
 	}
 
-	if err := w.status(cmd.DeploymentID, "DEPLOYING", "starting container", ""); err != nil {
+	if err := w.status(cmd.DeploymentID, "DEPLOYING", "preparing runtime candidate", ""); err != nil {
 		return
 	}
 	envFile, err := writeRuntimeEnvFile(workspace, cmd.Runtime.Environment, cmd.Runtime.ContainerPort)
@@ -308,35 +312,30 @@ func runDeployment(cfg config, w *writer, cmd deployCommand) {
 		fail(fmt.Errorf("runtime environment: %w", err))
 		return
 	}
-	_ = exec.CommandContext(ctx, "docker", "rm", "-f", cmd.Runtime.ContainerName).Run()
-	port := fmt.Sprintf("127.0.0.1:%d:%d", cmd.Runtime.HostPort, cmd.Runtime.ContainerPort)
-	dockerRun := exec.CommandContext(ctx, "docker", "run", "-d", "--restart", "unless-stopped", "--label", "rundea.managed=true", "--label", "rundea.deployment="+cmd.DeploymentID, "--name", cmd.Runtime.ContainerName, "-p", port, "--env-file", envFile, imageTag)
-	out, runErr := dockerRun.CombinedOutput()
-	if removeErr := os.Remove(envFile); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
-		w.log(cmd.DeploymentID, "system", "failed to remove temporary runtime env file: "+removeErr.Error())
-	}
-	if runErr != nil {
-		fail(fmt.Errorf("docker run: %w: %s", runErr, strings.TrimSpace(string(out))))
-		return
-	}
-	containerID := strings.TrimSpace(string(out))
-
-	if err := w.status(cmd.DeploymentID, "HEALTHCHECK", "waiting for healthcheck", containerID); err != nil {
-		cleanupContainer(ctx, w, cmd.DeploymentID, cmd.Runtime.ContainerName)
-		return
-	}
 	timeout := time.Duration(cmd.Runtime.Healthcheck.TimeoutSeconds) * time.Second
 	if timeout <= 0 {
 		timeout = 60 * time.Second
 	}
-	if err := waitForHealth(ctx, cmd.Runtime.HostPort, healthcheckPath, timeout); err != nil {
-		cleanupContainer(ctx, w, cmd.DeploymentID, cmd.Runtime.ContainerName)
-		fail(err)
+	containerID, runtimeErr := runSafeRuntime(ctx, w, safeRuntimeSpec{
+		WorkDir:       cfg.WorkDir,
+		DeploymentID:  cmd.DeploymentID,
+		ContainerName: cmd.Runtime.ContainerName,
+		ImageTag:      imageTag,
+		EnvFile:       envFile,
+		ContainerPort: cmd.Runtime.ContainerPort,
+		HostPort:      cmd.Runtime.HostPort,
+		HealthPath:    healthcheckPath,
+		HealthTimeout: timeout,
+	})
+	if removeErr := os.Remove(envFile); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+		w.log(cmd.DeploymentID, "system", "failed to remove temporary runtime env file: "+removeErr.Error())
+	}
+	if runtimeErr != nil {
+		fail(runtimeErr)
 		return
 	}
 
-	if err := w.status(cmd.DeploymentID, "READY", "healthcheck passed", containerID); err != nil {
-		cleanupContainer(ctx, w, cmd.DeploymentID, cmd.Runtime.ContainerName)
+	if err := w.status(cmd.DeploymentID, "READY", "candidate promoted and stable-port healthcheck passed", containerID); err != nil {
 		return
 	}
 	go streamRuntimeLogs(context.Background(), w, cmd.DeploymentID, cmd.Runtime.ContainerName)
