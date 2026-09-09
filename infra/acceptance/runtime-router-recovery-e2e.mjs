@@ -2,6 +2,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { activateNodeCredential } from "./node-credential.mjs";
 
 const api = process.env.RUNDEA_ACCEPTANCE_API_URL ?? "http://127.0.0.1:4000";
 const controlToken = process.env.RUNDEA_CONTROL_TOKEN;
@@ -155,7 +156,7 @@ try {
     body: JSON.stringify({ name: `router-recovery-${process.pid}` }),
   });
   nodeId = node.id;
-  nodeToken = node.token;
+  nodeToken = await activateNodeCredential(api, node.id, node.token);
 
   agent = spawnAgent();
   await waitNodeStatus("ONLINE");
@@ -218,6 +219,7 @@ try {
     firstId,
     secondId,
     verified: [
+      "bootstrap-to-permanent-node-credential",
       "runtime-router-survives-agent-stop",
       "committed-route-serves-with-agent-offline",
       "disconnect-marks-post-switch-healthcheck-failed",
