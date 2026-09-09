@@ -80,18 +80,12 @@ export function canonicalGitHubRepository(input: string): RepositoryIdentity {
   return { owner, repository, fullName: `${owner}/${repository}` };
 }
 
-const schemaReadyByPool = new WeakMap<Pool, Promise<void>>();
-
-function ensureSchema(pool: Pool): Promise<void> {
-  let existing = schemaReadyByPool.get(pool);
-  if (!existing) {
-    existing = (async () => {
-      const migrationUrl = new URL("../migrations/007_source_broker.sql", import.meta.url);
-      await pool.query(await readFile(migrationUrl, "utf8"));
-    })();
-    schemaReadyByPool.set(pool, existing);
-  }
-  return existing;
+// Migration 007 is applied synchronously by the Control Plane startup runner
+// before routes are registered. Re-running that DDL asynchronously here used
+// to race other module schema setup and can deadlock PostgreSQL. Keep one
+// migration owner; helpers only wait on already-completed startup schema.
+function ensureSchema(_pool: Pool): Promise<void> {
+  return Promise.resolve();
 }
 
 export async function issueSourceBundleTicket(
