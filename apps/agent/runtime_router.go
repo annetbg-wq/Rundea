@@ -319,33 +319,43 @@ func applyCommittedRuntimeRouterState(cfg config, state runtimeRouterState) erro
 }
 
 func applyCandidateRuntimeRouterState(cfg config, state runtimeRouterState) (bool, error) {
-	if err := writeRuntimeRouterConfig(cfg, state, runtimeRouterCandidateConfig); err != nil {
-		return false, err
-	}
-	if err := validateRuntimeRouterConfig(cfg, runtimeRouterCandidateConfig); err != nil {
-		return false, err
-	}
 	running, err := runtimeRouterRunning()
 	if err != nil {
 		return false, err
 	}
 	if running {
+		if err := writeRuntimeRouterConfig(cfg, state, runtimeRouterCandidateConfig); err != nil {
+			return false, err
+		}
+		if err := validateRuntimeRouterConfig(cfg, runtimeRouterCandidateConfig); err != nil {
+			return false, err
+		}
 		return false, reloadRuntimeRouter(runtimeRouterCandidateConfig)
 	}
-	// First service on the node has no previous listener to preserve. Start the
-	// candidate router without an automatic restart policy. It only becomes
-	// durable after the route state and committed Caddyfile are persisted.
-	if err := startRuntimeRouter(cfg, runtimeRouterCandidateConfig, "no"); err != nil {
+
+	// There is no existing stable listener to preserve on the first service.
+	// Use the durable filename but keep Docker restart disabled until the route
+	// state commit succeeds. A host reboot before commit therefore cannot start
+	// this uncommitted router; Agent recovery rewrites the committed file first.
+	if err := writeRuntimeRouterConfig(cfg, state, runtimeRouterCommittedConfig); err != nil {
+		return false, err
+	}
+	if err := validateRuntimeRouterConfig(cfg, runtimeRouterCommittedConfig); err != nil {
+		return false, err
+	}
+	if err := startRuntimeRouter(cfg, runtimeRouterCommittedConfig, "no"); err != nil {
 		return false, err
 	}
 	return true, nil
 }
 
-func promoteCandidateRuntimeRouterConfig(cfg config) error {
-	candidate := runtimeRouterConfigPath(cfg, runtimeRouterCandidateConfig)
-	committed := runtimeRouterConfigPath(cfg, runtimeRouterCommittedConfig)
-	if err := os.Rename(candidate, committed); err != nil {
-		return err
+func promoteCandidateRuntimeRouterConfig(cfg config, firstRouter bool) error {
+	if !firstRouter {
+		candidate := runtimeRouterConfigPath(cfg, runtimeRouterCandidateConfig)
+		committed := runtimeRouterConfigPath(cfg, runtimeRouterCommittedConfig)
+		if err := os.Rename(candidate, committed); err != nil {
+			return err
+		}
 	}
 	out, err := exec.Command("docker", "update", "--restart", "unless-stopped", runtimeRouterContainer).CombinedOutput()
 	if err != nil {
@@ -456,14 +466,11 @@ func switchRuntimeRoute(ctx context.Context, cfg config, w *writer, next runtime
 	if err := writeRuntimeRouterState(cfg, nextState); err != nil {
 		return nil, restore(fmt.Errorf("commit runtime route state: %w", err))
 	}
-	if err := promoteCandidateRuntimeRouterConfig(cfg); err != nil {
-		// The state file is already the durable commit point. Keep the running
-		// route, retain the marker, and let startup reconciliation regenerate the
-		// committed config from state rather than rolling a committed route back.
-		w.log(next.DeploymentID, "system", "runtime route committed but startup config promotion was deferred: "+err.Error())
-		if firstRouter {
-			w.log(next.DeploymentID, "system", "runtime router remains non-restarting until Agent reconciliation completes the committed config")
-		}
+	if err := promoteCandidateRuntimeRouterConfig(cfg, firstRouter); err != nil {
+		// routes.json is the commit point. Keep the live route and marker; startup
+		// recovery regenerates the durable Caddyfile from state before any stopped
+		// runtime-router container can be started.
+		w.log(next.DeploymentID, "system", "runtime route committed but router durability update was deferred: "+err.Error())
 		return previous, nil
 	}
 	if err := clearRuntimePromotionMarker(cfg, next.DeploymentID); err != nil {
@@ -534,8 +541,8 @@ func recoverRuntimeRouter(cfg config, w *writer) error {
 		}
 	}
 
-	// Always regenerate the startup config from the committed state. This is the
-	// reboot boundary: an uncommitted Caddyfile.next can never become durable.
+	// routes.json is authoritative across reboot. Regenerate the startup config
+	// before runtimeRouterRunning is allowed to start an existing stopped router.
 	discardCandidateRuntimeRouterConfig(cfg)
 	if err := applyCommittedRuntimeRouterState(cfg, state); err != nil {
 		runtimeRouterMu.Unlock()
