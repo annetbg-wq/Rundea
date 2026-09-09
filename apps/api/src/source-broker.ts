@@ -180,6 +180,12 @@ async function authenticateAgentReleaseCredential(pool: Pool, nodeId: string, to
   );
 }
 
+async function authenticatePermanentNodeCredential(pool: Pool, nodeId: string, token: string): Promise<boolean> {
+  await ensureSchema(pool);
+  const result = await pool.query("SELECT token_hash FROM nodes WHERE id=$1", [nodeId]);
+  return result.rowCount === 1 && equalTokenHash(result.rows[0].token_hash, hashToken(token));
+}
+
 async function exchangeBootstrapCredential(pool: Pool, nodeId: string, bootstrapToken: string, agentToken: string): Promise<boolean> {
   await ensureSchema(pool);
   if (!permanentNodeTokenPattern.test(agentToken)) return false;
@@ -254,6 +260,19 @@ export function registerSourceBrokerRoutes(
     if (!bootstrapToken || !agentToken) return reply.code(401).send({ error: "node bootstrap authorization failed" });
     const exchanged = await exchangeBootstrapCredential(pool, request.params.nodeId, bootstrapToken, agentToken);
     return exchanged ? reply.code(204).send() : reply.code(401).send({ error: "node bootstrap authorization failed" });
+  });
+
+  app.get<{ Params: { nodeId: string } }>("/v0/nodes/:nodeId/self/status", async (request, reply) => {
+    const token = bearer(request.headers.authorization);
+    if (!token || !(await authenticatePermanentNodeCredential(pool, request.params.nodeId, token))) {
+      return reply.code(401).send({ error: "node self authorization failed" });
+    }
+    const result = await pool.query("SELECT status FROM nodes WHERE id=$1", [request.params.nodeId]);
+    if (result.rowCount !== 1) return reply.code(401).send({ error: "node self authorization failed" });
+    return reply
+      .header("content-type", "text/plain; charset=utf-8")
+      .header("cache-control", "no-store")
+      .send(`${result.rows[0].status}\n`);
   });
 
   app.get<{ Params: { architecture: string } }>("/v0/agent/releases/:architecture/sha256", async (request, reply) => {
