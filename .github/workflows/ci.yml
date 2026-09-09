@@ -34,6 +34,8 @@ jobs:
           fetch-depth: 0
       - name: Validate Agent release version
         shell: bash
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           set -euo pipefail
           version="$(tr -d '\r\n' < VERSION)"
@@ -42,10 +44,14 @@ jobs:
             exit 1
           }
           if [[ "${GITHUB_EVENT_NAME}" == "pull_request" ]]; then
-            git fetch --tags --force
-            if git show-ref --verify --quiet "refs/tags/agent-v${version}"; then
-              echo "agent-v${version} already exists; bump apps/agent/VERSION before merging Agent release changes" >&2
-              exit 1
+            if git diff --quiet "${PR_BASE_SHA}" "${GITHUB_SHA}" -- ':(top)apps/agent/VERSION'; then
+              echo "Agent VERSION is unchanged in this PR; existing release tag is expected."
+            else
+              git fetch --tags --force
+              if git show-ref --verify --quiet "refs/tags/agent-v${version}"; then
+                echo "agent-v${version} already exists; bump apps/agent/VERSION before merging Agent release changes" >&2
+                exit 1
+              fi
             fi
           fi
       - name: Validate installer shell syntax
