@@ -161,8 +161,8 @@ func connectAndServe(cfg config) error {
 	w := &writer{conn: conn}
 	log.Printf("connected to %s as node %s", cfg.ControlPlane, cfg.NodeID)
 
-	if err := recoverInterruptedPromotions(context.Background(), cfg.WorkDir, w); err != nil {
-		return fmt.Errorf("recover interrupted runtime promotion: %w", err)
+	if err := recoverRuntimeRouter(cfg, w); err != nil {
+		return fmt.Errorf("recover runtime router: %w", err)
 	}
 
 	metricsCtx, cancelMetrics := context.WithCancel(context.Background())
@@ -213,7 +213,7 @@ func connectAndServe(cfg config) error {
 			if err := json.Unmarshal(payload, &cmd); err != nil {
 				continue
 			}
-			go runRestart(w, cmd)
+			go runRestart(cfg, w, cmd)
 		case "qualify":
 			var cmd qualifyCommand
 			if err := json.Unmarshal(payload, &cmd); err != nil || cmd.QualificationID == "" || cmd.Profile == "" {
@@ -304,7 +304,7 @@ func runDeployment(cfg config, w *writer, cmd deployCommand) {
 		return
 	}
 
-	if err := w.status(cmd.DeploymentID, "DEPLOYING", "preparing runtime candidate", ""); err != nil {
+	if err := w.status(cmd.DeploymentID, "DEPLOYING", "starting isolated runtime backend", ""); err != nil {
 		return
 	}
 	envFile, err := writeRuntimeEnvFile(workspace, cmd.Runtime.Environment, cmd.Runtime.ContainerPort)
@@ -316,9 +316,10 @@ func runDeployment(cfg config, w *writer, cmd deployCommand) {
 	if timeout <= 0 {
 		timeout = 60 * time.Second
 	}
-	containerID, runtimeErr := runSafeRuntime(ctx, w, safeRuntimeSpec{
+	containerID, runtimeErr := runSafeRuntime(ctx, cfg, w, safeRuntimeSpec{
 		WorkDir:       cfg.WorkDir,
 		DeploymentID:  cmd.DeploymentID,
+		ServiceName:   cmd.ServiceName,
 		ContainerName: cmd.Runtime.ContainerName,
 		ImageTag:      imageTag,
 		EnvFile:       envFile,
@@ -335,10 +336,10 @@ func runDeployment(cfg config, w *writer, cmd deployCommand) {
 		return
 	}
 
-	if err := w.status(cmd.DeploymentID, "READY", "candidate promoted and stable-port healthcheck passed", containerID); err != nil {
+	if err := w.status(cmd.DeploymentID, "READY", "runtime backend is healthy and stable route switched without port rebinding", containerID); err != nil {
 		return
 	}
-	go streamRuntimeLogs(context.Background(), w, cmd.DeploymentID, cmd.Runtime.ContainerName)
+	go streamRuntimeLogs(context.Background(), w, cmd.DeploymentID, revisionContainerName(cmd.Runtime.ContainerName, cmd.DeploymentID))
 }
 
 func cleanupContainer(ctx context.Context, w *writer, deploymentID, containerName string) {
@@ -384,6 +385,9 @@ func validateCommand(cmd deployCommand) error {
 	}
 	if cmd.Runtime.ContainerName == "" || cmd.Runtime.ContainerPort < 1 || cmd.Runtime.ContainerPort > 65535 || cmd.Runtime.HostPort < 1 || cmd.Runtime.HostPort > 65535 {
 		return errors.New("deployment command contains invalid runtime fields")
+	}
+	if cmd.Runtime.HostPort == 80 || cmd.Runtime.HostPort == 443 || cmd.Runtime.HostPort == 2019 || cmd.Runtime.HostPort == 2020 {
+		return fmt.Errorf("host port %d is reserved by Rundea routing", cmd.Runtime.HostPort)
 	}
 	return nil
 }
