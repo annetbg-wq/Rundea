@@ -181,6 +181,39 @@ func runRollback(cfg config, w *writer, cmd rollbackCommand) {
 	go streamRuntimeLogs(context.Background(), w, cmd.DeploymentID, revisionContainerName(cmd.Runtime.ContainerName, cmd.DeploymentID))
 }
 
+func commitRestartRuntimeRoute(ctx context.Context, cfg config, next runtimeRoute, timeout time.Duration) error {
+	runtimeRouterMu.Lock()
+	defer runtimeRouterMu.Unlock()
+
+	state, err := loadRuntimeRouterState(cfg)
+	if err != nil {
+		return err
+	}
+	current := routeForDeployment(state, next.DeploymentID)
+	if current == nil || current.ServiceName != next.ServiceName || current.BackendContainer != next.BackendContainer || current.HostPort != next.HostPort {
+		return errors.New("restart route no longer matches the committed active deployment")
+	}
+	nextState, err := upsertRuntimeRoute(state, next)
+	if err != nil {
+		return err
+	}
+
+	// Docker has already restarted the only backend for this deployment, so the
+	// old random host port is no longer a viable fallback. Persist the verified
+	// new socket first. If Agent crashes before Caddy reload, startup recovery
+	// deterministically regenerates the router from this live committed state.
+	if err := writeRuntimeRouterState(cfg, nextState); err != nil {
+		return fmt.Errorf("commit restarted backend route: %w", err)
+	}
+	if err := applyCommittedRuntimeRouterState(cfg, nextState); err != nil {
+		return fmt.Errorf("apply restarted backend route: %w", err)
+	}
+	if err := waitForRoutedHealth(ctx, next, timeout); err != nil {
+		return fmt.Errorf("verify restarted backend route: %w", err)
+	}
+	return nil
+}
+
 func runRestart(cfg config, w *writer, cmd restartCommand) {
 	runtimeMu.Lock()
 	defer runtimeMu.Unlock()
@@ -244,7 +277,7 @@ func runRestart(cfg config, w *writer, cmd restartCommand) {
 		}
 		next := *route
 		next.BackendPort = backendPort
-		if _, err := switchRuntimeRoute(ctx, cfg, w, next, timeout); err != nil {
+		if err := commitRestartRuntimeRoute(ctx, cfg, next, timeout); err != nil {
 			complete(false, fmt.Errorf("restart route reconciliation failed after Docker changed the published port: %w", err))
 			return
 		}
