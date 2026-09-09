@@ -1,0 +1,56 @@
+name: agent-release-provider-live
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Agent release tag to verify
+        required: true
+        default: agent-v0.1.0
+        type: string
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/agent-release-provider-live.yml'
+      - 'apps/api/src/agent-release.live.test.ts'
+
+permissions:
+  contents: read
+
+jobs:
+  live-provider:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      RUNDEA_LIVE_AGENT_RELEASE: '1'
+      RUNDEA_AGENT_RELEASE_REPOSITORY: annetbg-wq/Rundea
+      RUNDEA_AGENT_RELEASE_TAG: ${{ inputs.tag || 'agent-v0.1.0' }}
+      RUNDEA_GITHUB_APP_ID: ${{ secrets.RUNDEA_GITHUB_APP_ID }}
+      RUNDEA_GITHUB_APP_PRIVATE_KEY_BASE64: ${{ secrets.RUNDEA_GITHUB_APP_PRIVATE_KEY_BASE64 }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - name: Detect live GitHub App configuration
+        id: live_config
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -n "${RUNDEA_GITHUB_APP_ID}" && -n "${RUNDEA_GITHUB_APP_PRIVATE_KEY_BASE64}" ]]; then
+            echo 'configured=true' >> "${GITHUB_OUTPUT}"
+          else
+            echo 'configured=false' >> "${GITHUB_OUTPUT}"
+            echo '::notice::Live Agent release-provider acceptance is blocked until RUNDEA_GITHUB_APP_ID and RUNDEA_GITHUB_APP_PRIVATE_KEY_BASE64 repository secrets are configured.'
+          fi
+      - name: Download and checksum-verify private Agent release through Rundea provider
+        if: steps.live_config.outputs.configured == 'true'
+        run: npx tsx --test apps/api/src/agent-release.live.test.ts
+      - name: Record missing-secret blocker
+        if: steps.live_config.outputs.configured != 'true'
+        shell: bash
+        run: |
+          echo '## Live Agent release-provider acceptance: BLOCKED' >> "${GITHUB_STEP_SUMMARY}"
+          echo 'Configure repository secrets RUNDEA_GITHUB_APP_ID and RUNDEA_GITHUB_APP_PRIVATE_KEY_BASE64, then run this workflow manually.' >> "${GITHUB_STEP_SUMMARY}"
