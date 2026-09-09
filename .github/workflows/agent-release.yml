@@ -1,62 +1,98 @@
 name: agent-release
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - "apps/agent/VERSION"
+  workflow_run:
+    workflows: ["ci", "node-acceptance"]
+    types: [completed]
 
 permissions:
   contents: write
 
 concurrency:
-  group: agent-release
+  group: agent-release-${{ github.event.workflow_run.head_sha }}
   cancel-in-progress: false
 
 jobs:
   release:
+    if: github.event.workflow_run.head_branch == 'main' && github.event.workflow_run.event == 'push'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ github.event.workflow_run.head_sha }}
           fetch-depth: 0
       - uses: actions/setup-go@v5
         with:
           go-version: "1.25.x"
           cache-dependency-path: apps/agent/go.sum
-      - name: Resolve immutable Agent version
-        id: version
+      - name: Resolve Agent release candidate
+        id: candidate
         shell: bash
+        env:
+          RELEASE_SHA: ${{ github.event.workflow_run.head_sha }}
         run: |
           set -euo pipefail
+          echo "should_release=false" >> "${GITHUB_OUTPUT}"
+          if git diff --quiet "${RELEASE_SHA}^" "${RELEASE_SHA}" -- apps/agent/VERSION; then
+            echo "The exact main commit did not change apps/agent/VERSION; no Agent release is due."
+            exit 0
+          fi
           version="$(tr -d '\r\n' < apps/agent/VERSION)"
           [[ "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
             echo "apps/agent/VERSION must contain an exact X.Y.Z version" >&2
             exit 1
           }
-          tag="agent-v${version}"
           echo "version=${version}" >> "${GITHUB_OUTPUT}"
-          echo "tag=${tag}" >> "${GITHUB_OUTPUT}"
-      - name: Guard immutable tag and release identity
+          echo "tag=agent-v${version}" >> "${GITHUB_OUTPUT}"
+          echo "should_release=true" >> "${GITHUB_OUTPUT}"
+      - name: Require both post-merge main gates on the exact SHA
+        id: gates
+        if: steps.candidate.outputs.should_release == 'true'
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ steps.version.outputs.tag }}
+          RELEASE_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+          echo "ready=false" >> "${GITHUB_OUTPUT}"
+          for workflow in ci.yml node-acceptance.yml; do
+            state="$(gh run list \
+              --repo "${GITHUB_REPOSITORY}" \
+              --workflow "${workflow}" \
+              --commit "${RELEASE_SHA}" \
+              --event push \
+              --limit 10 \
+              --json status,conclusion,headSha \
+              --jq '.[0] | "\(.status) \(.conclusion) \(.headSha)"')"
+            if [[ "${state}" != "completed success ${RELEASE_SHA}" ]]; then
+              echo "Gate ${workflow} is not yet successful for ${RELEASE_SHA}: ${state:-missing}" >&2
+              echo "A later workflow_run completion for this SHA will evaluate the pair again."
+              exit 0
+            fi
+          done
+          echo "ready=true" >> "${GITHUB_OUTPUT}"
+      - name: Guard immutable tag and release identity
+        if: steps.candidate.outputs.should_release == 'true' && steps.gates.outputs.ready == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.candidate.outputs.tag }}
+          RELEASE_SHA: ${{ github.event.workflow_run.head_sha }}
         run: |
           set -euo pipefail
           git fetch --tags --force
           if git show-ref --verify --quiet "refs/tags/${TAG}"; then
             existing_sha="$(git rev-list -n 1 "${TAG}")"
-            if [[ "${existing_sha}" != "${GITHUB_SHA}" ]]; then
-              echo "${TAG} already points to ${existing_sha}; refusing to move an immutable Agent tag to ${GITHUB_SHA}" >&2
+            if [[ "${existing_sha}" != "${RELEASE_SHA}" ]]; then
+              echo "${TAG} already points to ${existing_sha}; refusing to move an immutable Agent tag to ${RELEASE_SHA}" >&2
               exit 1
             fi
           fi
           if gh release view "${TAG}" >/dev/null 2>&1; then
-            release_target="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${TAG}" --jq '.target_commitish')"
-            echo "Release ${TAG} already exists (target ${release_target}); it will be verified but never overwritten."
+            echo "Release ${TAG} already exists; it will be verified but never overwritten."
           fi
       - name: Build static Linux Agent binaries
+        if: steps.candidate.outputs.should_release == 'true' && steps.gates.outputs.ready == 'true'
         working-directory: apps/agent
         shell: bash
         run: |
@@ -65,6 +101,7 @@ jobs:
           CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags='-s -w' -o ../../dist/agent/rundea-agent-linux-amd64 .
           CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags='-s -w' -o ../../dist/agent/rundea-agent-linux-arm64 .
       - name: Generate and verify SHA256SUMS
+        if: steps.candidate.outputs.should_release == 'true' && steps.gates.outputs.ready == 'true'
         working-directory: dist/agent
         shell: bash
         run: |
@@ -72,33 +109,38 @@ jobs:
           sha256sum rundea-agent-linux-amd64 rundea-agent-linux-arm64 > SHA256SUMS
           sha256sum --check SHA256SUMS
       - name: Upload audit bundle
+        if: steps.candidate.outputs.should_release == 'true' && steps.gates.outputs.ready == 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: rundea-agent-${{ steps.version.outputs.tag }}-${{ github.sha }}
+          name: rundea-agent-${{ steps.candidate.outputs.tag }}-${{ github.event.workflow_run.head_sha }}
           path: |
             dist/agent/rundea-agent-linux-amd64
             dist/agent/rundea-agent-linux-arm64
             dist/agent/SHA256SUMS
           if-no-files-found: error
       - name: Create immutable tag at exact merge SHA
+        if: steps.candidate.outputs.should_release == 'true' && steps.gates.outputs.ready == 'true'
         shell: bash
         env:
-          TAG: ${{ steps.version.outputs.tag }}
+          TAG: ${{ steps.candidate.outputs.tag }}
+          RELEASE_SHA: ${{ github.event.workflow_run.head_sha }}
         run: |
           set -euo pipefail
           if git show-ref --verify --quiet "refs/tags/${TAG}"; then
-            [[ "$(git rev-list -n 1 "${TAG}")" == "${GITHUB_SHA}" ]]
+            [[ "$(git rev-list -n 1 "${TAG}")" == "${RELEASE_SHA}" ]]
             exit 0
           fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git tag -a "${TAG}" "${GITHUB_SHA}" -m "Rundea Agent ${TAG}"
+          git tag -a "${TAG}" "${RELEASE_SHA}" -m "Rundea Agent ${TAG}"
           git push origin "refs/tags/${TAG}"
       - name: Publish immutable private GitHub Release assets
+        if: steps.candidate.outputs.should_release == 'true' && steps.gates.outputs.ready == 'true'
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ steps.version.outputs.tag }}
+          TAG: ${{ steps.candidate.outputs.tag }}
+          RELEASE_SHA: ${{ github.event.workflow_run.head_sha }}
         run: |
           set -euo pipefail
           if gh release view "${TAG}" >/dev/null 2>&1; then
@@ -111,12 +153,13 @@ jobs:
             dist/agent/SHA256SUMS \
             --verify-tag \
             --title "Rundea Agent ${TAG}" \
-            --notes "Static Linux Agent binaries for Rundea nodes, built from ${GITHUB_SHA}. Download through the authenticated Rundea Control Plane bootstrap path; verify against SHA256SUMS."
+            --notes "Static Linux Agent binaries for Rundea nodes, built from ${RELEASE_SHA}. Download through the authenticated Rundea Control Plane bootstrap path; verify against SHA256SUMS."
       - name: Verify published release assets
+        if: steps.candidate.outputs.should_release == 'true' && steps.gates.outputs.ready == 'true'
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ steps.version.outputs.tag }}
+          TAG: ${{ steps.candidate.outputs.tag }}
         run: |
           set -euo pipefail
           rm -rf dist/published-agent
