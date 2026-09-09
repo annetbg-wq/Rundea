@@ -20,6 +20,8 @@ import (
 const runtimeRouterContainer = "rundea-runtime-router"
 const runtimeRouterAdminAddress = "127.0.0.1:2020"
 const runtimeRouterMarkerHeader = "X-Rundea-Deployment"
+const runtimeRouterCommittedConfig = "Caddyfile"
+const runtimeRouterCandidateConfig = "Caddyfile.next"
 
 var runtimeRouterMu sync.Mutex
 
@@ -48,6 +50,10 @@ func runtimeRouterDir(cfg config) string {
 
 func runtimeRouterStatePath(cfg config) string {
 	return filepath.Join(runtimeRouterDir(cfg), "routes.json")
+}
+
+func runtimeRouterConfigPath(cfg config, name string) string {
+	return filepath.Join(runtimeRouterDir(cfg), name)
 }
 
 func runtimePromotionDir(cfg config) string {
@@ -193,34 +199,89 @@ func renderRuntimeRouterCaddyfile(state runtimeRouterState) string {
 	return builder.String()
 }
 
-func validateRuntimeRouterConfig(routerDir string) error {
+func ensureRuntimeRouterDirs(cfg config) (string, string, string, error) {
+	routerDir := runtimeRouterDir(cfg)
+	dataDir := filepath.Join(cfg.WorkDir, "runtime-router-data")
+	configDir := filepath.Join(cfg.WorkDir, "runtime-router-config")
+	for _, dir := range []string{routerDir, dataDir, configDir} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			return "", "", "", err
+		}
+	}
+	return routerDir, dataDir, configDir, nil
+}
+
+func writeRuntimeRouterConfig(cfg config, state runtimeRouterState, name string) error {
+	if err := validateRuntimeRouterState(state); err != nil {
+		return err
+	}
+	if _, _, _, err := ensureRuntimeRouterDirs(cfg); err != nil {
+		return err
+	}
+	return writeAtomic(runtimeRouterConfigPath(cfg, name), []byte(renderRuntimeRouterCaddyfile(state)), 0o600)
+}
+
+func validateRuntimeRouterConfig(cfg config, name string) error {
+	routerDir := runtimeRouterDir(cfg)
 	mount := routerDir + ":/etc/caddy:ro"
-	out, err := exec.Command("docker", "run", "--rm", "-v", mount, caddyImage, "validate", "--config", "/etc/caddy/Caddyfile", "--adapter", "caddyfile").CombinedOutput()
+	out, err := exec.Command(
+		"docker", "run", "--rm", "-v", mount, caddyImage,
+		"validate", "--config", "/etc/caddy/"+name, "--adapter", "caddyfile",
+	).CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("runtime router Caddy validation failed: %w: %s", err, strings.TrimSpace(string(out)))
 	}
 	return nil
 }
 
-func ensureRuntimeRouter(routerDir, dataDir, configDir string) error {
-	inspect, err := exec.Command("docker", "inspect", "-f", `{{.Config.Image}}|{{ index .Config.Labels "rundea.role" }}`, runtimeRouterContainer).CombinedOutput()
-	if err == nil && strings.TrimSpace(string(inspect)) == caddyImage+"|runtime-router" {
-		out, reloadErr := exec.Command(
-			"docker", "exec", runtimeRouterContainer, "caddy", "reload",
-			"--config", "/etc/caddy/Caddyfile", "--adapter", "caddyfile", "--address", runtimeRouterAdminAddress,
-		).CombinedOutput()
-		if reloadErr != nil {
-			return fmt.Errorf("runtime router reload failed: %w: %s", reloadErr, strings.TrimSpace(string(out)))
+func runtimeRouterRunning() (bool, error) {
+	inspect, err := exec.Command(
+		"docker", "inspect", "-f",
+		`{{.Config.Image}}|{{ index .Config.Labels "rundea.managed" }}|{{ index .Config.Labels "rundea.role" }}|{{ .State.Running }}`,
+		runtimeRouterContainer,
+	).CombinedOutput()
+	if err != nil {
+		message := strings.TrimSpace(string(inspect))
+		if strings.Contains(message, "No such object") || strings.Contains(message, "No such container") {
+			return false, nil
 		}
-		return nil
+		return false, fmt.Errorf("inspect runtime router: %w: %s", err, message)
 	}
+	parts := strings.Split(strings.TrimSpace(string(inspect)), "|")
+	if len(parts) != 4 || parts[0] != caddyImage || parts[1] != "true" || parts[2] != "runtime-router" {
+		return false, errors.New("runtime router container identity does not match Rundea ownership")
+	}
+	if parts[3] != "true" {
+		out, startErr := exec.Command("docker", "start", runtimeRouterContainer).CombinedOutput()
+		if startErr != nil {
+			return false, fmt.Errorf("start runtime router: %w: %s", startErr, strings.TrimSpace(string(out)))
+		}
+	}
+	return true, nil
+}
 
+func reloadRuntimeRouter(name string) error {
+	out, err := exec.Command(
+		"docker", "exec", runtimeRouterContainer, "caddy", "reload",
+		"--config", "/etc/caddy/"+name, "--adapter", "caddyfile", "--address", runtimeRouterAdminAddress,
+	).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("runtime router reload failed: %w: %s", err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+func startRuntimeRouter(cfg config, configName string, restartPolicy string) error {
+	routerDir, dataDir, configDir, err := ensureRuntimeRouterDirs(cfg)
+	if err != nil {
+		return err
+	}
 	_ = exec.Command("docker", "rm", "-f", runtimeRouterContainer).Run()
 	args := []string{
-		"run", "-d", "--name", runtimeRouterContainer, "--restart", "unless-stopped", "--network", "host",
+		"run", "-d", "--name", runtimeRouterContainer, "--restart", restartPolicy, "--network", "host",
 		"--label", "rundea.managed=true", "--label", "rundea.role=runtime-router",
 		"-v", routerDir + ":/etc/caddy:ro", "-v", dataDir + ":/data", "-v", configDir + ":/config",
-		caddyImage, "run", "--config", "/etc/caddy/Caddyfile", "--adapter", "caddyfile",
+		caddyImage, "run", "--config", "/etc/caddy/"+configName, "--adapter", "caddyfile",
 	}
 	out, runErr := exec.Command("docker", args...).CombinedOutput()
 	if runErr != nil {
@@ -229,32 +290,72 @@ func ensureRuntimeRouter(routerDir, dataDir, configDir string) error {
 	return nil
 }
 
-func applyRuntimeRouterState(cfg config, state runtimeRouterState) error {
-	if err := validateRuntimeRouterState(state); err != nil {
+func removeRuntimeRouter() error {
+	out, err := exec.Command("docker", "rm", "-f", runtimeRouterContainer).CombinedOutput()
+	if err != nil && !strings.Contains(string(out), "No such container") {
+		return fmt.Errorf("remove empty runtime router: %w: %s", err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+func applyCommittedRuntimeRouterState(cfg config, state runtimeRouterState) error {
+	if err := writeRuntimeRouterConfig(cfg, state, runtimeRouterCommittedConfig); err != nil {
 		return err
 	}
-	routerDir := runtimeRouterDir(cfg)
-	dataDir := filepath.Join(cfg.WorkDir, "runtime-router-data")
-	configDir := filepath.Join(cfg.WorkDir, "runtime-router-config")
-	for _, dir := range []string{routerDir, dataDir, configDir} {
-		if err := os.MkdirAll(dir, 0o700); err != nil {
-			return err
-		}
-	}
-	if err := writeAtomic(filepath.Join(routerDir, "Caddyfile"), []byte(renderRuntimeRouterCaddyfile(state)), 0o600); err != nil {
-		return err
-	}
-	if err := validateRuntimeRouterConfig(routerDir); err != nil {
+	if err := validateRuntimeRouterConfig(cfg, runtimeRouterCommittedConfig); err != nil {
 		return err
 	}
 	if len(state.Routes) == 0 {
-		out, err := exec.Command("docker", "rm", "-f", runtimeRouterContainer).CombinedOutput()
-		if err != nil && !strings.Contains(string(out), "No such container") {
-			return fmt.Errorf("remove empty runtime router: %w: %s", err, strings.TrimSpace(string(out)))
-		}
-		return nil
+		return removeRuntimeRouter()
 	}
-	return ensureRuntimeRouter(routerDir, dataDir, configDir)
+	running, err := runtimeRouterRunning()
+	if err != nil {
+		return err
+	}
+	if running {
+		return reloadRuntimeRouter(runtimeRouterCommittedConfig)
+	}
+	return startRuntimeRouter(cfg, runtimeRouterCommittedConfig, "unless-stopped")
+}
+
+func applyCandidateRuntimeRouterState(cfg config, state runtimeRouterState) (bool, error) {
+	if err := writeRuntimeRouterConfig(cfg, state, runtimeRouterCandidateConfig); err != nil {
+		return false, err
+	}
+	if err := validateRuntimeRouterConfig(cfg, runtimeRouterCandidateConfig); err != nil {
+		return false, err
+	}
+	running, err := runtimeRouterRunning()
+	if err != nil {
+		return false, err
+	}
+	if running {
+		return false, reloadRuntimeRouter(runtimeRouterCandidateConfig)
+	}
+	// First service on the node has no previous listener to preserve. Start the
+	// candidate router without an automatic restart policy. It only becomes
+	// durable after the route state and committed Caddyfile are persisted.
+	if err := startRuntimeRouter(cfg, runtimeRouterCandidateConfig, "no"); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func promoteCandidateRuntimeRouterConfig(cfg config) error {
+	candidate := runtimeRouterConfigPath(cfg, runtimeRouterCandidateConfig)
+	committed := runtimeRouterConfigPath(cfg, runtimeRouterCommittedConfig)
+	if err := os.Rename(candidate, committed); err != nil {
+		return err
+	}
+	out, err := exec.Command("docker", "update", "--restart", "unless-stopped", runtimeRouterContainer).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("make committed runtime router durable: %w: %s", err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+func discardCandidateRuntimeRouterConfig(cfg config) {
+	_ = os.Remove(runtimeRouterConfigPath(cfg, runtimeRouterCandidateConfig))
 }
 
 func writeRuntimePromotionMarker(cfg config, marker runtimePromotionMarker) error {
@@ -336,7 +437,8 @@ func switchRuntimeRoute(ctx context.Context, cfg config, w *writer, next runtime
 	}
 
 	restore := func(reason error) error {
-		restoreErr := applyRuntimeRouterState(cfg, state)
+		discardCandidateRuntimeRouterConfig(cfg)
+		restoreErr := applyCommittedRuntimeRouterState(cfg, state)
 		if restoreErr == nil {
 			_ = clearRuntimePromotionMarker(cfg, next.DeploymentID)
 			return reason
@@ -344,14 +446,25 @@ func switchRuntimeRoute(ctx context.Context, cfg config, w *writer, next runtime
 		return fmt.Errorf("%v; previous runtime route restore also failed: %w", reason, restoreErr)
 	}
 
-	if err := applyRuntimeRouterState(cfg, nextState); err != nil {
-		return nil, restore(fmt.Errorf("apply runtime route: %w", err))
+	firstRouter, err := applyCandidateRuntimeRouterState(cfg, nextState)
+	if err != nil {
+		return nil, restore(fmt.Errorf("apply candidate runtime route: %w", err))
 	}
 	if err := waitForRoutedHealth(ctx, next, timeout); err != nil {
 		return nil, restore(fmt.Errorf("verify stable runtime route: %w", err))
 	}
 	if err := writeRuntimeRouterState(cfg, nextState); err != nil {
 		return nil, restore(fmt.Errorf("commit runtime route state: %w", err))
+	}
+	if err := promoteCandidateRuntimeRouterConfig(cfg); err != nil {
+		// The state file is already the durable commit point. Keep the running
+		// route, retain the marker, and let startup reconciliation regenerate the
+		// committed config from state rather than rolling a committed route back.
+		w.log(next.DeploymentID, "system", "runtime route committed but startup config promotion was deferred: "+err.Error())
+		if firstRouter {
+			w.log(next.DeploymentID, "system", "runtime router remains non-restarting until Agent reconciliation completes the committed config")
+		}
+		return previous, nil
 	}
 	if err := clearRuntimePromotionMarker(cfg, next.DeploymentID); err != nil {
 		w.log(next.DeploymentID, "system", "runtime route committed but promotion marker cleanup was deferred: "+err.Error())
@@ -412,10 +525,6 @@ func recoverRuntimeRouter(cfg config, w *writer) error {
 		}
 		committed := routeForService(state, marker.Next.ServiceName)
 		if committed == nil || committed.DeploymentID != marker.Next.DeploymentID {
-			if err := applyRuntimeRouterState(cfg, state); err != nil {
-				runtimeRouterMu.Unlock()
-				return fmt.Errorf("restore committed runtime router state: %w", err)
-			}
 			_ = removeManagedContainer(context.Background(), marker.Next.BackendContainer, marker.Next.DeploymentID, false)
 			_ = w.status(marker.Next.DeploymentID, "FAILED", "agent recovered an interrupted runtime switch before commit; previous route retained", "")
 		}
@@ -425,7 +534,10 @@ func recoverRuntimeRouter(cfg config, w *writer) error {
 		}
 	}
 
-	if err := applyRuntimeRouterState(cfg, state); err != nil {
+	// Always regenerate the startup config from the committed state. This is the
+	// reboot boundary: an uncommitted Caddyfile.next can never become durable.
+	discardCandidateRuntimeRouterConfig(cfg)
+	if err := applyCommittedRuntimeRouterState(cfg, state); err != nil {
 		runtimeRouterMu.Unlock()
 		return fmt.Errorf("reconcile committed runtime router state: %w", err)
 	}
