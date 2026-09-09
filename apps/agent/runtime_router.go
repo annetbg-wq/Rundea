@@ -224,10 +224,11 @@ func writeRuntimeRouterConfig(cfg config, state runtimeRouterState, name string)
 func validateRuntimeRouterConfig(cfg config, name string) error {
 	routerDir := runtimeRouterDir(cfg)
 	mount := routerDir + ":/etc/caddy:ro"
-	out, err := exec.Command(
-		"docker", "run", "--rm", "-v", mount, caddyImage,
+	args := caddyDockerRunArgs(
+		[]string{"--rm", "-v", mount},
 		"validate", "--config", "/etc/caddy/"+name, "--adapter", "caddyfile",
-	).CombinedOutput()
+	)
+	out, err := exec.Command("docker", args...).CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("runtime router Caddy validation failed: %w: %s", err, strings.TrimSpace(string(out)))
 	}
@@ -277,12 +278,14 @@ func startRuntimeRouter(cfg config, configName string, restartPolicy string) err
 		return err
 	}
 	_ = exec.Command("docker", "rm", "-f", runtimeRouterContainer).Run()
-	args := []string{
-		"run", "-d", "--name", runtimeRouterContainer, "--restart", restartPolicy, "--network", "host",
-		"--label", "rundea.managed=true", "--label", "rundea.role=runtime-router",
-		"-v", routerDir + ":/etc/caddy:ro", "-v", dataDir + ":/data", "-v", configDir + ":/config",
-		caddyImage, "run", "--config", "/etc/caddy/"+configName, "--adapter", "caddyfile",
-	}
+	args := caddyDockerRunArgs(
+		[]string{
+			"-d", "--name", runtimeRouterContainer, "--restart", restartPolicy, "--network", "host",
+			"--label", "rundea.managed=true", "--label", "rundea.role=runtime-router",
+			"-v", routerDir + ":/etc/caddy:ro", "-v", dataDir + ":/data", "-v", configDir + ":/config",
+		},
+		"run", "--config", "/etc/caddy/"+configName, "--adapter", "caddyfile",
+	)
 	out, runErr := exec.Command("docker", args...).CombinedOutput()
 	if runErr != nil {
 		return fmt.Errorf("runtime router start failed: %w: %s", runErr, strings.TrimSpace(string(out)))
