@@ -2,20 +2,16 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
-	"os"
 	"os/exec"
-	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
 )
 
-const promotionBackupSuffix = "-promotion-backup"
+const runtimeBackendDrain = 60 * time.Second
 
 type containerRuntimeState struct {
 	Exists       bool
@@ -28,6 +24,7 @@ type containerRuntimeState struct {
 type safeRuntimeSpec struct {
 	WorkDir       string
 	DeploymentID  string
+	ServiceName   string
 	ContainerName string
 	ImageTag      string
 	EnvFile       string
@@ -36,13 +33,6 @@ type safeRuntimeSpec struct {
 	HealthPath    string
 	HealthTimeout time.Duration
 	Labels        map[string]string
-}
-
-type promotionMarker struct {
-	ContainerName        string `json:"containerName"`
-	BackupName           string `json:"backupName"`
-	PreviousDeploymentID string `json:"previousDeploymentId"`
-	NewDeploymentID      string `json:"newDeploymentId"`
 }
 
 func inspectContainerState(ctx context.Context, name string) (containerRuntimeState, error) {
@@ -90,56 +80,54 @@ func removeManagedContainer(ctx context.Context, name, deploymentID string, cand
 	return nil
 }
 
-func candidateContainerName(containerName, deploymentID string) string {
+func revisionContainerName(baseName, deploymentID string) string {
 	short := strings.ToLower(strings.ReplaceAll(deploymentID, "-", ""))
 	if len(short) > 12 {
 		short = short[:12]
 	}
-	return containerName + "-candidate-" + short
+	return baseName + "-rev-" + short
 }
 
-func containerRunArgs(spec safeRuntimeSpec, name string, hostPort int, candidate bool) []string {
-	restartPolicy := "unless-stopped"
-	if candidate {
-		restartPolicy = "no"
-	}
-	args := []string{"run", "-d", "--restart", restartPolicy}
+func backendRunArgs(spec safeRuntimeSpec, name string) []string {
 	labels := map[string]string{
 		"rundea.managed":    "true",
 		"rundea.deployment": spec.DeploymentID,
+		"rundea.backend":    "true",
+		"rundea.service":    spec.ServiceName,
 	}
 	for key, value := range spec.Labels {
 		labels[key] = value
 	}
-	if candidate {
-		labels["rundea.candidate"] = "true"
-	}
+	args := []string{"run", "-d", "--restart", "unless-stopped"}
 	keys := make([]string, 0, len(labels))
 	for key := range labels {
 		keys = append(keys, key)
 	}
-	sort.Strings(keys)
+	for i := 1; i < len(keys); i++ {
+		for j := i; j > 0 && keys[j] < keys[j-1]; j-- {
+			keys[j], keys[j-1] = keys[j-1], keys[j]
+		}
+	}
 	for _, key := range keys {
 		args = append(args, "--label", key+"="+labels[key])
 	}
-	args = append(args, "--name", name)
-	if hostPort == 0 {
-		args = append(args, "-p", fmt.Sprintf("127.0.0.1::%d", spec.ContainerPort))
-	} else {
-		args = append(args, "-p", fmt.Sprintf("127.0.0.1:%d:%d", hostPort, spec.ContainerPort))
-	}
-	args = append(args, "--env-file", spec.EnvFile, spec.ImageTag)
+	args = append(args,
+		"--name", name,
+		"-p", fmt.Sprintf("127.0.0.1::%d", spec.ContainerPort),
+		"--env-file", spec.EnvFile,
+		spec.ImageTag,
+	)
 	return args
 }
 
-func startRuntimeContainer(ctx context.Context, spec safeRuntimeSpec, name string, hostPort int, candidate bool) (string, error) {
-	out, err := exec.CommandContext(ctx, "docker", containerRunArgs(spec, name, hostPort, candidate)...).CombinedOutput()
+func startBackendContainer(ctx context.Context, spec safeRuntimeSpec, name string) (string, error) {
+	out, err := exec.CommandContext(ctx, "docker", backendRunArgs(spec, name)...).CombinedOutput()
 	if err != nil {
-		return "", fmt.Errorf("docker run %s: %w: %s", name, err, strings.TrimSpace(string(out)))
+		return "", fmt.Errorf("start runtime backend %s: %w: %s", name, err, strings.TrimSpace(string(out)))
 	}
 	id := strings.TrimSpace(string(out))
 	if id == "" {
-		return "", fmt.Errorf("docker run %s returned no container identity", name)
+		return "", fmt.Errorf("runtime backend %s returned no container identity", name)
 	}
 	return id, nil
 }
@@ -147,7 +135,7 @@ func startRuntimeContainer(ctx context.Context, spec safeRuntimeSpec, name strin
 func publishedLoopbackPort(ctx context.Context, containerName string, containerPort int) (int, error) {
 	out, err := exec.CommandContext(ctx, "docker", "port", containerName, fmt.Sprintf("%d/tcp", containerPort)).CombinedOutput()
 	if err != nil {
-		return 0, fmt.Errorf("resolve candidate port: %w: %s", err, strings.TrimSpace(string(out)))
+		return 0, fmt.Errorf("resolve runtime backend port: %w: %s", err, strings.TrimSpace(string(out)))
 	}
 	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
 		host, portText, splitErr := net.SplitHostPort(strings.TrimSpace(line))
@@ -159,7 +147,7 @@ func publishedLoopbackPort(ctx context.Context, containerName string, containerP
 			return port, nil
 		}
 	}
-	return 0, fmt.Errorf("candidate container %s did not publish a loopback port", containerName)
+	return 0, fmt.Errorf("runtime backend %s did not publish a loopback port", containerName)
 }
 
 func logContainerTail(ctx context.Context, w *writer, deploymentID, containerName string) {
@@ -173,291 +161,92 @@ func logContainerTail(ctx context.Context, w *writer, deploymentID, containerNam
 	}
 }
 
-func promotionMarkerPath(workDir, containerName string) string {
-	return filepath.Join(workDir, "promotions", containerName+".json")
+func scheduleBackendDrain(w *writer, route runtimeRoute) {
+	go func() {
+		time.Sleep(runtimeBackendDrain)
+		if err := removeManagedContainer(context.Background(), route.BackendContainer, route.DeploymentID, false); err != nil {
+			w.log(route.DeploymentID, "system", "drained backend cleanup deferred: "+err.Error())
+		}
+	}()
 }
 
-func writePromotionMarker(workDir string, marker promotionMarker) error {
-	dir := filepath.Join(workDir, "promotions")
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return err
-	}
-	payload, err := json.Marshal(marker)
-	if err != nil {
-		return err
-	}
-	path := promotionMarkerPath(workDir, marker.ContainerName)
-	temporary := path + ".tmp"
-	if err := os.WriteFile(temporary, payload, 0o600); err != nil {
-		return err
-	}
-	if err := os.Rename(temporary, path); err != nil {
-		_ = os.Remove(temporary)
-		return err
-	}
-	return nil
-}
-
-func clearPromotionMarker(workDir, containerName string) error {
-	err := os.Remove(promotionMarkerPath(workDir, containerName))
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
-	}
-	return err
-}
-
-func recoverInterruptedPromotions(ctx context.Context, workDir string, w *writer) error {
-	dir := filepath.Join(workDir, "promotions")
-	entries, err := os.ReadDir(dir)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
-			continue
-		}
-		path := filepath.Join(dir, entry.Name())
-		payload, readErr := os.ReadFile(path)
-		if readErr != nil {
-			return readErr
-		}
-		var marker promotionMarker
-		if json.Unmarshal(payload, &marker) != nil || marker.ContainerName == "" || marker.BackupName == "" || marker.PreviousDeploymentID == "" || marker.NewDeploymentID == "" {
-			return fmt.Errorf("invalid promotion recovery marker %s", entry.Name())
-		}
-		backup, inspectErr := inspectContainerState(ctx, marker.BackupName)
-		if inspectErr != nil {
-			return inspectErr
-		}
-		current, inspectErr := inspectContainerState(ctx, marker.ContainerName)
-		if inspectErr != nil {
-			return inspectErr
-		}
-		if backup.Exists {
-			if !backup.Managed || backup.Candidate || backup.DeploymentID != marker.PreviousDeploymentID {
-				return fmt.Errorf("promotion recovery backup %s failed ownership validation", marker.BackupName)
-			}
-			if current.Exists {
-				if !current.Managed || current.Candidate || current.DeploymentID != marker.NewDeploymentID {
-					return fmt.Errorf("promotion recovery current container %s is ambiguous", marker.ContainerName)
-				}
-				if err := removeManagedContainer(ctx, marker.ContainerName, marker.NewDeploymentID, false); err != nil {
-					return err
-				}
-			}
-			if out, renameErr := exec.CommandContext(ctx, "docker", "rename", marker.BackupName, marker.ContainerName).CombinedOutput(); renameErr != nil {
-				return fmt.Errorf("recover interrupted promotion name: %w: %s", renameErr, strings.TrimSpace(string(out)))
-			}
-			if !backup.Running {
-				if out, startErr := exec.CommandContext(ctx, "docker", "start", marker.ContainerName).CombinedOutput(); startErr != nil {
-					return fmt.Errorf("recover interrupted promotion runtime: %w: %s", startErr, strings.TrimSpace(string(out)))
-				}
-			}
-			w.log(marker.NewDeploymentID, "system", "recovered previous revision after interrupted promotion")
-			_ = w.status(marker.NewDeploymentID, "FAILED", "previous READY revision restored after interrupted promotion", "")
-			go streamRuntimeLogs(context.Background(), w, marker.PreviousDeploymentID, marker.ContainerName)
-		} else if current.Exists {
-			if !current.Managed || current.Candidate || current.DeploymentID != marker.NewDeploymentID {
-				return fmt.Errorf("promotion marker %s has no valid backup and an ambiguous current container", entry.Name())
-			}
-			w.log(marker.NewDeploymentID, "system", "promotion marker survived without its fallback; keeping the running managed revision")
-		}
-		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return err
-		}
-	}
-	return nil
-}
-
-func reconcilePromotionBaseline(ctx context.Context, w *writer, spec safeRuntimeSpec) (containerRuntimeState, error) {
-	current, err := inspectContainerState(ctx, spec.ContainerName)
-	if err != nil {
-		return containerRuntimeState{}, err
-	}
-	backupName := spec.ContainerName + promotionBackupSuffix
-	backup, err := inspectContainerState(ctx, backupName)
-	if err != nil {
-		return containerRuntimeState{}, err
-	}
-
-	if current.Exists {
-		if !current.Managed || current.Candidate || current.DeploymentID == "" {
-			return containerRuntimeState{}, errors.New("service runtime slot is occupied by a container Rundea cannot safely promote")
-		}
-		if !current.Running {
-			if out, startErr := exec.CommandContext(ctx, "docker", "start", spec.ContainerName).CombinedOutput(); startErr != nil {
-				return containerRuntimeState{}, fmt.Errorf("restart current managed revision before promotion: %w: %s", startErr, strings.TrimSpace(string(out)))
-			}
-			current.Running = true
-			w.log(spec.DeploymentID, "system", "restarted current managed revision before candidate validation")
-		}
-		if backup.Exists {
-			if !backup.Managed || backup.Candidate || backup.DeploymentID == "" {
-				return containerRuntimeState{}, errors.New("stale promotion backup failed Rundea ownership validation")
-			}
-			if err := removeManagedContainer(ctx, backupName, backup.DeploymentID, false); err != nil {
-				return containerRuntimeState{}, err
-			}
-			w.log(spec.DeploymentID, "system", "removed stale promotion backup after a previously healthy cutover")
-		}
-		return current, nil
-	}
-
-	if backup.Exists {
-		if !backup.Managed || backup.Candidate || backup.DeploymentID == "" {
-			return containerRuntimeState{}, errors.New("orphaned promotion backup failed Rundea ownership validation")
-		}
-		if out, renameErr := exec.CommandContext(ctx, "docker", "rename", backupName, spec.ContainerName).CombinedOutput(); renameErr != nil {
-			return containerRuntimeState{}, fmt.Errorf("restore orphaned promotion backup: %w: %s", renameErr, strings.TrimSpace(string(out)))
-		}
-		if !backup.Running {
-			if out, startErr := exec.CommandContext(ctx, "docker", "start", spec.ContainerName).CombinedOutput(); startErr != nil {
-				return containerRuntimeState{}, fmt.Errorf("restart orphaned promotion backup: %w: %s", startErr, strings.TrimSpace(string(out)))
-			}
-		}
-		w.log(spec.DeploymentID, "system", "restored orphaned previous revision before candidate validation")
-		return containerRuntimeState{Exists: true, Managed: true, Running: true, DeploymentID: backup.DeploymentID}, nil
-	}
-
-	return containerRuntimeState{}, nil
-}
-
-func runSafeRuntime(ctx context.Context, w *writer, spec safeRuntimeSpec) (string, error) {
+func runSafeRuntime(ctx context.Context, cfg config, w *writer, spec safeRuntimeSpec) (string, error) {
 	if spec.HealthTimeout <= 0 {
 		spec.HealthTimeout = 60 * time.Second
 	}
-	if err := recoverInterruptedPromotions(ctx, spec.WorkDir, w); err != nil {
-		return "", fmt.Errorf("recover interrupted promotion: %w", err)
+	if spec.ServiceName == "" || spec.ContainerName == "" || spec.DeploymentID == "" || spec.ImageTag == "" || spec.EnvFile == "" {
+		return "", errors.New("runtime specification is missing identity fields")
 	}
-	current, err := reconcilePromotionBaseline(ctx, w, spec)
+	if spec.ContainerPort < 1 || spec.ContainerPort > 65535 || spec.HostPort < 1 || spec.HostPort > 65535 {
+		return "", errors.New("runtime specification contains invalid ports")
+	}
+	if !strings.HasPrefix(spec.HealthPath, "/") {
+		return "", errors.New("runtime specification contains invalid healthcheck path")
+	}
+
+	if committed, err := runtimeRouteForDeployment(cfg, spec.DeploymentID); err != nil {
+		return "", err
+	} else if committed != nil {
+		if err := waitForRoutedHealth(ctx, *committed, spec.HealthTimeout); err != nil {
+			return "", fmt.Errorf("committed runtime route is not healthy: %w", err)
+		}
+		return inspectContainerID(ctx, committed.BackendContainer)
+	}
+
+	backendName := revisionContainerName(spec.ContainerName, spec.DeploymentID)
+	backendState, err := inspectContainerState(ctx, backendName)
 	if err != nil {
 		return "", err
 	}
-
-	if current.Exists {
-		candidateName := candidateContainerName(spec.ContainerName, spec.DeploymentID)
-		candidateState, err := inspectContainerState(ctx, candidateName)
-		if err != nil {
+	if backendState.Exists {
+		if !backendState.Managed || backendState.DeploymentID != spec.DeploymentID {
+			return "", fmt.Errorf("runtime backend slot %s is occupied by a container Rundea does not own", backendName)
+		}
+		if err := removeManagedContainer(ctx, backendName, spec.DeploymentID, false); err != nil {
 			return "", err
-		}
-		if candidateState.Exists {
-			if err := removeManagedContainer(ctx, candidateName, spec.DeploymentID, true); err != nil {
-				return "", err
-			}
-		}
-		candidateID, err := startRuntimeContainer(ctx, spec, candidateName, 0, true)
-		if err != nil {
-			return "", err
-		}
-		candidatePort, err := publishedLoopbackPort(ctx, candidateName, spec.ContainerPort)
-		if err != nil {
-			_ = removeManagedContainer(ctx, candidateName, spec.DeploymentID, true)
-			return "", err
-		}
-		if err := w.status(spec.DeploymentID, "HEALTHCHECK", "validating candidate while previous READY revision stays live", candidateID); err != nil {
-			_ = removeManagedContainer(ctx, candidateName, spec.DeploymentID, true)
-			return "", err
-		}
-		if err := waitForHealth(ctx, candidatePort, spec.HealthPath, spec.HealthTimeout); err != nil {
-			logContainerTail(ctx, w, spec.DeploymentID, candidateName)
-			_ = removeManagedContainer(ctx, candidateName, spec.DeploymentID, true)
-			return "", fmt.Errorf("candidate healthcheck failed while previous READY revision remained live: %w", err)
-		}
-		if err := removeManagedContainer(ctx, candidateName, spec.DeploymentID, true); err != nil {
-			return "", err
-		}
-		w.log(spec.DeploymentID, "system", "candidate healthcheck passed; starting short stable-port cutover")
-	}
-
-	backupName := spec.ContainerName + promotionBackupSuffix
-	backupExists := false
-	previousDeploymentID := ""
-	if current.Exists {
-		previousDeploymentID = current.DeploymentID
-		marker := promotionMarker{
-			ContainerName:        spec.ContainerName,
-			BackupName:           backupName,
-			PreviousDeploymentID: previousDeploymentID,
-			NewDeploymentID:      spec.DeploymentID,
-		}
-		if err := writePromotionMarker(spec.WorkDir, marker); err != nil {
-			return "", fmt.Errorf("persist promotion recovery marker: %w", err)
-		}
-		out, err := exec.CommandContext(ctx, "docker", "rename", spec.ContainerName, backupName).CombinedOutput()
-		if err != nil {
-			_ = clearPromotionMarker(spec.WorkDir, spec.ContainerName)
-			return "", fmt.Errorf("preserve previous READY revision: %w: %s", err, strings.TrimSpace(string(out)))
-		}
-		backupExists = true
-		if out, err := exec.CommandContext(ctx, "docker", "stop", backupName).CombinedOutput(); err != nil {
-			_ = exec.CommandContext(ctx, "docker", "rename", backupName, spec.ContainerName).Run()
-			_ = clearPromotionMarker(spec.WorkDir, spec.ContainerName)
-			return "", fmt.Errorf("stop previous READY revision for stable-port cutover: %w: %s", err, strings.TrimSpace(string(out)))
 		}
 	}
 
-	restore := func() error {
-		_ = removeManagedContainer(ctx, spec.ContainerName, spec.DeploymentID, false)
-		if !backupExists {
-			return nil
-		}
-		out, renameErr := exec.CommandContext(ctx, "docker", "rename", backupName, spec.ContainerName).CombinedOutput()
-		if renameErr != nil {
-			return fmt.Errorf("restore previous container name: %w: %s", renameErr, strings.TrimSpace(string(out)))
-		}
-		out, startErr := exec.CommandContext(ctx, "docker", "start", spec.ContainerName).CombinedOutput()
-		if startErr != nil {
-			return fmt.Errorf("restart previous READY revision: %w: %s", startErr, strings.TrimSpace(string(out)))
-		}
-		backupExists = false
-		if err := clearPromotionMarker(spec.WorkDir, spec.ContainerName); err != nil {
-			return fmt.Errorf("clear promotion marker after restore: %w", err)
-		}
-		go streamRuntimeLogs(context.Background(), w, previousDeploymentID, spec.ContainerName)
-		return nil
-	}
-
-	containerID, err := startRuntimeContainer(ctx, spec, spec.ContainerName, spec.HostPort, false)
+	containerID, err := startBackendContainer(ctx, spec, backendName)
 	if err != nil {
-		restoreErr := restore()
-		if restoreErr != nil {
-			return "", fmt.Errorf("stable-port start failed: %w; previous READY revision restore also failed: %v", err, restoreErr)
-		}
-		if current.Exists {
-			return "", fmt.Errorf("stable-port start failed: %w; previous READY revision restored", err)
-		}
 		return "", err
 	}
-	if err := w.status(spec.DeploymentID, "HEALTHCHECK", "validating revision on the stable service port", containerID); err != nil {
-		_ = restore()
+	backendPort, err := publishedLoopbackPort(ctx, backendName, spec.ContainerPort)
+	if err != nil {
+		_ = removeManagedContainer(ctx, backendName, spec.DeploymentID, false)
 		return "", err
 	}
-	if err := waitForHealth(ctx, spec.HostPort, spec.HealthPath, spec.HealthTimeout); err != nil {
-		logContainerTail(ctx, w, spec.DeploymentID, spec.ContainerName)
-		restoreErr := restore()
-		if restoreErr != nil {
-			return "", fmt.Errorf("promoted revision healthcheck failed: %w; previous READY revision restore also failed: %v", err, restoreErr)
-		}
-		if current.Exists {
-			return "", fmt.Errorf("promoted revision healthcheck failed: %w; previous READY revision restored", err)
-		}
+	if err := w.status(spec.DeploymentID, "HEALTHCHECK", "validating new backend before zero-downtime route switch", containerID); err != nil {
+		_ = removeManagedContainer(ctx, backendName, spec.DeploymentID, false)
 		return "", err
+	}
+	if err := waitForHealth(ctx, backendPort, spec.HealthPath, spec.HealthTimeout); err != nil {
+		logContainerTail(ctx, w, spec.DeploymentID, backendName)
+		_ = removeManagedContainer(ctx, backendName, spec.DeploymentID, false)
+		return "", fmt.Errorf("runtime backend healthcheck failed while current stable route remained live: %w", err)
 	}
 
-	if backupExists {
-		if err := clearPromotionMarker(spec.WorkDir, spec.ContainerName); err != nil {
-			restoreErr := restore()
-			if restoreErr != nil {
-				return "", fmt.Errorf("healthy cutover could not clear recovery marker: %w; previous revision restore also failed: %v", err, restoreErr)
-			}
-			return "", fmt.Errorf("healthy cutover could not clear recovery marker: %w; previous READY revision restored", err)
-		}
-		if err := removeManagedContainer(ctx, backupName, previousDeploymentID, false); err != nil {
-			w.log(spec.DeploymentID, "system", "healthy cutover completed but stale fallback cleanup was deferred: "+err.Error())
-		}
+	next := runtimeRoute{
+		ServiceName:      spec.ServiceName,
+		DeploymentID:     spec.DeploymentID,
+		BackendContainer: backendName,
+		HostPort:         spec.HostPort,
+		BackendPort:      backendPort,
+		HealthPath:       spec.HealthPath,
+	}
+	previous, err := switchRuntimeRoute(ctx, cfg, w, next, spec.HealthTimeout)
+	if err != nil {
+		logContainerTail(ctx, w, spec.DeploymentID, backendName)
+		_ = removeManagedContainer(ctx, backendName, spec.DeploymentID, false)
+		return "", err
+	}
+	w.log(spec.DeploymentID, "system", "stable runtime route switched without rebinding the service port")
+	if previous != nil && previous.DeploymentID != spec.DeploymentID && previous.BackendContainer != backendName {
+		scheduleBackendDrain(w, *previous)
+	}
+	if delay := durationEnv("RUNDEA_TEST_POST_SWITCH_DELAY", 0); delay > 0 {
+		w.log(spec.DeploymentID, "system", "test-only post-switch delay active before READY acknowledgement")
+		time.Sleep(delay)
 	}
 	return containerID, nil
 }

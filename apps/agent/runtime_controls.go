@@ -88,6 +88,9 @@ func validateRollbackCommand(cmd rollbackCommand) error {
 	if cmd.Runtime.ContainerName == "" || cmd.Runtime.ContainerPort < 1 || cmd.Runtime.ContainerPort > 65535 || cmd.Runtime.HostPort < 1 || cmd.Runtime.HostPort > 65535 {
 		return errors.New("rollback command contains invalid runtime fields")
 	}
+	if cmd.Runtime.HostPort == 80 || cmd.Runtime.HostPort == 443 || cmd.Runtime.HostPort == 2019 || cmd.Runtime.HostPort == 2020 {
+		return fmt.Errorf("host port %d is reserved by Rundea routing", cmd.Runtime.HostPort)
+	}
 	return nil
 }
 
@@ -131,7 +134,7 @@ func runRollback(cfg config, w *writer, cmd rollbackCommand) {
 		}
 		return
 	}
-	if err := w.status(cmd.DeploymentID, "DEPLOYING", "preparing retained rollback candidate", ""); err != nil {
+	if err := w.status(cmd.DeploymentID, "DEPLOYING", "starting isolated retained rollback backend", ""); err != nil {
 		return
 	}
 
@@ -150,9 +153,10 @@ func runRollback(cfg config, w *writer, cmd rollbackCommand) {
 	if timeout <= 0 {
 		timeout = 60 * time.Second
 	}
-	containerID, runtimeErr := runSafeRuntime(ctx, w, safeRuntimeSpec{
+	containerID, runtimeErr := runSafeRuntime(ctx, cfg, w, safeRuntimeSpec{
 		WorkDir:       cfg.WorkDir,
 		DeploymentID:  cmd.DeploymentID,
+		ServiceName:   cmd.ServiceName,
 		ContainerName: cmd.Runtime.ContainerName,
 		ImageTag:      rollbackImageTag,
 		EnvFile:       envFile,
@@ -171,13 +175,46 @@ func runRollback(cfg config, w *writer, cmd rollbackCommand) {
 		fail(runtimeErr)
 		return
 	}
-	if err := w.status(cmd.DeploymentID, "READY", "rollback candidate promoted and stable-port healthcheck passed", containerID); err != nil {
+	if err := w.status(cmd.DeploymentID, "READY", "rollback backend is healthy and stable route switched without port rebinding", containerID); err != nil {
 		return
 	}
-	go streamRuntimeLogs(context.Background(), w, cmd.DeploymentID, cmd.Runtime.ContainerName)
+	go streamRuntimeLogs(context.Background(), w, cmd.DeploymentID, revisionContainerName(cmd.Runtime.ContainerName, cmd.DeploymentID))
 }
 
-func runRestart(w *writer, cmd restartCommand) {
+func commitRestartRuntimeRoute(ctx context.Context, cfg config, next runtimeRoute, timeout time.Duration) error {
+	runtimeRouterMu.Lock()
+	defer runtimeRouterMu.Unlock()
+
+	state, err := loadRuntimeRouterState(cfg)
+	if err != nil {
+		return err
+	}
+	current := routeForDeployment(state, next.DeploymentID)
+	if current == nil || current.ServiceName != next.ServiceName || current.BackendContainer != next.BackendContainer || current.HostPort != next.HostPort {
+		return errors.New("restart route no longer matches the committed active deployment")
+	}
+	nextState, err := upsertRuntimeRoute(state, next)
+	if err != nil {
+		return err
+	}
+
+	// Docker has already restarted the only backend for this deployment, so the
+	// old random host port is no longer a viable fallback. Persist the verified
+	// new socket first. If Agent crashes before Caddy reload, startup recovery
+	// deterministically regenerates the router from this live committed state.
+	if err := writeRuntimeRouterState(cfg, nextState); err != nil {
+		return fmt.Errorf("commit restarted backend route: %w", err)
+	}
+	if err := applyCommittedRuntimeRouterState(cfg, nextState); err != nil {
+		return fmt.Errorf("apply restarted backend route: %w", err)
+	}
+	if err := waitForRoutedHealth(ctx, next, timeout); err != nil {
+		return fmt.Errorf("verify restarted backend route: %w", err)
+	}
+	return nil
+}
+
+func runRestart(cfg config, w *writer, cmd restartCommand) {
 	runtimeMu.Lock()
 	defer runtimeMu.Unlock()
 
@@ -199,17 +236,27 @@ func runRestart(w *writer, cmd restartCommand) {
 		complete(false, errors.New("restart command contains invalid fields"))
 		return
 	}
-	ctx := context.Background()
-	out, err := exec.CommandContext(ctx, "docker", "inspect", "--format", `{{ index .Config.Labels "rundea.deployment" }}`, cmd.Runtime.ContainerName).CombinedOutput()
+
+	route, err := runtimeRouteForDeployment(cfg, cmd.DeploymentID)
 	if err != nil {
-		complete(false, fmt.Errorf("restart target is not running as a managed container: %w: %s", err, strings.TrimSpace(string(out))))
+		complete(false, fmt.Errorf("load restart runtime route: %w", err))
 		return
 	}
-	if strings.TrimSpace(string(out)) != cmd.DeploymentID {
-		complete(false, errors.New("restart target container does not belong to the requested deployment"))
+	if route == nil || route.HostPort != cmd.Runtime.HostPort {
+		complete(false, errors.New("restart target is not the active stable runtime route"))
 		return
 	}
-	if out, err := exec.CommandContext(ctx, "docker", "restart", cmd.Runtime.ContainerName).CombinedOutput(); err != nil {
+	ctx := context.Background()
+	state, err := inspectContainerState(ctx, route.BackendContainer)
+	if err != nil {
+		complete(false, err)
+		return
+	}
+	if !state.Exists || !state.Managed || state.DeploymentID != cmd.DeploymentID {
+		complete(false, errors.New("restart target backend does not belong to the requested deployment"))
+		return
+	}
+	if out, err := exec.CommandContext(ctx, "docker", "restart", route.BackendContainer).CombinedOutput(); err != nil {
 		complete(false, fmt.Errorf("docker restart failed: %w: %s", err, strings.TrimSpace(string(out))))
 		return
 	}
@@ -217,7 +264,24 @@ func runRestart(w *writer, cmd restartCommand) {
 	if timeout <= 0 {
 		timeout = 60 * time.Second
 	}
-	if err := waitForHealth(ctx, cmd.Runtime.HostPort, cmd.Runtime.Healthcheck.Path, timeout); err != nil {
+
+	backendPort, err := publishedSingleLoopbackPort(ctx, route.BackendContainer)
+	if err != nil {
+		complete(false, err)
+		return
+	}
+	if backendPort != route.BackendPort {
+		if err := waitForHealth(ctx, backendPort, route.HealthPath, timeout); err != nil {
+			complete(false, fmt.Errorf("restart backend healthcheck failed after Docker changed the published port: %w", err))
+			return
+		}
+		next := *route
+		next.BackendPort = backendPort
+		if err := commitRestartRuntimeRoute(ctx, cfg, next, timeout); err != nil {
+			complete(false, fmt.Errorf("restart route reconciliation failed after Docker changed the published port: %w", err))
+			return
+		}
+	} else if err := waitForRoutedHealth(ctx, *route, timeout); err != nil {
 		complete(false, fmt.Errorf("restart healthcheck failed: %w", err))
 		return
 	}
