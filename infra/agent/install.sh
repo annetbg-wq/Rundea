@@ -31,37 +31,15 @@ install -d -m 0700 /etc/rundea /var/lib/rundea /var/lib/rundea/deployments
 
 tmp_agent="$(mktemp /tmp/rundea-agent.XXXXXX)"
 tmp_bootstrap_config="$(mktemp /tmp/rundea-bootstrap-curl.XXXXXX)"
-tmp_node_config="$(mktemp /tmp/rundea-node-curl.XXXXXX)"
-cleanup() { rm -f "$tmp_agent" "$tmp_bootstrap_config" "$tmp_node_config"; }
+tmp_exchange_config="$(mktemp /tmp/rundea-exchange-curl.XXXXXX)"
+cleanup() { rm -f "$tmp_agent" "$tmp_bootstrap_config" "$tmp_exchange_config"; }
 trap cleanup EXIT
-chmod 0600 "$tmp_bootstrap_config" "$tmp_node_config"
+chmod 0600 "$tmp_bootstrap_config" "$tmp_exchange_config"
 
-# The token copied from the UI is a bootstrap credential, not the long-lived
-# Agent credential. Generate the permanent credential on the node and rotate
-# the server-side hash before downloading or starting the Agent.
-agent_token="$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')"
-[[ "$agent_token" =~ ^[a-f0-9]{64}$ ]] || { echo "failed to generate Agent credential" >&2; exit 1; }
-
+# A fresh node token is bootstrap-only. It may fetch the pinned Agent release,
+# but it cannot authenticate the Agent WebSocket. Keep it in a private curl
+# config so the credential never appears in the curl process command line.
 cat >"$tmp_bootstrap_config" <<EOF
-silent
-show-error
-fail
-request = "POST"
-header = "Authorization: Bearer ${RUNDEA_NODE_TOKEN}"
-header = "Content-Type: application/json"
-data = "{\"agentToken\":\"${agent_token}\"}"
-EOF
-
-curl --config "$tmp_bootstrap_config" \
-  --proto '=https' --tlsv1.2 --max-redirs 0 \
-  "${RUNDEA_CONTROL_PLANE_URL}/v0/nodes/${RUNDEA_NODE_ID}/bootstrap/exchange" \
-  -o /dev/null
-
-# From this point the copied bootstrap token is invalid. Keep only the locally
-# generated permanent credential and never put it on a curl command line.
-unset RUNDEA_NODE_TOKEN
-RUNDEA_NODE_TOKEN="$agent_token"
-cat >"$tmp_node_config" <<EOF
 silent
 show-error
 fail
@@ -75,26 +53,34 @@ if [[ -n "${RUNDEA_AGENT_URL:-}" ]]; then
 else
   checksum_url="${RUNDEA_CONTROL_PLANE_URL}/v0/agent/releases/${rundea_arch}/sha256"
   binary_url="${RUNDEA_CONTROL_PLANE_URL}/v0/agent/releases/${rundea_arch}"
-  expected_sha="$(curl --config "$tmp_node_config" --proto '=https' --tlsv1.2 --max-redirs 0 "$checksum_url")"
+  expected_sha="$(curl --config "$tmp_bootstrap_config" --proto '=https' --tlsv1.2 --max-redirs 0 "$checksum_url")"
   expected_sha="$(printf '%s' "$expected_sha" | tr -d '[:space:]')"
   [[ "$expected_sha" =~ ^[a-fA-F0-9]{64}$ ]] || { echo "Control Plane returned an invalid Agent checksum" >&2; exit 1; }
   expected_sha="${expected_sha,,}"
-  curl --config "$tmp_node_config" --proto '=https' --tlsv1.2 --max-redirs 0 "$binary_url" -o "$tmp_agent"
+  curl --config "$tmp_bootstrap_config" --proto '=https' --tlsv1.2 --max-redirs 0 "$binary_url" -o "$tmp_agent"
 fi
 
 printf '%s  %s\n' "$expected_sha" "$tmp_agent" | sha256sum --check --status || {
   echo "Rundea Agent checksum verification failed" >&2
   exit 1
 }
+
+# Prepare every durable local artifact before consuming the one-time bootstrap
+# credential. If release download, checksum verification, file installation or
+# unit creation fails, the bootstrap token remains valid and the command can be
+# safely retried.
 install -m 0755 "$tmp_agent" /usr/local/bin/rundea-agent
+agent_token="$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+[[ "$agent_token" =~ ^[a-f0-9]{64}$ ]] || { echo "failed to generate Agent credential" >&2; exit 1; }
 
 cat >/etc/rundea/agent.env <<EOF
 RUNDEA_CONTROL_PLANE_URL=$RUNDEA_CONTROL_PLANE_URL
 RUNDEA_NODE_ID=$RUNDEA_NODE_ID
-RUNDEA_NODE_TOKEN=$RUNDEA_NODE_TOKEN
+RUNDEA_NODE_TOKEN=$agent_token
 RUNDEA_WORK_DIR=/var/lib/rundea
 EOF
 chmod 0600 /etc/rundea/agent.env
+
 cat >/etc/systemd/system/rundea-agent.service <<'EOF'
 [Unit]
 Description=Rundea Node Agent
@@ -113,6 +99,28 @@ LimitNOFILE=1048576
 [Install]
 WantedBy=multi-user.target
 EOF
+
+cat >"$tmp_exchange_config" <<EOF
+silent
+show-error
+fail
+request = "POST"
+header = "Authorization: Bearer ${RUNDEA_NODE_TOKEN}"
+header = "Content-Type: application/json"
+data = "{\"agentToken\":\"${agent_token}\"}"
+EOF
+
+# Commit point: rotate the server-side node credential only after the verified
+# binary, durable Agent credential and systemd unit already exist locally. If a
+# later systemd operation fails, /etc/rundea/agent.env still contains the valid
+# permanent credential and recovery does not require the consumed bootstrap.
+curl --config "$tmp_exchange_config" \
+  --proto '=https' --tlsv1.2 --max-redirs 0 \
+  "${RUNDEA_CONTROL_PLANE_URL}/v0/nodes/${RUNDEA_NODE_ID}/bootstrap/exchange" \
+  -o /dev/null
+
+unset RUNDEA_NODE_TOKEN
+RUNDEA_NODE_TOKEN="$agent_token"
 systemctl daemon-reload
 systemctl enable --now rundea-agent
 systemctl --no-pager --full status rundea-agent || true
