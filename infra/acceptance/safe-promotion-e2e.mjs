@@ -9,6 +9,7 @@ const agentBinary = process.env.RUNDEA_AGENT_BINARY;
 const fixtureRepository = "https://github.com/render-examples/express-hello-world.git";
 const fixtureSha = process.env.RUNDEA_ACCEPTANCE_FIXTURE_SHA ?? "039c34770852fb07cef7f9f0f8534c5de408b207";
 const hostPort = Number(process.env.RUNDEA_SAFE_PROMOTION_HOST_PORT ?? "18082");
+const badHealthPath = "/__rundea_intentionally_missing_healthcheck__";
 
 if (!controlToken) throw new Error("RUNDEA_CONTROL_TOKEN is required");
 if (!agentBinary) throw new Error("RUNDEA_AGENT_BINARY is required");
@@ -71,7 +72,7 @@ async function deploymentEvents(id) {
   return await request(`/v0/deployments/${id}/events`, { headers });
 }
 
-async function createDeployment() {
+async function createDeployment(healthcheckPath) {
   const body = await request("/v0/deployments", {
     method: "POST",
     headers: jsonHeaders,
@@ -83,7 +84,7 @@ async function createDeployment() {
       sourceDelivery: "DIRECT",
       containerPort: 3001,
       hostPort,
-      healthcheckPath: "/",
+      healthcheckPath,
     }),
   });
   return body.id;
@@ -102,7 +103,7 @@ async function waitReady(id, label) {
 }
 
 async function waitForHealthcheckState(id) {
-  return await poll("failed candidate to enter HEALTHCHECK", async () => {
+  return await poll("bad candidate to enter HEALTHCHECK", async () => {
     const row = await deployment(id);
     if (!row) return { last: "missing" };
     if (row.status === "HEALTHCHECK") return { done: true, value: row };
@@ -114,11 +115,11 @@ async function waitForHealthcheckState(id) {
 }
 
 async function waitFailed(id) {
-  return await poll("intentionally broken candidate to fail", async () => {
+  return await poll("bad-healthcheck candidate to fail", async () => {
     const row = await deployment(id);
     if (!row) return { last: "missing" };
     if (row.status === "FAILED") return { done: true, value: row };
-    if (row.status === "READY") throw new FatalPollError("intentionally broken candidate unexpectedly became READY");
+    if (row.status === "READY") throw new FatalPollError("bad-healthcheck candidate unexpectedly became READY");
     return { last: row.status };
   }, 180_000, 750);
 }
@@ -173,36 +174,19 @@ try {
     return row?.status === "ONLINE" ? { done: true, value: row } : { last: row?.status ?? "missing" };
   }, 45_000, 500);
 
-  healthyDeploymentId = await createDeployment();
+  healthyDeploymentId = await createDeployment("/");
   await waitReady(healthyDeploymentId, "baseline deployment");
   await assertService("baseline deployment");
   if (inspectDeploymentLabel(containerName) !== healthyDeploymentId) {
     throw new Error("baseline stable container does not carry the baseline deployment identity");
   }
 
-  await request(`/v0/services/${encodeURIComponent(serviceName)}/variables`, {
-    method: "PUT",
-    headers: jsonHeaders,
-    body: JSON.stringify({
-      variables: [{
-        key: "NODE_OPTIONS",
-        value: "--require=/__rundea_intentionally_missing_runtime_module__.cjs",
-        secret: false,
-      }],
-    }),
-  });
-
-  failedDeploymentId = await createDeployment();
-  await request(`/v0/services/${encodeURIComponent(serviceName)}/variables/NODE_OPTIONS`, {
-    method: "DELETE",
-    headers,
-  });
-
+  failedDeploymentId = await createDeployment(badHealthPath);
   await waitForHealthcheckState(failedDeploymentId);
 
-  // This is the central safety assertion: while the new candidate is being
-  // healthchecked, the stable host port must still serve the previous READY
-  // revision and its container identity must not have changed.
+  // Central safety assertion: while the new revision is being healthchecked on
+  // its separate loopback port, the stable port must still serve the previous
+  // READY revision and its container identity must remain unchanged.
   await assertService("candidate validation");
   if (inspectDeploymentLabel(containerName) !== healthyDeploymentId) {
     throw new Error("candidate validation replaced the previous READY container before healthcheck completed");
@@ -229,7 +213,7 @@ try {
     verified: [
       "candidate-runs-on-separate-loopback-port",
       "previous-ready-serves-during-candidate-healthcheck",
-      "broken-candidate-reaches-failed",
+      "bad-healthcheck-candidate-reaches-failed",
       "previous-ready-remains-stable-after-failure",
       "candidate-cleaned-up-after-failure",
     ],
