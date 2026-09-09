@@ -131,7 +131,7 @@ func runRollback(cfg config, w *writer, cmd rollbackCommand) {
 		}
 		return
 	}
-	if err := w.status(cmd.DeploymentID, "DEPLOYING", "starting retained rollback revision", ""); err != nil {
+	if err := w.status(cmd.DeploymentID, "DEPLOYING", "preparing retained rollback candidate", ""); err != nil {
 		return
 	}
 
@@ -146,85 +146,33 @@ func runRollback(cfg config, w *writer, cmd rollbackCommand) {
 		fail(fmt.Errorf("rollback runtime environment: %w", err))
 		return
 	}
-	defer os.Remove(envFile)
-
-	backupName := cmd.Runtime.ContainerName + "-rollback-backup"
-	_ = exec.CommandContext(ctx, "docker", "rm", "-f", backupName).Run()
-	backupExists := false
-	if inspectErr := exec.CommandContext(ctx, "docker", "inspect", cmd.Runtime.ContainerName).Run(); inspectErr == nil {
-		if out, renameErr := exec.CommandContext(ctx, "docker", "rename", cmd.Runtime.ContainerName, backupName).CombinedOutput(); renameErr != nil {
-			fail(fmt.Errorf("preserve current revision before rollback: %w: %s", renameErr, strings.TrimSpace(string(out))))
-			return
-		}
-		backupExists = true
-		if out, stopErr := exec.CommandContext(ctx, "docker", "stop", backupName).CombinedOutput(); stopErr != nil {
-			_ = exec.CommandContext(ctx, "docker", "rename", backupName, cmd.Runtime.ContainerName).Run()
-			fail(fmt.Errorf("stop current revision before rollback: %w: %s", stopErr, strings.TrimSpace(string(out))))
-			return
-		}
-	}
-
-	restoreBackup := func() error {
-		_ = exec.CommandContext(ctx, "docker", "rm", "-f", cmd.Runtime.ContainerName).Run()
-		if !backupExists {
-			return nil
-		}
-		if out, renameErr := exec.CommandContext(ctx, "docker", "rename", backupName, cmd.Runtime.ContainerName).CombinedOutput(); renameErr != nil {
-			return fmt.Errorf("restore previous container name: %w: %s", renameErr, strings.TrimSpace(string(out)))
-		}
-		if out, startErr := exec.CommandContext(ctx, "docker", "start", cmd.Runtime.ContainerName).CombinedOutput(); startErr != nil {
-			return fmt.Errorf("restart previous container: %w: %s", startErr, strings.TrimSpace(string(out)))
-		}
-		backupExists = false
-		return nil
-	}
-
-	port := fmt.Sprintf("127.0.0.1:%d:%d", cmd.Runtime.HostPort, cmd.Runtime.ContainerPort)
-	out, runErr := exec.CommandContext(
-		ctx, "docker", "run", "-d", "--restart", "unless-stopped",
-		"--label", "rundea.managed=true",
-		"--label", "rundea.deployment="+cmd.DeploymentID,
-		"--label", "rundea.rollback_target="+cmd.TargetDeploymentID,
-		"--name", cmd.Runtime.ContainerName, "-p", port, "--env-file", envFile, rollbackImageTag,
-	).CombinedOutput()
-	if removeErr := os.Remove(envFile); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
-		w.log(cmd.DeploymentID, "system", "failed to remove temporary rollback environment file: "+removeErr.Error())
-	}
-	if runErr != nil {
-		restoreErr := restoreBackup()
-		if restoreErr != nil {
-			fail(fmt.Errorf("rollback start failed: %w: %s; previous revision restore also failed: %v", runErr, strings.TrimSpace(string(out)), restoreErr))
-		} else {
-			fail(fmt.Errorf("rollback start failed: %w: %s; previous revision restored", runErr, strings.TrimSpace(string(out))))
-		}
-		return
-	}
-	containerID := strings.TrimSpace(string(out))
-	if err := w.status(cmd.DeploymentID, "HEALTHCHECK", "validating rollback revision", containerID); err != nil {
-		_ = restoreBackup()
-		return
-	}
 	timeout := time.Duration(cmd.Runtime.Healthcheck.TimeoutSeconds) * time.Second
 	if timeout <= 0 {
 		timeout = 60 * time.Second
 	}
-	if err := waitForHealth(ctx, cmd.Runtime.HostPort, cmd.Runtime.Healthcheck.Path, timeout); err != nil {
-		restoreErr := restoreBackup()
-		if restoreErr != nil {
-			fail(fmt.Errorf("rollback healthcheck failed: %w; previous revision restore also failed: %v", err, restoreErr))
-		} else {
-			fail(fmt.Errorf("rollback healthcheck failed: %w; previous revision restored", err))
-		}
+	containerID, runtimeErr := runSafeRuntime(ctx, w, safeRuntimeSpec{
+		WorkDir:       cfg.WorkDir,
+		DeploymentID:  cmd.DeploymentID,
+		ContainerName: cmd.Runtime.ContainerName,
+		ImageTag:      rollbackImageTag,
+		EnvFile:       envFile,
+		ContainerPort: cmd.Runtime.ContainerPort,
+		HostPort:      cmd.Runtime.HostPort,
+		HealthPath:    cmd.Runtime.Healthcheck.Path,
+		HealthTimeout: timeout,
+		Labels: map[string]string{
+			"rundea.rollback_target": cmd.TargetDeploymentID,
+		},
+	})
+	if removeErr := os.Remove(envFile); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+		w.log(cmd.DeploymentID, "system", "failed to remove temporary rollback environment file: "+removeErr.Error())
+	}
+	if runtimeErr != nil {
+		fail(runtimeErr)
 		return
 	}
-	if err := w.status(cmd.DeploymentID, "READY", "rollback revision is healthy", containerID); err != nil {
-		_ = restoreBackup()
+	if err := w.status(cmd.DeploymentID, "READY", "rollback candidate promoted and stable-port healthcheck passed", containerID); err != nil {
 		return
-	}
-	if backupExists {
-		if out, removeErr := exec.CommandContext(ctx, "docker", "rm", "-f", backupName).CombinedOutput(); removeErr != nil {
-			w.log(cmd.DeploymentID, "system", fmt.Sprintf("rollback succeeded but backup cleanup failed: %v: %s", removeErr, strings.TrimSpace(string(out))))
-		}
 	}
 	go streamRuntimeLogs(context.Background(), w, cmd.DeploymentID, cmd.Runtime.ContainerName)
 }
