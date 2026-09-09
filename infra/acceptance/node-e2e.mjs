@@ -3,6 +3,7 @@ import { createHmac } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { activateNodeCredential } from "./node-credential.mjs";
 
 const api = process.env.RUNDEA_ACCEPTANCE_API_URL ?? "http://127.0.0.1:4000";
 const controlToken = process.env.RUNDEA_CONTROL_TOKEN;
@@ -299,6 +300,7 @@ try {
     body: JSON.stringify({ name: `acceptance-${process.pid}` }),
   });
   nodeId = node.id;
+  const nodeToken = await activateNodeCredential(api, node.id, node.token);
 
   agent = spawn(agentBinary, [], {
     stdio: ["ignore", "inherit", "inherit"],
@@ -306,7 +308,7 @@ try {
       ...process.env,
       RUNDEA_CONTROL_PLANE_URL: api,
       RUNDEA_NODE_ID: node.id,
-      RUNDEA_NODE_TOKEN: node.token,
+      RUNDEA_NODE_TOKEN: nodeToken,
       RUNDEA_WORK_DIR: workDir,
     },
   });
@@ -366,6 +368,7 @@ try {
       rollbackMarkers: [...rollbackTrafficResult.markers],
     },
     verified: [
+      "bootstrap-to-permanent-node-credential",
       "agent-online",
       "signed-github-push",
       "github-delivery-idempotency",
