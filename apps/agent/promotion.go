@@ -244,5 +244,9 @@ func runSafeRuntime(ctx context.Context, cfg config, w *writer, spec safeRuntime
 	if previous != nil && previous.DeploymentID != spec.DeploymentID && previous.BackendContainer != backendName {
 		scheduleBackendDrain(w, *previous)
 	}
+	if delay := durationEnv("RUNDEA_TEST_POST_SWITCH_DELAY", 0); delay > 0 {
+		w.log(spec.DeploymentID, "system", "test-only post-switch delay active before READY acknowledgement")
+		time.Sleep(delay)
+	}
 	return containerID, nil
 }
