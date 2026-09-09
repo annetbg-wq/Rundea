@@ -111,10 +111,10 @@ func runIngressReconciliation(cfg config, w *writer, cmd reconcileIngressCommand
 	if err := ensureCaddy(caddyDir, dataDir, configDir); err != nil {
 		for _, route := range cmd.Routes {
 			results = append(results, ingressRouteResult{Hostname: route.Hostname, Error: sanitizeProbeError(err.Error())})
+			}
+			complete(false, false, err)
+			return
 		}
-		complete(false, false, err)
-		return
-	}
 
 	results = verifyIngressRoutes(cmd.Routes, cmd.ReconciliationID)
 	allOK := true
@@ -217,7 +217,11 @@ func writeAtomic(path string, content []byte, mode os.FileMode) error {
 
 func validateCaddyConfig(caddyDir string) error {
 	mount := caddyDir + ":/etc/caddy:ro"
-	out, err := exec.Command("docker", "run", "--rm", "-v", mount, caddyImage, "validate", "--config", "/etc/caddy/Caddyfile", "--adapter", "caddyfile").CombinedOutput()
+	args := caddyDockerRunArgs(
+		[]string{"--rm", "-v", mount},
+		"validate", "--config", "/etc/caddy/Caddyfile", "--adapter", "caddyfile",
+	)
+	out, err := exec.Command("docker", args...).CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("Caddy config validation failed: %w: %s", err, strings.TrimSpace(string(out)))
 	}
@@ -234,12 +238,14 @@ func ensureCaddy(caddyDir, dataDir, configDir string) error {
 		return nil
 	}
 	_ = exec.Command("docker", "rm", "-f", caddyContainer).Run()
-	args := []string{
-		"run", "-d", "--name", caddyContainer, "--restart", "unless-stopped", "--network", "host",
-		"--label", "rundea.managed=true", "--label", "rundea.role=ingress",
-		"-v", caddyDir + ":/etc/caddy:ro", "-v", dataDir + ":/data", "-v", configDir + ":/config",
-		caddyImage, "run", "--config", "/etc/caddy/Caddyfile", "--adapter", "caddyfile",
-	}
+	args := caddyDockerRunArgs(
+		[]string{
+			"-d", "--name", caddyContainer, "--restart", "unless-stopped", "--network", "host",
+			"--label", "rundea.managed=true", "--label", "rundea.role=ingress",
+			"-v", caddyDir + ":/etc/caddy:ro", "-v", dataDir + ":/data", "-v", configDir + ":/config",
+		},
+		"run", "--config", "/etc/caddy/Caddyfile", "--adapter", "caddyfile",
+	)
 	out, runErr := exec.Command("docker", args...).CombinedOutput()
 	if runErr != nil {
 		return fmt.Errorf("Caddy start failed: %w: %s", runErr, strings.TrimSpace(string(out)))
