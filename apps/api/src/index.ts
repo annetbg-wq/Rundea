@@ -84,6 +84,8 @@ const sockets = new Map<string, NodeSocket>();
 const serviceNamePattern = /^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/;
 const sourceCommitPattern = /^[0-9a-f]{40}$/;
 const imageIdPattern = /^sha256:[0-9a-f]{64}$/;
+const containerIdPattern = /^[0-9a-f]{64}$/;
+const agentDisconnectDeploymentMessage = "agent disconnected during deployment";
 
 function bearer(header: string | undefined): string | null {
   if (!header?.startsWith("Bearer ")) return null;
@@ -267,6 +269,23 @@ async function recordArtifact(nodeId: string, event: Extract<AgentEvent, { type:
   if (updated.rowCount !== 1) throw new Error("artifact identity rejected for authenticated node or deployment state");
 }
 
+async function markPreviousReadyAsRolledBack(client: import("pg").PoolClient, serviceName: string, nodeId: string, deploymentId: string): Promise<void> {
+  const previous = await client.query(
+    `SELECT id FROM deployments
+      WHERE service_name=$1 AND node_id=$2 AND id<>$3 AND status='READY'
+      ORDER BY created_at DESC,id DESC LIMIT 1 FOR UPDATE`,
+    [serviceName, nodeId, deploymentId],
+  );
+  if (previous.rowCount === 1) {
+    await client.query("UPDATE deployments SET status='ROLLED_BACK',updated_at=now() WHERE id=$1", [previous.rows[0].id]);
+    await client.query(
+      `INSERT INTO deployment_events(deployment_id,kind,status,message)
+       VALUES($1,'STATUS','ROLLED_BACK',$2)`,
+      [previous.rows[0].id, `replaced by rollback deployment ${deploymentId}`],
+    );
+  }
+}
+
 async function recordStatus(nodeId: string, event: Extract<AgentEvent, { type: "status" }>): Promise<string> {
   if (!deploymentStatuses.includes(event.status)) throw new Error("unknown deployment status");
   const client = await pool.connect();
@@ -293,22 +312,74 @@ async function recordStatus(nodeId: string, event: Extract<AgentEvent, { type: "
     );
 
     if (operation === "ROLLBACK" && event.status === "READY") {
-      const previous = await client.query(
-        `SELECT id FROM deployments
-          WHERE service_name=$1 AND node_id=$2 AND id<>$3 AND status='READY'
-          ORDER BY created_at DESC,id DESC LIMIT 1 FOR UPDATE`,
-        [serviceName, nodeId, event.deploymentId],
-      );
-      if (previous.rowCount === 1) {
-        await client.query("UPDATE deployments SET status='ROLLED_BACK',updated_at=now() WHERE id=$1", [previous.rows[0].id]);
-        await client.query(
-          `INSERT INTO deployment_events(deployment_id,kind,status,message)
-           VALUES($1,'STATUS','ROLLED_BACK',$2)`,
-          [previous.rows[0].id, `replaced by rollback deployment ${event.deploymentId}`],
-        );
-      }
+      await markPreviousReadyAsRolledBack(client, serviceName, nodeId, event.deploymentId);
     }
 
+    await client.query("COMMIT");
+    return serviceName;
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+async function recordRuntimeRecovery(nodeId: string, event: Extract<AgentEvent, { type: "runtimeRecovered" }>): Promise<string> {
+  if (!containerIdPattern.test(event.containerId)) throw new Error("invalid recovered container identity");
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const currentResult = await client.query(
+      "SELECT status,service_name,operation FROM deployments WHERE id=$1 AND node_id=$2 FOR UPDATE",
+      [event.deploymentId, nodeId],
+    );
+    if (currentResult.rowCount !== 1) throw new Error("recovered deployment not found for authenticated node");
+    const current = currentResult.rows[0].status as DeploymentStatus;
+    const serviceName = currentResult.rows[0].service_name as string;
+    const operation = currentResult.rows[0].operation as string;
+
+    if (current === "READY") {
+      await client.query(
+        "UPDATE deployments SET runtime_container_id=$3,dispatch_lease_until=NULL,updated_at=now() WHERE id=$1 AND node_id=$2",
+        [event.deploymentId, nodeId, event.containerId],
+      );
+      await client.query("COMMIT");
+      return serviceName;
+    }
+
+    if (current === "FAILED") {
+      const latestStatus = await client.query(
+        `SELECT status,message FROM deployment_events
+          WHERE deployment_id=$1 AND kind='STATUS'
+          ORDER BY id DESC LIMIT 1`,
+        [event.deploymentId],
+      );
+      if (
+        latestStatus.rowCount !== 1 ||
+        latestStatus.rows[0].status !== "FAILED" ||
+        latestStatus.rows[0].message !== agentDisconnectDeploymentMessage
+      ) {
+        throw new Error("recovered route cannot resurrect a deployment that failed for another reason");
+      }
+    } else if (current !== "HEALTHCHECK") {
+      throw new Error(`recovered route cannot transition deployment from ${current} to READY`);
+    }
+
+    await client.query(
+      `UPDATE deployments
+          SET status='READY',runtime_container_id=$3,dispatch_lease_until=NULL,updated_at=now()
+        WHERE id=$1 AND node_id=$2`,
+      [event.deploymentId, nodeId, event.containerId],
+    );
+    await client.query(
+      `INSERT INTO deployment_events(deployment_id,kind,status,message)
+       VALUES($1,'STATUS','READY','live runtime route recovered after agent reconnect')`,
+      [event.deploymentId],
+    );
+    if (operation === "ROLLBACK") {
+      await markPreviousReadyAsRolledBack(client, serviceName, nodeId, event.deploymentId);
+    }
     await client.query("COMMIT");
     return serviceName;
   } catch (error) {
@@ -456,6 +527,9 @@ app.post<{ Body: { serviceName?: string; nodeId?: string; sourceRepository?: str
     if (!Number.isInteger(body.containerPort) || !Number.isInteger(body.hostPort)) {
       return reply.code(400).send({ error: "containerPort and hostPort must be integers" });
     }
+    if ([80, 443, 2019, 2020].includes(body.hostPort as number)) {
+      return reply.code(400).send({ error: "hostPort is reserved by Rundea routing" });
+    }
     let sourceDelivery: "DIRECT" | "BROKER";
     try {
       sourceDelivery = validateSourceDelivery(body.sourceDelivery, body.sourceRef);
@@ -524,6 +598,12 @@ app.get("/v0/agent/ws", { websocket: true }, async (socket, request) => {
           if (["READY", "FAILED", "CANCELLED", "ROLLED_BACK"].includes(event.status)) await dispatchQueued(nodeId);
           return;
         }
+        if (event.type === "runtimeRecovered") {
+          const serviceName = await recordRuntimeRecovery(nodeId, event);
+          await reconcileServiceDomainsAfterReady(pool, sockets, serviceName, nodeId);
+          await dispatchQueued(nodeId);
+          return;
+        }
         if (event.type === "runtimeAction") {
           await recordRuntimeAction(pool, nodeId, event);
           await dispatchQueued(nodeId);
@@ -556,7 +636,7 @@ app.get("/v0/agent/ws", { websocket: true }, async (socket, request) => {
       if (sockets.get(nodeId) !== socket) return;
       sockets.delete(nodeId);
       await pool.query("UPDATE nodes SET status='OFFLINE' WHERE id=$1", [nodeId]).catch(() => undefined);
-      await failActiveDeploymentsForNode(nodeId, "agent disconnected during deployment").catch((error) => request.log.error(error, "failed to reconcile disconnected deployment"));
+      await failActiveDeploymentsForNode(nodeId, agentDisconnectDeploymentMessage).catch((error) => request.log.error(error, "failed to reconcile disconnected deployment"));
       await failRunningRuntimeActionsForNode(pool, nodeId).catch((error) => request.log.error(error, "failed to reconcile disconnected runtime action"));
       await failRunningQualificationsForNode(pool, nodeId).catch((error) => request.log.error(error, "failed to reconcile disconnected qualification"));
       await failRunningIngressForNode(pool, nodeId).catch((error) => request.log.error(error, "failed to reconcile disconnected ingress"));
