@@ -165,18 +165,35 @@ async function claimSourceBundleTicket(
   }
 }
 
-async function authenticateNodeCredential(pool: Pool, nodeId: string, token: string): Promise<boolean> {
-  const result = await pool.query("SELECT token_hash FROM nodes WHERE id=$1", [nodeId]);
-  return result.rowCount === 1 && equalTokenHash(result.rows[0].token_hash, hashToken(token));
+async function authenticateAgentReleaseCredential(pool: Pool, nodeId: string, token: string): Promise<boolean> {
+  await ensureSchema(pool);
+  const result = await pool.query(
+    "SELECT token_hash,bootstrap_token_hash,bootstrap_expires_at,status,last_seen_at FROM nodes WHERE id=$1",
+    [nodeId],
+  );
+  if (result.rowCount !== 1) return false;
+  const row = result.rows[0];
+  const candidateHash = hashToken(token);
+  if (equalTokenHash(row.token_hash, candidateHash)) return true;
+  const bootstrapExpiresAt = row.bootstrap_expires_at ? new Date(row.bootstrap_expires_at).getTime() : NaN;
+  return Boolean(
+    row.bootstrap_token_hash &&
+    row.status === "OFFLINE" &&
+    !row.last_seen_at &&
+    Number.isFinite(bootstrapExpiresAt) &&
+    bootstrapExpiresAt > Date.now() &&
+    equalTokenHash(row.bootstrap_token_hash, candidateHash),
+  );
 }
 
 async function exchangeBootstrapCredential(pool: Pool, nodeId: string, bootstrapToken: string, agentToken: string): Promise<boolean> {
+  await ensureSchema(pool);
   if (!permanentNodeTokenPattern.test(agentToken)) return false;
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
     const result = await client.query(
-      "SELECT token_hash,status,last_seen_at,created_at FROM nodes WHERE id=$1 FOR UPDATE",
+      "SELECT bootstrap_token_hash,bootstrap_expires_at,status,last_seen_at FROM nodes WHERE id=$1 FOR UPDATE",
       [nodeId],
     );
     if (result.rowCount !== 1) {
@@ -184,18 +201,22 @@ async function exchangeBootstrapCredential(pool: Pool, nodeId: string, bootstrap
       return false;
     }
     const row = result.rows[0];
-    const createdAt = new Date(row.created_at).getTime();
+    const bootstrapExpiresAt = row.bootstrap_expires_at ? new Date(row.bootstrap_expires_at).getTime() : NaN;
     const valid =
+      Boolean(row.bootstrap_token_hash) &&
       row.status === "OFFLINE" &&
       !row.last_seen_at &&
-      Number.isFinite(createdAt) &&
-      createdAt + bootstrapTtlMs > Date.now() &&
-      equalTokenHash(row.token_hash, hashToken(bootstrapToken));
+      Number.isFinite(bootstrapExpiresAt) &&
+      bootstrapExpiresAt > Date.now() &&
+      equalTokenHash(row.bootstrap_token_hash, hashToken(bootstrapToken));
     if (!valid) {
       await client.query("ROLLBACK");
       return false;
     }
-    await client.query("UPDATE nodes SET token_hash=$2 WHERE id=$1", [nodeId, hashToken(agentToken)]);
+    await client.query(
+      "UPDATE nodes SET token_hash=$2,bootstrap_token_hash=NULL,bootstrap_expires_at=NULL WHERE id=$1",
+      [nodeId, hashToken(agentToken)],
+    );
     await client.query("COMMIT");
     return true;
   } catch (error) {
@@ -245,7 +266,7 @@ export function registerSourceBrokerRoutes(
     const architecture = agentArchitecture(request.params.architecture);
     const token = bearer(request.headers.authorization);
     const nodeId = singleHeader(request.headers["x-rundea-node-id"]);
-    if (!architecture || !token || !nodeId || !(await authenticateNodeCredential(pool, nodeId, token))) {
+    if (!architecture || !token || !nodeId || !(await authenticateAgentReleaseCredential(pool, nodeId, token))) {
       return reply.code(401).send({ error: "agent release authorization failed" });
     }
     if (!releaseProvider) return reply.code(503).send({ error: "agent release distribution is not configured" });
@@ -266,7 +287,7 @@ export function registerSourceBrokerRoutes(
     const architecture = agentArchitecture(request.params.architecture);
     const token = bearer(request.headers.authorization);
     const nodeId = singleHeader(request.headers["x-rundea-node-id"]);
-    if (!architecture || !token || !nodeId || !(await authenticateNodeCredential(pool, nodeId, token))) {
+    if (!architecture || !token || !nodeId || !(await authenticateAgentReleaseCredential(pool, nodeId, token))) {
       return reply.code(401).send({ error: "agent release authorization failed" });
     }
     if (!releaseProvider) return reply.code(503).send({ error: "agent release distribution is not configured" });
