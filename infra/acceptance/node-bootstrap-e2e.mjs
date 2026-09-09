@@ -28,6 +28,13 @@ async function nodeStatus(nodeId) {
   return rows.find((row) => row.id === nodeId)?.status ?? "MISSING";
 }
 
+async function selfStatus(nodeId, token) {
+  const response = await fetch(`${api}/v0/nodes/${encodeURIComponent(nodeId)}/self/status`, {
+    headers: { authorization: `Bearer ${token}` },
+  });
+  return { status: response.status, body: (await response.text()).trim() };
+}
+
 async function waitForStatus(nodeId, expected, timeoutMs = 12_000) {
   const deadline = Date.now() + timeoutMs;
   let last = "MISSING";
@@ -87,6 +94,11 @@ const bootstrapReleaseResponse = await fetch(`${api}/v0/agent/releases/amd64/sha
 });
 if (bootstrapReleaseResponse.status !== 503) {
   throw new Error(`bootstrap credential was not limited to release bootstrap path: ${bootstrapReleaseResponse.status}`);
+}
+
+const bootstrapSelf = await selfStatus(created.id, created.token);
+if (bootstrapSelf.status !== 401) {
+  throw new Error(`bootstrap credential unexpectedly authenticated node self status: ${bootstrapSelf.status} ${bootstrapSelf.body}`);
 }
 
 const bootstrapWorkDir = await mkdtemp(join(tmpdir(), "rundea-bootstrap-rejected-"));
@@ -151,9 +163,17 @@ const activeWorkDir = await mkdtemp(join(tmpdir(), "rundea-bootstrap-active-"));
 const activeAgent = startAgent(created.id, permanentToken, activeWorkDir);
 try {
   await waitForStatus(created.id, "ONLINE");
+  const onlineSelf = await selfStatus(created.id, permanentToken);
+  if (onlineSelf.status !== 200 || onlineSelf.body !== "ONLINE") {
+    throw new Error(`permanent node self status did not prove ONLINE: ${onlineSelf.status} ${onlineSelf.body}`);
+  }
 } finally {
   await stopAgent(activeAgent);
   await waitForStatus(created.id, "OFFLINE");
+  const offlineSelf = await selfStatus(created.id, permanentToken);
+  if (offlineSelf.status !== 200 || offlineSelf.body !== "OFFLINE") {
+    throw new Error(`permanent node self status did not prove OFFLINE after disconnect: ${offlineSelf.status} ${offlineSelf.body}`);
+  }
   await rm(activeWorkDir, { recursive: true, force: true });
 }
 
@@ -162,10 +182,13 @@ console.log(JSON.stringify({
   nodeId: created.id,
   verified: [
     "bootstrap-release-download-authorized",
+    "bootstrap-token-rejected-by-self-status",
     "bootstrap-token-rejected-by-agent-websocket",
     "bootstrap-token-accepted-once-for-exchange",
     "bootstrap-token-invalid-after-exchange",
     "permanent-node-credential-activated",
     "permanent-node-credential-authenticates-agent-websocket",
+    "permanent-node-self-status-proves-online",
+    "permanent-node-self-status-proves-offline",
   ],
 }, null, 2));
