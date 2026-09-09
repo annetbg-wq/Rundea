@@ -45,22 +45,39 @@ A node downloads through authenticated Rundea endpoints:
 
 Supported v0 architectures are `amd64` and `arm64` only. The Control Plane serves a binary only after upstream release verification. It does not redirect the node to GitHub.
 
-`GET /v0/install.sh` is public and contains no secret. It is the checked-in installer source, served with `no-store`; the bootstrap and permanent credentials are supplied separately by the operator and authenticated endpoints.
+`GET /v0/install.sh` is public and contains no secret. It is the checked-in installer source, served with `no-store`; node credentials are supplied separately by the operator and authenticated endpoints.
 
-## Decision: copied token is consumed during bootstrap
+## Decision: bootstrap credential is not an Agent credential
 
-`POST /v0/nodes` continues to return a plaintext credential once. For a fresh node this value is treated as a **bootstrap credential**.
+`POST /v0/nodes` continues to return a plaintext credential once, but a fresh node stores that value only in `bootstrap_token_hash` with a 30-minute expiry. The normal `nodes.token_hash` Agent credential is deliberately unavailable until exchange completes.
 
-The installer:
+The database insert trigger preserves compatibility with the existing node-creation API while enforcing this trust boundary for every new node. Existing enrolled nodes are untouched and keep their active `token_hash` credentials.
 
-1. generates a new 256-bit permanent Agent credential locally from `/dev/urandom`;
-2. authenticates `POST /v0/nodes/:nodeId/bootstrap/exchange` with the copied bootstrap credential;
-3. sends the locally generated permanent credential over the HTTPS body;
-4. the Control Plane atomically replaces the stored token hash;
-5. the copied bootstrap credential immediately stops authenticating;
-6. only the permanent credential is written to `/etc/rundea/agent.env` with mode `0600`.
+This separation is deliberate:
 
-The exchange is accepted only while the node is still `OFFLINE`, has never connected, and was created less than 30 minutes earlier. This prevents a copied bootstrap command from being used to rotate an already enrolled node.
+- the bootstrap credential may authenticate only the release-download and bootstrap-exchange path while it is unexpired and the node has never connected;
+- `/v0/agent/ws` authenticates only `nodes.token_hash`, so a copied bootstrap command cannot impersonate a live Agent or receive deployment commands;
+- a successful exchange writes the new permanent hash to `nodes.token_hash` and clears both bootstrap columns atomically;
+- the consumed bootstrap value cannot authenticate either release or Agent endpoints afterward.
+
+## Decision: consume bootstrap only after local preparation succeeds
+
+The installer does not rotate credentials before it knows the node can actually be installed.
+
+The order is:
+
+1. authenticate the release-download endpoints with the bootstrap credential;
+2. download the exact configured architecture binary and expected SHA-256;
+3. verify SHA-256 locally;
+4. install the verified binary and prepare the private Agent environment plus systemd unit;
+5. generate a fresh 256-bit permanent Agent credential locally from `/dev/urandom` and persist it in `/etc/rundea/agent.env` with mode `0600`;
+6. authenticate `POST /v0/nodes/:nodeId/bootstrap/exchange` with the bootstrap credential and send the permanent credential in the HTTPS request body;
+7. atomically replace the server-side Agent credential hash and clear the bootstrap hash/expiry;
+8. only then enable and start the Agent service.
+
+If download, checksum verification, binary installation or unit preparation fails, the bootstrap token is not consumed and the command can be retried. If a later systemd operation fails after exchange, the permanent credential is already durable on the node, so recovery does not depend on the consumed bootstrap value.
+
+The exchange is accepted only while the node is still `OFFLINE`, has never connected, has an unconsumed bootstrap hash and the bootstrap expiry has not passed. This prevents a copied bootstrap command from rotating an already enrolled node.
 
 The Control Plane stores only SHA-256 hashes of node credentials. It never stores either plaintext credential.
 
@@ -70,22 +87,25 @@ The installer:
 
 - requires an `https://` Control Plane;
 - detects `linux/amd64` or `linux/arm64`;
-- downloads the expected checksum and Agent binary using the permanent node credential without placing that credential on the curl command line;
-- refuses redirects from the authenticated Rundea binary endpoints;
+- keeps credentials in mode-`0600` curl config files rather than command-line arguments;
+- refuses redirects from authenticated Rundea release endpoints;
 - verifies SHA-256 locally before installing `/usr/local/bin/rundea-agent`;
-- writes the existing systemd unit only after verification succeeds.
+- starts systemd only after the one-time credential exchange has committed.
 
-An explicit `RUNDEA_AGENT_URL` + `RUNDEA_AGENT_SHA256` pair remains supported as a bring-your-own immutable distribution override, but checksum verification remains mandatory.
+An explicit `RUNDEA_AGENT_URL` + `RUNDEA_AGENT_SHA256` pair remains supported as a bring-your-own immutable distribution override, but checksum verification remains mandatory and bootstrap exchange still happens only after local preparation succeeds.
 
 ## Executable acceptance
 
-`node-acceptance` proves the credential lifecycle against real PostgreSQL and the running Control Plane:
+`node-acceptance` proves the credential lifecycle against real PostgreSQL, the running Control Plane and the real compiled Agent:
 
-- create a node;
-- exchange the returned bootstrap credential once;
+- create a fresh node;
+- prove the bootstrap credential can reach the authenticated release path;
+- start the real Agent with that bootstrap credential and prove the node remains `OFFLINE`;
+- exchange the bootstrap credential once;
 - prove replay with the old credential fails;
-- prove the old credential no longer authenticates a node endpoint;
-- prove the permanent credential does authenticate before release-provider configuration is evaluated.
+- prove the old credential no longer authenticates the release path;
+- prove the permanent credential authenticates the release path;
+- start the real Agent with the permanent credential and prove the node becomes `ONLINE`.
 
 The ordinary CI also validates installer shell syntax and the release-provider unit tests cover repository-scoped GitHub App permissions, credential stripping on release redirects, redirect-host restrictions and binary checksum mismatch.
 
