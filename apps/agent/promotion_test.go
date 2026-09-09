@@ -3,10 +3,8 @@ package main
 import (
 	"os"
 	"path/filepath"
-	"reflect"
 	"strings"
 	"testing"
-	"time"
 )
 
 func TestCandidateContainerNameIsDeploymentScoped(t *testing.T) {
@@ -85,12 +83,5 @@ func TestPromotionMarkerIsPrivateAndRoundTrips(t *testing.T) {
 	}
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Fatalf("marker was not removed, stat err=%v", err)
-	}
-}
-
-func TestSafeRuntimeSpecRetainsHealthTimeout(t *testing.T) {
-	spec := safeRuntimeSpec{HealthTimeout: 7 * time.Second}
-	if !reflect.DeepEqual(spec.HealthTimeout, 7*time.Second) {
-		t.Fatalf("unexpected health timeout %s", spec.HealthTimeout)
 	}
 }
