@@ -231,7 +231,24 @@ func runRestart(cfg config, w *writer, cmd restartCommand) {
 	if timeout <= 0 {
 		timeout = 60 * time.Second
 	}
-	if err := waitForRoutedHealth(ctx, *route, timeout); err != nil {
+
+	backendPort, err := publishedSingleLoopbackPort(ctx, route.BackendContainer)
+	if err != nil {
+		complete(false, err)
+		return
+	}
+	if backendPort != route.BackendPort {
+		if err := waitForHealth(ctx, backendPort, route.HealthPath, timeout); err != nil {
+			complete(false, fmt.Errorf("restart backend healthcheck failed after Docker changed the published port: %w", err))
+			return
+		}
+		next := *route
+		next.BackendPort = backendPort
+		if _, err := switchRuntimeRoute(ctx, cfg, w, next, timeout); err != nil {
+			complete(false, fmt.Errorf("restart route reconciliation failed after Docker changed the published port: %w", err))
+			return
+		}
+	} else if err := waitForRoutedHealth(ctx, *route, timeout); err != nil {
 		complete(false, fmt.Errorf("restart healthcheck failed: %w", err))
 		return
 	}
