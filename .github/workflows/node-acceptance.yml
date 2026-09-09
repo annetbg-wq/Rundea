@@ -104,7 +104,13 @@ jobs:
           RUNDEA_ACCEPTANCE_FIXTURE_REF: 039c34770852fb07cef7f9f0f8534c5de408b207
           RUNDEA_ACCEPTANCE_FIXTURE_SHA: 039c34770852fb07cef7f9f0f8534c5de408b207
           RUNDEA_ACCEPTANCE_HOST_PORT: '18081'
+          RUNDEA_METRICS_INTERVAL: '2s'
         run: node infra/acceptance/node-e2e.mjs
+      - name: Prove Agent → Control Plane → PostgreSQL runtime metrics
+        env:
+          RUNDEA_ACCEPTANCE_API_URL: http://127.0.0.1:4000
+          RUNDEA_CONTROL_TOKEN: acceptance-control-token
+        run: node infra/acceptance/assert-runtime-metrics.mjs
       - name: Control Plane log
         if: always()
         run: cat /tmp/rundea-api.log || true

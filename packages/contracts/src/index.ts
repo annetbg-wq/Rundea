@@ -105,6 +105,16 @@ export type AgentEvent =
   | { type: "artifact"; deploymentId: string; sourceCommitSha: string; imageId: string; healthcheckPath: string }
   | { type: "log"; deploymentId: string; stream: "build" | "runtime" | "system"; message: string; at: string }
   | {
+      type: "metric";
+      deploymentId: string;
+      cpuPercent: number;
+      memoryUsageBytes: number;
+      memoryLimitBytes: number;
+      networkRxBytes: number;
+      networkTxBytes: number;
+      at: string;
+    }
+  | {
       type: "qualification";
       qualificationId: string;
       profile: NodeQualificationProfile;

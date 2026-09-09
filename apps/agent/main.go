@@ -161,6 +161,10 @@ func connectAndServe(cfg config) error {
 	w := &writer{conn: conn}
 	log.Printf("connected to %s as node %s", cfg.ControlPlane, cfg.NodeID)
 
+	metricsCtx, cancelMetrics := context.WithCancel(context.Background())
+	defer cancelMetrics()
+	go runMetricsLoop(metricsCtx, w, durationEnv("RUNDEA_METRICS_INTERVAL", defaultMetricsInterval))
+
 	done := make(chan struct{})
 	go func() {
 		ticker := time.NewTicker(15 * time.Second)
