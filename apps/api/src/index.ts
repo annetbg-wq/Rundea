@@ -86,6 +86,8 @@ const sourceCommitPattern = /^[0-9a-f]{40}$/;
 const imageIdPattern = /^sha256:[0-9a-f]{64}$/;
 const containerIdPattern = /^[0-9a-f]{64}$/;
 const agentDisconnectDeploymentMessage = "agent disconnected during deployment";
+const maxPreAuthAgentMessages = 64;
+const maxPreAuthAgentBytes = 1024 * 1024;
 
 function bearer(header: string | undefined): string | null {
   if (!header?.startsWith("Bearer ")) return null;
@@ -565,23 +567,59 @@ app.get("/v0/agent/ws", { websocket: true }, async (socket, request) => {
   const nodeId = Array.isArray(nodeIdHeader) ? nodeIdHeader[0] : nodeIdHeader;
   const token = bearer(request.headers.authorization);
   if (!nodeId || !token) return socket.close(1008, "missing node credentials");
+
+  // The WebSocket upgrade completes before asynchronous credential lookup. An
+  // Agent may therefore send recovery state before the handler has finished
+  // authenticating. Buffer a small, bounded number of frames synchronously so
+  // recovery/heartbeat events cannot be lost in that interval. Nothing in the
+  // buffer is interpreted until the credential is accepted.
+  const preAuthMessages: Buffer[] = [];
+  let preAuthBytes = 0;
+  let enqueueAgentMessage: ((raw: Buffer) => void) | null = null;
+  let closed = false;
+  socket.on("message", (raw: Buffer) => {
+    const payload = Buffer.from(raw);
+    if (enqueueAgentMessage) {
+      enqueueAgentMessage(payload);
+      return;
+    }
+    if (preAuthMessages.length >= maxPreAuthAgentMessages || preAuthBytes + payload.byteLength > maxPreAuthAgentBytes) {
+      closed = true;
+      socket.close(1008, "agent pre-auth message buffer exceeded");
+      return;
+    }
+    preAuthMessages.push(payload);
+    preAuthBytes += payload.byteLength;
+  });
+  socket.on("close", () => {
+    closed = true;
+  });
+
+  // Test-only deterministic race injection. Production defaults to zero. The
+  // acceptance suite enables this so the Agent's immediate runtimeRecovered
+  // event is guaranteed to arrive while credential lookup is still pending.
+  const testAuthDelayMs = Number(process.env.RUNDEA_TEST_AGENT_AUTH_DELAY_MS ?? "0");
+  if (Number.isFinite(testAuthDelayMs) && testAuthDelayMs > 0) {
+    await new Promise((resolve) => setTimeout(resolve, Math.min(testAuthDelayMs, 5000)));
+  }
+
   const result = await pool.query("SELECT token_hash FROM nodes WHERE id=$1", [nodeId]);
   if (result.rowCount !== 1 || !equalTokenHash(result.rows[0].token_hash, hashToken(token))) {
     return socket.close(1008, "invalid node credentials");
   }
+  if (closed) return;
 
   const previous = sockets.get(nodeId);
   if (previous && previous !== socket) previous.close(1012, "replaced by newer agent connection");
   sockets.set(nodeId, socket);
 
-  let closed = false;
   let messageQueue = Promise.resolve();
   let finishSetup!: () => void;
   const setupDone = new Promise<void>((resolve) => {
     finishSetup = resolve;
   });
 
-  socket.on("message", (raw: Buffer) => {
+  const processAgentMessage = (raw: Buffer): void => {
     messageQueue = messageQueue
       .then(async () => {
         await setupDone;
@@ -632,10 +670,15 @@ app.get("/v0/agent/ws", { websocket: true }, async (socket, request) => {
       .catch((error) => {
         request.log.error(error, "invalid agent event");
       });
-  });
+  };
+
+  // Atomically switch the single socket listener from bounded buffering to the
+  // authenticated event queue, then replay every frame received during auth.
+  enqueueAgentMessage = processAgentMessage;
+  for (const buffered of preAuthMessages.splice(0)) processAgentMessage(buffered);
+  preAuthBytes = 0;
 
   socket.on("close", () => {
-    closed = true;
     void (async () => {
       await setupDone;
       await messageQueue;
