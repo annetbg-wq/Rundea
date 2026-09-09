@@ -573,15 +573,19 @@ app.get("/v0/agent/ws", { websocket: true }, async (socket, request) => {
   const previous = sockets.get(nodeId);
   if (previous && previous !== socket) previous.close(1012, "replaced by newer agent connection");
   sockets.set(nodeId, socket);
-  await pool.query("UPDATE nodes SET status='ONLINE',last_seen_at=now() WHERE id=$1", [nodeId]);
-  await dispatchQueued(nodeId);
-  await reconcileNodeIngress(pool, sockets, nodeId);
 
+  let closed = false;
   let messageQueue = Promise.resolve();
+  let finishSetup!: () => void;
+  const setupDone = new Promise<void>((resolve) => {
+    finishSetup = resolve;
+  });
+
   socket.on("message", (raw: Buffer) => {
     messageQueue = messageQueue
       .then(async () => {
-        if (sockets.get(nodeId) !== socket) return;
+        await setupDone;
+        if (closed || sockets.get(nodeId) !== socket) return;
         const event = JSON.parse(raw.toString()) as AgentEvent;
         if (event.type === "heartbeat") {
           await pool.query("UPDATE nodes SET status='ONLINE',last_seen_at=now() WHERE id=$1", [nodeId]);
@@ -630,8 +634,10 @@ app.get("/v0/agent/ws", { websocket: true }, async (socket, request) => {
       });
   });
 
-  socket.on("close", async () => {
-    if (sockets.get(nodeId) === socket) {
+  socket.on("close", () => {
+    closed = true;
+    void (async () => {
+      await setupDone;
       await messageQueue;
       if (sockets.get(nodeId) !== socket) return;
       sockets.delete(nodeId);
@@ -640,8 +646,21 @@ app.get("/v0/agent/ws", { websocket: true }, async (socket, request) => {
       await failRunningRuntimeActionsForNode(pool, nodeId).catch((error) => request.log.error(error, "failed to reconcile disconnected runtime action"));
       await failRunningQualificationsForNode(pool, nodeId).catch((error) => request.log.error(error, "failed to reconcile disconnected qualification"));
       await failRunningIngressForNode(pool, nodeId).catch((error) => request.log.error(error, "failed to reconcile disconnected ingress"));
-    }
+    })().catch((error) => request.log.error(error, "failed to reconcile closed agent connection"));
   });
+
+  try {
+    await pool.query("UPDATE nodes SET status='ONLINE',last_seen_at=now() WHERE id=$1", [nodeId]);
+    if (closed || sockets.get(nodeId) !== socket) return;
+    await dispatchQueued(nodeId);
+    if (closed || sockets.get(nodeId) !== socket) return;
+    await reconcileNodeIngress(pool, sockets, nodeId);
+  } catch (error) {
+    request.log.error(error, "agent connection initialization failed");
+    socket.close(1011, "agent initialization failed");
+  } finally {
+    finishSetup();
+  }
 });
 
 const port = Number(process.env.PORT ?? 4000);
