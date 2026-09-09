@@ -95,6 +95,11 @@ jobs:
           cat /tmp/rundea-api.log
           echo 'Control Plane did not become healthy' >&2
           exit 1
+      - name: Prove one-time bootstrap rotates into permanent node credential
+        env:
+          RUNDEA_ACCEPTANCE_API_URL: http://127.0.0.1:4000
+          RUNDEA_CONTROL_TOKEN: acceptance-control-token
+        run: node infra/acceptance/node-bootstrap-e2e.mjs
       - name: Run Control Plane → Agent → Docker acceptance
         env:
           RUNDEA_ACCEPTANCE_API_URL: http://127.0.0.1:4000
