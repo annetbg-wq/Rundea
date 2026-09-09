@@ -41,7 +41,7 @@ jobs:
 
   node-e2e:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
     services:
       postgres:
         image: postgres:17-alpine
@@ -106,7 +106,7 @@ jobs:
           RUNDEA_ACCEPTANCE_HOST_PORT: '18081'
           RUNDEA_METRICS_INTERVAL: '2s'
         run: node infra/acceptance/node-e2e.mjs
-      - name: Prove failed candidate keeps previous READY service live
+      - name: Prove failed backend keeps previous stable route live
         env:
           RUNDEA_ACCEPTANCE_API_URL: http://127.0.0.1:4000
           RUNDEA_CONTROL_TOKEN: acceptance-control-token
@@ -114,6 +114,14 @@ jobs:
           RUNDEA_ACCEPTANCE_FIXTURE_SHA: 039c34770852fb07cef7f9f0f8534c5de408b207
           RUNDEA_SAFE_PROMOTION_HOST_PORT: '18082'
         run: node infra/acceptance/safe-promotion-e2e.mjs
+      - name: Prove committed route survives Agent crash and reconciles
+        env:
+          RUNDEA_ACCEPTANCE_API_URL: http://127.0.0.1:4000
+          RUNDEA_CONTROL_TOKEN: acceptance-control-token
+          RUNDEA_AGENT_BINARY: /tmp/rundea-agent
+          RUNDEA_ACCEPTANCE_FIXTURE_SHA: 039c34770852fb07cef7f9f0f8534c5de408b207
+          RUNDEA_RECOVERY_HOST_PORT: '18083'
+        run: node infra/acceptance/runtime-router-recovery-e2e.mjs
       - name: Prove Agent → Control Plane → PostgreSQL runtime metrics
         env:
           RUNDEA_ACCEPTANCE_API_URL: http://127.0.0.1:4000
