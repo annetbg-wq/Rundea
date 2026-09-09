@@ -17,14 +17,17 @@ The release sequence is:
 1. change `apps/agent/VERSION` in a pull request;
 2. ordinary TypeScript/Go CI and full node acceptance must be green on the final PR head;
 3. merge the PR into `main`;
-4. the `agent-release` workflow is triggered by the `VERSION` change on `main`;
-5. build static Linux amd64 and arm64 Agent binaries from the exact merge `GITHUB_SHA`;
-6. generate and verify `SHA256SUMS`;
-7. create annotated tag `agent-vX.Y.Z` on that exact merge SHA;
-8. publish immutable GitHub Release assets without overwriting any existing release;
-9. download the published assets again and verify their SHA-256 manifest.
+4. `ci` and `node-acceptance` run again on the exact merge SHA;
+5. `agent-release` observes completion of those `main` workflows and proceeds only when both are successful for the same merge SHA and that commit changed `apps/agent/VERSION`;
+6. build static Linux amd64 and arm64 Agent binaries from that exact merge SHA;
+7. generate and verify `SHA256SUMS`;
+8. create annotated tag `agent-vX.Y.Z` on that exact merge SHA;
+9. publish immutable GitHub Release assets without overwriting any existing release;
+10. download the published assets again and verify their SHA-256 manifest.
 
 No human-created release tag is required for the normal release path.
+
+A completion event from one post-merge gate is not enough. If the other gate is still running, the release workflow exits without publishing. Completion of the second gate causes the pair to be evaluated again. This prevents Agent publication from racing ahead of post-merge validation.
 
 ## Immutability and retry semantics
 
@@ -34,6 +37,8 @@ On a pull request, CI rejects a `VERSION` whose release tag already exists.
 
 On the post-merge release run:
 
+- if the exact merge commit did not change `apps/agent/VERSION`, no release is attempted;
+- if either exact-SHA post-merge gate is missing, incomplete or unsuccessful, no release is attempted;
 - if the tag does not exist, the workflow creates it at the exact merge SHA;
 - if the tag already exists at the same SHA, the workflow may resume after a partial previous run;
 - if the tag exists at any other SHA, the workflow fails;
@@ -58,8 +63,8 @@ Before `agent-v0.1.0` is treated as the first production-candidate Agent release
 
 - release PR CI is green;
 - full node acceptance is green on the same PR head;
-- merge to `main` is green post-merge;
-- `agent-release` succeeds from the exact merge SHA;
+- both `ci` and `node-acceptance` are green again on the exact merge SHA in `main`;
+- `agent-release` succeeds from that exact merge SHA;
 - tag `agent-v0.1.0` resolves to that exact merge SHA;
 - both Linux architecture assets and `SHA256SUMS` exist and verify;
 - the real Rundea Control Plane release provider successfully obtains and verifies the release;
