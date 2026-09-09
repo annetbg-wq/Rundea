@@ -10,6 +10,7 @@ const fixtureRepository = "https://github.com/render-examples/express-hello-worl
 const fixtureSha = process.env.RUNDEA_ACCEPTANCE_FIXTURE_SHA ?? "039c34770852fb07cef7f9f0f8534c5de408b207";
 const hostPort = Number(process.env.RUNDEA_SAFE_PROMOTION_HOST_PORT ?? "18082");
 const badHealthPath = "/__rundea_intentionally_missing_healthcheck__";
+const markerHeader = "x-rundea-deployment";
 
 if (!controlToken) throw new Error("RUNDEA_CONTROL_TOKEN is required");
 if (!agentBinary) throw new Error("RUNDEA_AGENT_BINARY is required");
@@ -19,7 +20,7 @@ if (!Number.isInteger(hostPort) || hostPort < 1024 || hostPort > 65535) throw ne
 const headers = { authorization: `Bearer ${controlToken}` };
 const jsonHeaders = { ...headers, "content-type": "application/json" };
 const serviceName = `safe-promotion-${Date.now().toString(36)}`;
-const containerName = `rundea-${serviceName}`;
+const containerBase = `rundea-${serviceName}`;
 const workDir = await mkdtemp(join(tmpdir(), "rundea-safe-promotion-"));
 let agent;
 let nodeId = "";
@@ -37,9 +38,7 @@ async function request(path, init = {}) {
   const text = await response.text();
   let body;
   try { body = text ? JSON.parse(text) : null; } catch { body = text; }
-  if (!response.ok) {
-    throw new Error(`${init.method ?? "GET"} ${path} -> ${response.status}: ${typeof body === "string" ? body : JSON.stringify(body)}`);
-  }
+  if (!response.ok) throw new Error(`${init.method ?? "GET"} ${path} -> ${response.status}: ${typeof body === "string" ? body : JSON.stringify(body)}`);
   return body;
 }
 
@@ -103,33 +102,36 @@ async function waitReady(id, label) {
 }
 
 async function waitForHealthcheckState(id) {
-  return await poll("bad candidate to enter HEALTHCHECK", async () => {
+  return await poll("bad backend to enter HEALTHCHECK", async () => {
     const row = await deployment(id);
     if (!row) return { last: "missing" };
     if (row.status === "HEALTHCHECK") return { done: true, value: row };
-    if (row.status === "FAILED") {
-      throw new FatalPollError("candidate failed before HEALTHCHECK state could be observed");
-    }
+    if (row.status === "FAILED") throw new FatalPollError("backend failed before HEALTHCHECK state could be observed");
     return { last: row.status };
   }, 240_000, 250);
 }
 
 async function waitFailed(id) {
-  return await poll("bad-healthcheck candidate to fail", async () => {
+  return await poll("bad-healthcheck backend to fail", async () => {
     const row = await deployment(id);
     if (!row) return { last: "missing" };
     if (row.status === "FAILED") return { done: true, value: row };
-    if (row.status === "READY") throw new FatalPollError("bad-healthcheck candidate unexpectedly became READY");
+    if (row.status === "READY") throw new FatalPollError("bad-healthcheck backend unexpectedly became READY");
     return { last: row.status };
   }, 180_000, 750);
 }
 
-async function assertService(label) {
+async function assertStableRoute(label, expectedDeploymentId) {
   const response = await fetch(`http://127.0.0.1:${hostPort}/`);
   const body = await response.text();
-  if (!response.ok || !body.includes("Hello from Render!")) {
-    throw new Error(`${label}: stable service is not healthy: ${response.status} ${body.slice(0, 200)}`);
+  const marker = response.headers.get(markerHeader);
+  if (!response.ok || !body.includes("Hello from Render!") || marker !== expectedDeploymentId) {
+    throw new Error(`${label}: stable route mismatch status=${response.status} marker=${marker} body=${body.slice(0, 160)}`);
   }
+}
+
+function revisionName(deploymentId) {
+  return `${containerBase}-rev-${deploymentId.replaceAll("-", "").toLowerCase().slice(0, 12)}`;
 }
 
 function inspectDeploymentLabel(name) {
@@ -138,13 +140,9 @@ function inspectDeploymentLabel(name) {
   return result.stdout.trim();
 }
 
-function candidateName(deploymentId) {
-  return `${containerName}-candidate-${deploymentId.replaceAll("-", "").toLowerCase().slice(0, 12)}`;
-}
-
 function assertContainerAbsent(name) {
   const result = spawnSync("docker", ["inspect", name], { stdio: "ignore" });
-  if (result.status === 0) throw new Error(`temporary container ${name} still exists after failed candidate cleanup`);
+  if (result.status === 0) throw new Error(`temporary backend ${name} still exists after failed deployment cleanup`);
 }
 
 try {
@@ -176,33 +174,27 @@ try {
 
   healthyDeploymentId = await createDeployment("/");
   await waitReady(healthyDeploymentId, "baseline deployment");
-  await assertService("baseline deployment");
-  if (inspectDeploymentLabel(containerName) !== healthyDeploymentId) {
-    throw new Error("baseline stable container does not carry the baseline deployment identity");
+  await assertStableRoute("baseline deployment", healthyDeploymentId);
+  if (inspectDeploymentLabel(revisionName(healthyDeploymentId)) !== healthyDeploymentId) {
+    throw new Error("baseline backend does not carry the baseline deployment identity");
   }
 
   failedDeploymentId = await createDeployment(badHealthPath);
   await waitForHealthcheckState(failedDeploymentId);
 
-  // Central safety assertion: while the new revision is being healthchecked on
-  // its separate loopback port, the stable port must still serve the previous
-  // READY revision and its container identity must remain unchanged.
-  await assertService("candidate validation");
-  if (inspectDeploymentLabel(containerName) !== healthyDeploymentId) {
-    throw new Error("candidate validation replaced the previous READY container before healthcheck completed");
-  }
+  // The stable listener is owned by the runtime router. A failing backend is
+  // validated on its own dynamic loopback port and therefore cannot replace
+  // the previous committed route.
+  await assertStableRoute("failed backend validation", healthyDeploymentId);
 
   await waitFailed(failedDeploymentId);
-  await assertService("failed candidate fallback");
-  if (inspectDeploymentLabel(containerName) !== healthyDeploymentId) {
-    throw new Error("failed candidate changed the stable runtime deployment identity");
-  }
+  await assertStableRoute("failed backend fallback", healthyDeploymentId);
 
   const events = await deploymentEvents(failedDeploymentId);
-  if (!events.some((event) => typeof event.message === "string" && event.message.includes("previous READY revision remained live"))) {
-    throw new Error(`failed candidate did not record the expected safety event: ${JSON.stringify(events.slice(-20))}`);
+  if (!events.some((event) => typeof event.message === "string" && event.message.includes("current stable route remained live"))) {
+    throw new Error(`failed backend did not record the expected routing safety event: ${JSON.stringify(events.slice(-20))}`);
   }
-  assertContainerAbsent(candidateName(failedDeploymentId));
+  assertContainerAbsent(revisionName(failedDeploymentId));
 
   console.log(JSON.stringify({
     ok: true,
@@ -211,29 +203,23 @@ try {
     healthyDeploymentId,
     failedDeploymentId,
     verified: [
-      "candidate-runs-on-separate-loopback-port",
-      "previous-ready-serves-during-candidate-healthcheck",
-      "bad-healthcheck-candidate-reaches-failed",
-      "previous-ready-remains-stable-after-failure",
-      "candidate-cleaned-up-after-failure",
+      "stable-port-owned-by-runtime-router",
+      "backend-runs-on-dynamic-loopback-port",
+      "previous-route-serves-during-bad-healthcheck",
+      "bad-healthcheck-deployment-reaches-failed",
+      "previous-route-remains-committed-after-failure",
+      "failed-backend-cleaned-up",
     ],
   }, null, 2));
 } finally {
   if (agent && agent.exitCode === null) {
     agent.kill("SIGTERM");
-    await Promise.race([
-      new Promise((resolve) => agent.once("exit", resolve)),
-      sleep(3000),
-    ]);
+    await Promise.race([new Promise((resolve) => agent.once("exit", resolve)), sleep(3000)]);
     if (agent.exitCode === null) agent.kill("SIGKILL");
   }
-  for (const name of [
-    containerName,
-    `${containerName}-promotion-backup`,
-    healthyDeploymentId ? candidateName(healthyDeploymentId) : "",
-    failedDeploymentId ? candidateName(failedDeploymentId) : "",
-  ].filter(Boolean)) {
-    spawnSync("docker", ["rm", "-f", name], { stdio: "ignore" });
+  for (const id of [healthyDeploymentId, failedDeploymentId].filter(Boolean)) {
+    spawnSync("docker", ["rm", "-f", revisionName(id)], { stdio: "ignore" });
   }
+  spawnSync("docker", ["rm", "-f", "rundea-runtime-router"], { stdio: "ignore" });
   await rm(workDir, { recursive: true, force: true });
 }
