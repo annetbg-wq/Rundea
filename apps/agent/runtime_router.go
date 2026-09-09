@@ -199,23 +199,19 @@ func renderRuntimeRouterCaddyfile(state runtimeRouterState) string {
 	return builder.String()
 }
 
-func ensureRuntimeRouterDirs(cfg config) (string, string, string, error) {
+func ensureRuntimeRouterDir(cfg config) (string, error) {
 	routerDir := runtimeRouterDir(cfg)
-	dataDir := filepath.Join(cfg.WorkDir, "runtime-router-data")
-	configDir := filepath.Join(cfg.WorkDir, "runtime-router-config")
-	for _, dir := range []string{routerDir, dataDir, configDir} {
-		if err := os.MkdirAll(dir, 0o700); err != nil {
-			return "", "", "", err
-		}
+	if err := os.MkdirAll(routerDir, 0o700); err != nil {
+		return "", err
 	}
-	return routerDir, dataDir, configDir, nil
+	return routerDir, nil
 }
 
 func writeRuntimeRouterConfig(cfg config, state runtimeRouterState, name string) error {
 	if err := validateRuntimeRouterState(state); err != nil {
 		return err
 	}
-	if _, _, _, err := ensureRuntimeRouterDirs(cfg); err != nil {
+	if _, err := ensureRuntimeRouterDir(cfg); err != nil {
 		return err
 	}
 	return writeAtomic(runtimeRouterConfigPath(cfg, name), []byte(renderRuntimeRouterCaddyfile(state)), 0o600)
@@ -273,7 +269,7 @@ func reloadRuntimeRouter(name string) error {
 }
 
 func startRuntimeRouter(cfg config, configName string, restartPolicy string) error {
-	routerDir, dataDir, configDir, err := ensureRuntimeRouterDirs(cfg)
+	routerDir, err := ensureRuntimeRouterDir(cfg)
 	if err != nil {
 		return err
 	}
@@ -282,7 +278,7 @@ func startRuntimeRouter(cfg config, configName string, restartPolicy string) err
 		[]string{
 			"-d", "--name", runtimeRouterContainer, "--restart", restartPolicy, "--network", "host",
 			"--label", "rundea.managed=true", "--label", "rundea.role=runtime-router",
-			"-v", routerDir + ":/etc/caddy:ro", "-v", dataDir + ":/data", "-v", configDir + ":/config",
+			"-v", routerDir + ":/etc/caddy:ro",
 		},
 		"run", "--config", "/etc/caddy/"+configName, "--adapter", "caddyfile",
 	)
