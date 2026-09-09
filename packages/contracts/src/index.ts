@@ -42,6 +42,7 @@ export type BrokeredSourceSpec = {
 export type DeployCommand = {
   type: "deploy";
   deploymentId: string;
+  previousDeploymentId?: string;
   serviceName: string;
   source: DirectGitSourceSpec | BrokeredSourceSpec;
   runtime: RuntimeSpec;
@@ -50,6 +51,7 @@ export type DeployCommand = {
 export type RollbackCommand = {
   type: "rollback";
   deploymentId: string;
+  previousDeploymentId?: string;
   targetDeploymentId: string;
   expectedImageId: string;
   serviceName: string;
