@@ -8,9 +8,48 @@ set -euo pipefail
 if [[ ${EUID} -ne 0 ]]; then echo "run as root" >&2; exit 1; fi
 RUNDEA_CONTROL_PLANE_URL="${RUNDEA_CONTROL_PLANE_URL%/}"
 [[ "$RUNDEA_CONTROL_PLANE_URL" == https://* ]] || { echo "Installed Rundea nodes require an https:// control plane URL" >&2; exit 1; }
-for command in docker git curl sha256sum systemctl head od tr; do
+for command in docker git curl sha256sum systemctl head od tr df awk uname install mktemp seq sleep; do
   command -v "$command" >/dev/null || { echo "$command must be installed first" >&2; exit 1; }
 done
+
+case "$(uname -m)" in
+  x86_64|amd64) rundea_arch="amd64" ;;
+  aarch64|arm64) rundea_arch="arm64" ;;
+  *) echo "Unsupported architecture: $(uname -m). Rundea currently publishes linux/amd64 and linux/arm64 Agent binaries." >&2; exit 1 ;;
+esac
+
+[[ -d /run/systemd/system ]] || { echo "Rundea Agent requires a systemd-based Linux host" >&2; exit 1; }
+docker info >/dev/null 2>&1 || { echo "Docker daemon is not available to root" >&2; exit 1; }
+
+min_free_mb="${RUNDEA_MIN_FREE_DISK_MB:-2048}"
+[[ "$min_free_mb" =~ ^[0-9]+$ ]] && (( min_free_mb >= 512 )) || {
+  echo "RUNDEA_MIN_FREE_DISK_MB must be an integer of at least 512" >&2
+  exit 1
+}
+free_mb="$(df -Pm / | awk 'NR==2 {print $4}')"
+[[ "$free_mb" =~ ^[0-9]+$ ]] || { echo "Could not determine free disk space" >&2; exit 1; }
+(( free_mb >= min_free_mb )) || {
+  echo "Insufficient free disk: ${free_mb} MB available; Rundea requires at least ${min_free_mb} MB before installation" >&2
+  exit 1
+}
+
+# Prove outbound HTTPS/TLS connectivity to the exact Control Plane before the
+# one-time credential is ever consumed. This catches DNS, firewall, proxy and
+# certificate problems while the installation is still safely retryable.
+curl --fail --silent --show-error \
+  --proto '=https' --tlsv1.2 --max-redirs 0 \
+  --connect-timeout 10 --max-time 15 \
+  "${RUNDEA_CONTROL_PLANE_URL}/health" >/dev/null || {
+    echo "Cannot reach Rundea Control Plane health endpoint over HTTPS" >&2
+    exit 1
+  }
+
+if command -v ss >/dev/null 2>&1; then
+  busy_ingress="$(ss -H -ltn 2>/dev/null | awk '$4 ~ /:(80|443)$/ {print $4}' | tr '\n' ' ')"
+  if [[ -n "$busy_ingress" ]]; then
+    echo "warning: ports 80/443 already have listeners (${busy_ingress}); Rundea public domain ingress may require resolving that conflict" >&2
+  fi
+fi
 
 if [[ -n "${RUNDEA_AGENT_URL:-}" || -n "${RUNDEA_AGENT_SHA256:-}" ]]; then
   [[ -n "${RUNDEA_AGENT_URL:-}" && -n "${RUNDEA_AGENT_SHA256:-}" ]] || {
@@ -21,20 +60,15 @@ if [[ -n "${RUNDEA_AGENT_URL:-}" || -n "${RUNDEA_AGENT_SHA256:-}" ]]; then
   [[ "$RUNDEA_AGENT_SHA256" =~ ^[a-fA-F0-9]{64}$ ]] || { echo "RUNDEA_AGENT_SHA256 must be a 64-character hex SHA-256" >&2; exit 1; }
 fi
 
-case "$(uname -m)" in
-  x86_64|amd64) rundea_arch="amd64" ;;
-  aarch64|arm64) rundea_arch="arm64" ;;
-  *) echo "Unsupported architecture: $(uname -m). Rundea currently publishes linux/amd64 and linux/arm64 Agent binaries." >&2; exit 1 ;;
-esac
-
 install -d -m 0700 /etc/rundea /var/lib/rundea /var/lib/rundea/deployments
 
 tmp_agent="$(mktemp /tmp/rundea-agent.XXXXXX)"
 tmp_bootstrap_config="$(mktemp /tmp/rundea-bootstrap-curl.XXXXXX)"
 tmp_exchange_config="$(mktemp /tmp/rundea-exchange-curl.XXXXXX)"
-cleanup() { rm -f "$tmp_agent" "$tmp_bootstrap_config" "$tmp_exchange_config"; }
+tmp_self_config="$(mktemp /tmp/rundea-self-curl.XXXXXX)"
+cleanup() { rm -f "$tmp_agent" "$tmp_bootstrap_config" "$tmp_exchange_config" "$tmp_self_config"; }
 trap cleanup EXIT
-chmod 0600 "$tmp_bootstrap_config" "$tmp_exchange_config"
+chmod 0600 "$tmp_bootstrap_config" "$tmp_exchange_config" "$tmp_self_config"
 
 # A fresh node token is bootstrap-only. It may fetch the pinned Agent release,
 # but it cannot authenticate the Agent WebSocket. Keep it in a private curl
@@ -121,6 +155,37 @@ curl --config "$tmp_exchange_config" \
 
 unset RUNDEA_NODE_TOKEN
 RUNDEA_NODE_TOKEN="$agent_token"
+
+cat >"$tmp_self_config" <<EOF
+silent
+show-error
+fail
+header = "Authorization: Bearer ${agent_token}"
+EOF
+
 systemctl daemon-reload
 systemctl enable --now rundea-agent
+
+# Success is server-authoritative. Do not tell the user the node is installed
+# merely because systemd started a process; wait until the authenticated Agent
+# WebSocket has made this exact node ONLINE in the Control Plane.
+self_status=""
+for _attempt in $(seq 1 30); do
+  self_status="$(curl --config "$tmp_self_config" \
+    --proto '=https' --tlsv1.2 --max-redirs 0 \
+    --connect-timeout 5 --max-time 10 \
+    "${RUNDEA_CONTROL_PLANE_URL}/v0/nodes/${RUNDEA_NODE_ID}/self/status" 2>/dev/null || true)"
+  self_status="$(printf '%s' "$self_status" | tr -d '[:space:]')"
+  if [[ "$self_status" == "ONLINE" ]]; then
+    echo "Rundea node ${RUNDEA_NODE_ID} is ONLINE (${rundea_arch}, ${free_mb} MB free disk)."
+    exit 0
+  fi
+  sleep 1
+done
+
 systemctl --no-pager --full status rundea-agent || true
+if command -v journalctl >/dev/null 2>&1; then
+  journalctl -u rundea-agent --no-pager -n 50 || true
+fi
+echo "Rundea Agent was installed but node ${RUNDEA_NODE_ID} did not become ONLINE within 30 seconds. Permanent credentials are preserved in /etc/rundea/agent.env; fix connectivity and restart rundea-agent." >&2
+exit 1
