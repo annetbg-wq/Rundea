@@ -104,6 +104,7 @@ export type AgentEvent =
   | { type: "status"; deploymentId: string; status: DeploymentStatus; message?: string; containerId?: string }
   | { type: "artifact"; deploymentId: string; sourceCommitSha: string; imageId: string; healthcheckPath: string }
   | { type: "log"; deploymentId: string; stream: "build" | "runtime" | "system"; message: string; at: string }
+  | { type: "runtimeRecovered"; deploymentId: string; containerId: string; at: string }
   | {
       type: "metric";
       deploymentId: string;
