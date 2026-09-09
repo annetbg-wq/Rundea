@@ -1,26 +1,27 @@
 ALTER TABLE nodes
-  ADD COLUMN IF NOT EXISTS credential_state text;
+  ADD COLUMN IF NOT EXISTS bootstrap_token_hash char(64),
+  ADD COLUMN IF NOT EXISTS bootstrap_expires_at timestamptz;
 
-UPDATE nodes
-SET credential_state='ACTIVE'
-WHERE credential_state IS NULL;
-
-ALTER TABLE nodes
-  ALTER COLUMN credential_state SET DEFAULT 'ACTIVE';
-
-ALTER TABLE nodes
-  ALTER COLUMN credential_state SET NOT NULL;
-
-DO $$
+-- Existing nodes already hold active Agent credentials in token_hash. New node
+-- creation continues to use the existing INSERT contract, but this trigger
+-- moves the returned token into a bootstrap-only slot and replaces token_hash
+-- with an impossible placeholder until the one-time exchange succeeds.
+CREATE OR REPLACE FUNCTION rundea_initialize_node_bootstrap_credential()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
 BEGIN
-  IF NOT EXISTS (
-    SELECT 1
-    FROM pg_constraint
-    WHERE conname='nodes_credential_state_check'
-      AND conrelid='nodes'::regclass
-  ) THEN
-    ALTER TABLE nodes
-      ADD CONSTRAINT nodes_credential_state_check
-      CHECK (credential_state IN ('BOOTSTRAP','ACTIVE'));
+  IF NEW.bootstrap_token_hash IS NULL THEN
+    NEW.bootstrap_token_hash := NEW.token_hash;
+    NEW.bootstrap_expires_at := now() + interval '30 minutes';
+    NEW.token_hash := repeat('0', 64);
   END IF;
-END $$;
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS rundea_nodes_bootstrap_credential ON nodes;
+CREATE TRIGGER rundea_nodes_bootstrap_credential
+BEFORE INSERT ON nodes
+FOR EACH ROW
+EXECUTE FUNCTION rundea_initialize_node_bootstrap_credential();
