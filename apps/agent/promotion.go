@@ -257,6 +257,7 @@ func recoverInterruptedPromotions(ctx context.Context, workDir string, w *writer
 				}
 			}
 			w.log(marker.NewDeploymentID, "system", "recovered previous revision after interrupted promotion")
+			_ = w.status(marker.NewDeploymentID, "FAILED", "previous READY revision restored after interrupted promotion", "")
 			go streamRuntimeLogs(context.Background(), w, marker.PreviousDeploymentID, marker.ContainerName)
 		} else if current.Exists {
 			if !current.Managed || current.Candidate || current.DeploymentID != marker.NewDeploymentID {
