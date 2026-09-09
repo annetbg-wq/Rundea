@@ -99,6 +99,7 @@ jobs:
         env:
           RUNDEA_ACCEPTANCE_API_URL: http://127.0.0.1:4000
           RUNDEA_CONTROL_TOKEN: acceptance-control-token
+          RUNDEA_AGENT_BINARY: /tmp/rundea-agent
         run: node infra/acceptance/node-bootstrap-e2e.mjs
       - name: Run Control Plane → Agent → Docker acceptance
         env:
