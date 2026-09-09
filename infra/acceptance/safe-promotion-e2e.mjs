@@ -2,6 +2,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { activateNodeCredential } from "./node-credential.mjs";
 
 const api = process.env.RUNDEA_ACCEPTANCE_API_URL ?? "http://127.0.0.1:4000";
 const controlToken = process.env.RUNDEA_CONTROL_TOKEN;
@@ -152,6 +153,7 @@ try {
     body: JSON.stringify({ name: `safe-promotion-${process.pid}` }),
   });
   nodeId = node.id;
+  const nodeToken = await activateNodeCredential(api, node.id, node.token);
 
   agent = spawn(agentBinary, [], {
     stdio: ["ignore", "inherit", "inherit"],
@@ -159,7 +161,7 @@ try {
       ...process.env,
       RUNDEA_CONTROL_PLANE_URL: api,
       RUNDEA_NODE_ID: node.id,
-      RUNDEA_NODE_TOKEN: node.token,
+      RUNDEA_NODE_TOKEN: nodeToken,
       RUNDEA_WORK_DIR: workDir,
       RUNDEA_METRICS_INTERVAL: "2s",
     },
@@ -203,6 +205,7 @@ try {
     healthyDeploymentId,
     failedDeploymentId,
     verified: [
+      "bootstrap-to-permanent-node-credential",
       "stable-port-owned-by-runtime-router",
       "backend-runs-on-dynamic-loopback-port",
       "previous-route-serves-during-bad-healthcheck",
