@@ -394,5 +394,9 @@ try {
     spawnSync("docker", ["rm", "-f", revisionName(id)], { stdio: "ignore" });
   }
   spawnSync("docker", ["rm", "-f", "rundea-runtime-router"], { stdio: "ignore" });
-  await rm(workDir, { recursive: true, force: true });
+  try {
+    await rm(workDir, { recursive: true, force: true });
+  } catch (error) {
+    console.warn(`acceptance workdir cleanup deferred: ${error instanceof Error ? error.message : String(error)}`);
+  }
 }
