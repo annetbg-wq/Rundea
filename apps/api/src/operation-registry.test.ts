@@ -11,6 +11,14 @@ test("runtime metrics are a read-only operation", () => {
   assert.equal(definition.verification, "none");
 });
 
+test("node qualification history is a read-only node operation", () => {
+  const definition = getOperationDefinition("node.qualifications.read");
+  assert.equal(definition.riskClass, "READ_ONLY");
+  assert.equal(definition.resource, "node");
+  assert.equal(definition.mutation, false);
+  assert.equal(definition.approval, "none");
+});
+
 test("runtime operation registry classifies restart as safe write", () => {
   const definition = getOperationDefinition("deployment.restart");
   assert.equal(definition.name, "deployment.restart");

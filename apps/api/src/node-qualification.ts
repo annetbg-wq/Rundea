@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { Pool, PoolClient } from "pg";
 import type { AgentCommand, AgentEvent, NodeProbeResult } from "@rundea/contracts";
+import { executeNodeQualificationsReadOperation, NodeQualificationOperationError } from "./node-qualification-operations";
 
 type ControlPreHandler = (request: FastifyRequest, reply: FastifyReply) => Promise<void>;
 export type NodeCommandSocket = { send(payload: string): void };
@@ -83,24 +84,14 @@ export function registerNodeQualificationRoutes(
     "/v0/nodes/:id/qualifications",
     { preHandler: requireControl },
     async (request, reply) => {
-      if (!validNodeId(request.params.id)) return reply.code(400).send({ error: "invalid node id" });
-      const node = await pool.query("SELECT 1 FROM nodes WHERE id=$1", [request.params.id]);
-      if (node.rowCount !== 1) return reply.code(404).send({ error: "node not found" });
-      const result = await pool.query(
-        `SELECT q.id,q.node_id,q.profile,q.status,q.failure_reason,q.started_at,q.completed_at,q.created_at,
-                COALESCE(json_agg(json_build_object(
-                  'name',p.name,'host',p.host,'port',p.port,'ok',p.ok,
-                  'latencyMs',p.latency_ms,'error',p.error,'checkedAt',p.checked_at
-                ) ORDER BY p.name) FILTER (WHERE p.name IS NOT NULL),'[]'::json) AS probes
-           FROM node_qualifications q
-           LEFT JOIN node_probe_results p ON p.qualification_id=q.id
-          WHERE q.node_id=$1
-          GROUP BY q.id
-          ORDER BY q.created_at DESC
-          LIMIT 20`,
-        [request.params.id],
-      );
-      return { qualifications: result.rows };
+      try {
+        return await executeNodeQualificationsReadOperation(pool, request.params.id);
+      } catch (error) {
+        if (error instanceof NodeQualificationOperationError) {
+          return reply.code(error.statusCode).send({ error: error.message });
+        }
+        throw error;
+      }
     },
   );
 }
