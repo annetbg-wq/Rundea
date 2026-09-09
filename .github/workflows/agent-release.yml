@@ -1,0 +1,70 @@
+name: agent-release
+
+on:
+  push:
+    tags:
+      - "agent-v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25.x"
+          cache-dependency-path: apps/agent/go.sum
+      - name: Validate release tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "${GITHUB_REF_NAME}" =~ ^agent-v[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9.-]+)?$ ]] || {
+            echo "Agent releases require an agent-vX.Y.Z style tag" >&2
+            exit 1
+          }
+          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            echo "Release ${GITHUB_REF_NAME} already exists; immutable Agent releases are never overwritten" >&2
+            exit 1
+          fi
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - name: Build static Linux Agent binaries
+        working-directory: apps/agent
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ../../dist/agent
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags='-s -w' -o ../../dist/agent/rundea-agent-linux-amd64 .
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags='-s -w' -o ../../dist/agent/rundea-agent-linux-arm64 .
+      - name: Generate and verify SHA256SUMS
+        working-directory: dist/agent
+        shell: bash
+        run: |
+          set -euo pipefail
+          sha256sum rundea-agent-linux-amd64 rundea-agent-linux-arm64 > SHA256SUMS
+          sha256sum --check SHA256SUMS
+      - name: Upload audit bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: rundea-agent-${{ github.ref_name }}
+          path: |
+            dist/agent/rundea-agent-linux-amd64
+            dist/agent/rundea-agent-linux-arm64
+            dist/agent/SHA256SUMS
+          if-no-files-found: error
+      - name: Publish immutable private GitHub Release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release create "${GITHUB_REF_NAME}" \
+            dist/agent/rundea-agent-linux-amd64 \
+            dist/agent/rundea-agent-linux-arm64 \
+            dist/agent/SHA256SUMS \
+            --verify-tag \
+            --title "Rundea Agent ${GITHUB_REF_NAME}" \
+            --notes "Static Linux Agent binaries for Rundea nodes. Download through the authenticated Rundea Control Plane bootstrap path; verify against SHA256SUMS."
+        env:
+          GH_TOKEN: ${{ github.token }}
