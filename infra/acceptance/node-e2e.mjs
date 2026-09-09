@@ -14,6 +14,7 @@ const expectedFixtureSha = process.env.RUNDEA_ACCEPTANCE_FIXTURE_SHA ?? "039c347
 const hostPort = Number(process.env.RUNDEA_ACCEPTANCE_HOST_PORT ?? "18081");
 const terminal = new Set(["READY", "FAILED", "CANCELLED", "ROLLED_BACK"]);
 const imageIdPattern = /^sha256:[0-9a-f]{64}$/;
+const markerHeader = "x-rundea-deployment";
 
 if (!controlToken) throw new Error("RUNDEA_CONTROL_TOKEN is required");
 if (!agentBinary) throw new Error("RUNDEA_AGENT_BINARY is required");
@@ -23,6 +24,7 @@ if (!Number.isInteger(hostPort) || hostPort < 1024 || hostPort > 65535) throw ne
 const headers = { authorization: `Bearer ${controlToken}` };
 const jsonHeaders = { ...headers, "content-type": "application/json" };
 const serviceName = `acceptance-${Date.now().toString(36)}`;
+const containerBase = `rundea-${serviceName}`;
 const workDir = await mkdtemp(join(tmpdir(), "rundea-acceptance-"));
 let agent;
 const deploymentIds = [];
@@ -113,9 +115,7 @@ async function createBrokeredDeployment() {
       healthcheckPath: "/",
     }),
   });
-  if (body.sourceDelivery !== "BROKER") {
-    throw new Error(`brokered deployment was not accepted as BROKER: ${JSON.stringify(body)}`);
-  }
+  if (body.sourceDelivery !== "BROKER") throw new Error(`brokered deployment was not accepted as BROKER: ${JSON.stringify(body)}`);
   deploymentIds.push(body.id);
   return body.id;
 }
@@ -200,27 +200,66 @@ async function createDeploymentFromPush() {
 }
 
 function assertArtifact(row, label) {
-  if (row.source_commit_sha !== expectedFixtureSha) {
-    throw new Error(`${label} resolved unexpected source SHA ${row.source_commit_sha}; expected ${expectedFixtureSha}`);
-  }
+  if (row.source_commit_sha !== expectedFixtureSha) throw new Error(`${label} resolved unexpected source SHA ${row.source_commit_sha}; expected ${expectedFixtureSha}`);
   if (!imageIdPattern.test(row.image_id ?? "")) throw new Error(`${label} has invalid image identity ${row.image_id}`);
   if (!row.environment_snapshot_at) throw new Error(`${label} has no immutable environment snapshot`);
   if (row.healthcheck_path !== "/") throw new Error(`${label} resolved unexpected healthcheck ${row.healthcheck_path}`);
 }
 
-async function assertService(label) {
+async function readStableService() {
   const response = await fetch(`http://127.0.0.1:${hostPort}/`);
   const body = await response.text();
-  if (!response.ok || !body.includes("Hello from Render!")) {
-    throw new Error(`${label} service check failed: ${response.status} ${body.slice(0, 160)}`);
+  return { status: response.status, ok: response.ok, body, marker: response.headers.get(markerHeader) };
+}
+
+async function assertService(label, expectedDeploymentId) {
+  const result = await readStableService();
+  if (!result.ok || !result.body.includes("Hello from Render!") || (expectedDeploymentId && result.marker !== expectedDeploymentId)) {
+    throw new Error(`${label} service check failed: status=${result.status} marker=${result.marker} body=${result.body.slice(0, 160)}`);
+  }
+}
+
+function startTrafficProbe() {
+  let running = true;
+  const failures = [];
+  const markers = new Set();
+  let requests = 0;
+  const promise = (async () => {
+    while (running) {
+      try {
+        const result = await readStableService();
+        requests += 1;
+        if (!result.ok || !result.body.includes("Hello from Render!") || !result.marker) {
+          failures.push({ status: result.status, marker: result.marker, body: result.body.slice(0, 100) });
+        } else {
+          markers.add(result.marker);
+        }
+      } catch (error) {
+        failures.push({ error: error instanceof Error ? error.message : String(error) });
+      }
+      await sleep(40);
+    }
+  })();
+  return {
+    async stop() {
+      running = false;
+      await promise;
+      return { requests, failures, markers };
+    },
+  };
+}
+
+function assertTrafficProbe(label, result, expectedMarkers) {
+  if (result.requests < 10) throw new Error(`${label} did not issue enough continuous requests: ${result.requests}`);
+  if (result.failures.length > 0) throw new Error(`${label} observed request failures: ${JSON.stringify(result.failures.slice(0, 10))}`);
+  for (const marker of expectedMarkers) {
+    if (!result.markers.has(marker)) throw new Error(`${label} never observed deployment marker ${marker}; saw ${JSON.stringify([...result.markers])}`);
   }
 }
 
 async function assertBrokeredSource(id) {
   const row = await deployment(id);
-  if (row?.source_delivery !== "BROKER") {
-    throw new Error(`deployment ${id} did not persist BROKER source delivery`);
-  }
+  if (row?.source_delivery !== "BROKER") throw new Error(`deployment ${id} did not persist BROKER source delivery`);
   const events = await deploymentEvents(id);
   if (!events.some((event) => event.kind === "LOG" && event.stream === "system" && event.message?.includes("source delivered through Rundea broker"))) {
     throw new Error("brokered deployment did not prove Agent bundle delivery path");
@@ -243,6 +282,10 @@ async function rollback(targetId, label) {
   const created = await request(`/v0/deployments/${targetId}/rollback`, { method: "POST", headers });
   deploymentIds.push(created.id);
   return await waitDeployment(created.id, label);
+}
+
+function revisionName(deploymentId) {
+  return `${containerBase}-rev-${deploymentId.replaceAll("-", "").toLowerCase().slice(0, 12)}`;
 }
 
 let nodeId;
@@ -278,29 +321,37 @@ try {
   const firstId = await createDeploymentFromPush();
   const first = await waitDeployment(firstId, "GitHub push deployment");
   assertArtifact(first, "GitHub push deployment");
-  await assertService("GitHub push deployment");
+  await assertService("GitHub push deployment", firstId);
 
   await restart(firstId);
-  await assertService("restart");
+  await assertService("restart", firstId);
 
+  const deployTraffic = startTrafficProbe();
+  await sleep(400);
   const secondId = await createBrokeredDeployment();
   const second = await waitDeployment(secondId, "brokered source deployment");
+  await sleep(500);
+  const deployTrafficResult = await deployTraffic.stop();
+  assertTrafficProbe("zero-downtime deployment switch", deployTrafficResult, [firstId, secondId]);
   assertArtifact(second, "brokered source deployment");
   await assertBrokeredSource(secondId);
-  await assertService("brokered source deployment");
+  await assertService("brokered source deployment", secondId);
 
+  const rollbackTraffic = startTrafficProbe();
+  await sleep(400);
   const rollbackOne = await rollback(firstId, "rollback to first revision");
+  await sleep(500);
+  const rollbackTrafficResult = await rollbackTraffic.stop();
+  assertTrafficProbe("zero-downtime rollback switch", rollbackTrafficResult, [secondId, rollbackOne.id]);
   assertArtifact(rollbackOne, "rollback to first revision");
-  await assertService("rollback to first revision");
+  await assertService("rollback to first revision", rollbackOne.id);
 
   const secondAfterRollback = await deployment(secondId);
-  if (secondAfterRollback?.status !== "ROLLED_BACK") {
-    throw new Error(`second deployment should be ROLLED_BACK, got ${secondAfterRollback?.status}`);
-  }
+  if (secondAfterRollback?.status !== "ROLLED_BACK") throw new Error(`second deployment should be ROLLED_BACK, got ${secondAfterRollback?.status}`);
 
   const rollbackTwo = await rollback(secondId, "rollback chain to second revision");
   assertArtifact(rollbackTwo, "rollback chain to second revision");
-  await assertService("rollback chain");
+  await assertService("rollback chain", rollbackTwo.id);
 
   console.log(JSON.stringify({
     ok: true,
@@ -308,6 +359,12 @@ try {
     serviceName,
     fixtureSha: expectedFixtureSha,
     deployments: deploymentIds,
+    zeroDowntime: {
+      deploymentRequests: deployTrafficResult.requests,
+      rollbackRequests: rollbackTrafficResult.requests,
+      deploymentMarkers: [...deployTrafficResult.markers],
+      rollbackMarkers: [...rollbackTrafficResult.markers],
+    },
     verified: [
       "agent-online",
       "signed-github-push",
@@ -319,8 +376,10 @@ try {
       "brokered-source-extraction",
       "node-auto-build",
       "artifact-identity",
-      "http-health",
+      "stable-runtime-router",
+      "zero-downtime-deploy-http-traffic",
       "restart",
+      "zero-downtime-rollback-http-traffic",
       "exact-rollback",
       "rollback-chain",
     ],
@@ -328,13 +387,12 @@ try {
 } finally {
   if (agent && agent.exitCode === null) {
     agent.kill("SIGTERM");
-    await Promise.race([
-      new Promise((resolve) => agent.once("exit", resolve)),
-      sleep(3000),
-    ]);
+    await Promise.race([new Promise((resolve) => agent.once("exit", resolve)), sleep(3000)]);
     if (agent.exitCode === null) agent.kill("SIGKILL");
   }
-  spawnSync("docker", ["rm", "-f", `rundea-${serviceName}`], { stdio: "ignore" });
-  spawnSync("docker", ["rm", "-f", `rundea-${serviceName}-rollback-backup`], { stdio: "ignore" });
+  for (const id of deploymentIds) {
+    spawnSync("docker", ["rm", "-f", revisionName(id)], { stdio: "ignore" });
+  }
+  spawnSync("docker", ["rm", "-f", "rundea-runtime-router"], { stdio: "ignore" });
   await rm(workDir, { recursive: true, force: true });
 }
