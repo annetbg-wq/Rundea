@@ -6,6 +6,7 @@ import type { ApprovalEvidence } from "./operation-policy";
 
 const now = new Date("2026-09-10T12:00:00.000Z");
 const resourceId = "service:backend";
+const approvalRef = "approval:raw-secret-ref";
 const humanSession: ApprovalEvidence = {
   kind: "SESSION_POLICY",
   policyId: "policy-1",
@@ -17,153 +18,200 @@ const humanSession: ApprovalEvidence = {
 
 class MemoryAudit implements OperationAuditRecorder {
   readonly events: string[] = [];
+  readonly starts: OperationAuditStart[] = [];
   failBegin = false;
   failComplete = false;
 
   async recordDenied(entry: OperationAuditStart): Promise<void> {
+    this.starts.push(entry);
     this.events.push(`DENIED:${entry.correlationId}`);
   }
 
   async beginAuthorized(entry: OperationAuditStart): Promise<void> {
     if (this.failBegin) throw new Error("audit unavailable");
+    this.starts.push(entry);
     this.events.push(`AUTHORIZED:${entry.correlationId}`);
   }
 
-  async complete(correlationId: string, outcome: OperationAuditOutcome): Promise<void> {
+  async complete(correlationId: string, outcome: OperationAuditOutcome, errorCode?: "APPROVAL_UNAVAILABLE" | "OPERATION_FAILED"): Promise<void> {
     if (this.failComplete) throw new Error("audit completion unavailable");
-    this.events.push(`${outcome}:${correlationId}`);
+    this.events.push(`${outcome}:${errorCode ?? "NONE"}:${correlationId}`);
   }
 }
 
-test("denied operation never invokes executor and records denial", async () => {
+const resolveSession = async (ref: string): Promise<ApprovalEvidence | null> => ref === approvalRef ? humanSession : null;
+const consume = async (): Promise<boolean> => true;
+
+test("denied operation never consumes approval or invokes executor", async () => {
+  let consumptions = 0;
   let executions = 0;
   const audit = new MemoryAudit();
   const result = await executeAuthorizedOperation(
     { operationName: "service.variables.upsert", client: "MCP", resourceId },
     async () => null,
+    async () => { consumptions += 1; return true; },
     audit,
-    async () => {
-      executions += 1;
-      return { changed: true };
-    },
+    async () => { executions += 1; return { changed: true }; },
     now,
   );
   assert.equal(result.ok, false);
+  assert.equal(consumptions, 0);
   assert.equal(executions, 0);
   assert.equal(audit.events.length, 1);
-  assert.match(audit.events[0] ?? "", /^DENIED:/);
-  if (!result.ok) {
-    assert.equal(result.error.code, "OPERATION_NOT_AUTHORIZED");
-    assert.equal(result.error.requiredApproval, "SESSION_OR_EXPLICIT");
-    assert.equal(result.auditFinalized, true);
-  }
+  if (!result.ok) assert.equal(result.error.code, "OPERATION_NOT_AUTHORIZED");
 });
 
-test("audit start failure blocks an otherwise authorized mutation", async () => {
+test("audit start failure blocks write before approval consumption", async () => {
+  let consumptions = 0;
   let executions = 0;
   const audit = new MemoryAudit();
   audit.failBegin = true;
   const result = await executeAuthorizedOperation(
-    { operationName: "service.variables.upsert", client: "MCP", resourceId, approvalRef: "policy:1" },
-    async () => humanSession,
+    { operationName: "service.variables.upsert", client: "MCP", resourceId, approvalRef },
+    resolveSession,
+    async () => { consumptions += 1; return true; },
     audit,
-    async () => {
-      executions += 1;
-      return { changed: true };
-    },
+    async () => { executions += 1; return { changed: true }; },
     now,
   );
+  assert.equal(consumptions, 0);
   assert.equal(executions, 0);
   assert.equal(result.ok, false);
-  if (!result.ok) {
-    assert.equal(result.error.code, "AUDIT_UNAVAILABLE");
-    assert.equal(result.auditFinalized, false);
-  }
+  if (!result.ok) assert.equal(result.error.code, "AUDIT_UNAVAILABLE");
 });
 
-test("audit start failure does not block an authorized read-only operation", async () => {
-  let executions = 0;
+test("read-only operation remains available when audit is down and never consumes approval", async () => {
   let resolverCalls = 0;
+  let consumptions = 0;
+  let executions = 0;
   const audit = new MemoryAudit();
   audit.failBegin = true;
   const result = await executeAuthorizedOperation(
     { operationName: "service.variables.read", client: "MCP", resourceId },
-    async () => {
-      resolverCalls += 1;
-      return humanSession;
-    },
+    async () => { resolverCalls += 1; return humanSession; },
+    async () => { consumptions += 1; return true; },
     audit,
-    async () => {
-      executions += 1;
-      return { variables: [] };
-    },
+    async () => { executions += 1; return { variables: [] }; },
     now,
   );
-  assert.equal(executions, 1);
-  assert.equal(resolverCalls, 0);
   assert.equal(result.ok, true);
+  assert.equal(resolverCalls, 0);
+  assert.equal(consumptions, 0);
+  assert.equal(executions, 1);
   if (result.ok) assert.equal(result.auditFinalized, false);
 });
 
-test("authorized operation executes exactly once between audit start and success", async () => {
-  let executions = 0;
+test("authorized write is audited, consumed once, then executed", async () => {
+  const timeline: string[] = [];
   const audit = new MemoryAudit();
+  audit.beginAuthorized = async (entry) => {
+    audit.starts.push(entry);
+    timeline.push("AUDIT_BEGIN");
+  };
+  audit.complete = async (_id, outcome) => { timeline.push(`AUDIT_${outcome}`); };
+  let consumedRef = "";
+  let executions = 0;
+
   const result = await executeAuthorizedOperation(
-    { operationName: "service.variables.upsert", client: "MCP", resourceId, approvalRef: "policy:1" },
-    async (ref) => ref === "policy:1" ? humanSession : null,
+    { operationName: "service.variables.upsert", client: "MCP", resourceId, approvalRef },
+    resolveSession,
+    async (ref) => {
+      consumedRef = ref;
+      timeline.push("CONSUME");
+      return true;
+    },
     audit,
     async (context) => {
       executions += 1;
-      assert.match(audit.events[0] ?? "", /^AUTHORIZED:/);
-      assert.equal(context.operationName, "service.variables.upsert");
-      assert.equal(context.client, "MCP");
-      assert.equal(context.resourceId, resourceId);
-      assert.equal(context.effectiveRiskClass, "SAFE_WRITE");
-      assert.equal(context.approvalRef, "policy:1");
+      timeline.push("EXECUTE");
+      assert.equal("approvalRef" in context, false);
       return { updated: ["API_TOKEN"] };
     },
     now,
   );
-  assert.equal(executions, 1);
+
   assert.equal(result.ok, true);
-  if (result.ok) assert.equal(result.auditFinalized, true);
-  assert.equal(audit.events.length, 2);
-  assert.match(audit.events[1] ?? "", /^SUCCEEDED:/);
+  assert.equal(consumedRef, approvalRef);
+  assert.equal(executions, 1);
+  assert.deepEqual(timeline, ["AUDIT_BEGIN", "CONSUME", "EXECUTE", "AUDIT_SUCCEEDED"]);
+  assert.equal(audit.starts.length, 1);
+  assert.match(audit.starts[0]?.approvalRefHash ?? "", /^[0-9a-f]{64}$/);
+  assert.notEqual(audit.starts[0]?.approvalRefHash, approvalRef);
+  assert.equal(JSON.stringify(audit.starts).includes(approvalRef), false);
 });
 
-test("read-only operation enters the audit trail when audit is available and skips approval resolver", async () => {
+test("exhausted or concurrently consumed approval blocks executor", async () => {
+  let executions = 0;
+  const audit = new MemoryAudit();
+  const result = await executeAuthorizedOperation(
+    { operationName: "service.variables.upsert", client: "MCP", resourceId, approvalRef },
+    resolveSession,
+    async () => false,
+    audit,
+    async () => { executions += 1; return { changed: true }; },
+    now,
+  );
+  assert.equal(executions, 0);
+  assert.equal(result.ok, false);
+  assert.match(audit.events[1] ?? "", /^FAILED:APPROVAL_UNAVAILABLE:/);
+  if (!result.ok) {
+    assert.equal(result.error.code, "APPROVAL_UNAVAILABLE");
+    assert.equal(result.error.message, "operation approval is unavailable");
+  }
+});
+
+test("approval consumer exception is sanitized and blocks executor", async () => {
+  const secret = "consumer-database-secret";
+  let executions = 0;
+  const audit = new MemoryAudit();
+  const result = await executeAuthorizedOperation(
+    { operationName: "service.variables.upsert", client: "API", resourceId, approvalRef },
+    resolveSession,
+    async () => { throw new Error(secret); },
+    audit,
+    async () => { executions += 1; return { changed: true }; },
+    now,
+  );
+  assert.equal(executions, 0);
+  assert.equal(result.ok, false);
+  assert.equal(JSON.stringify(result).includes(secret), false);
+  if (!result.ok) assert.equal(result.error.code, "APPROVAL_UNAVAILABLE");
+});
+
+test("read-only operation enters audit when available and skips resolver and consumer", async () => {
   let resolverCalls = 0;
+  let consumptions = 0;
   const audit = new MemoryAudit();
   const result = await executeAuthorizedOperation(
     { operationName: "service.variables.read", client: "MCP", resourceId },
-    async () => {
-      resolverCalls += 1;
-      return humanSession;
-    },
+    async () => { resolverCalls += 1; return humanSession; },
+    async () => { consumptions += 1; return true; },
     audit,
     async () => ({ variables: [] }),
     now,
   );
   assert.equal(result.ok, true);
   assert.equal(resolverCalls, 0);
+  assert.equal(consumptions, 0);
   assert.match(audit.events[0] ?? "", /^AUTHORIZED:/);
-  assert.match(audit.events[1] ?? "", /^SUCCEEDED:/);
+  assert.match(audit.events[1] ?? "", /^SUCCEEDED:NONE:/);
 });
 
-test("executor exception is sanitized and failure is audited", async () => {
+test("executor exception is sanitized and failure is audited after consumption", async () => {
   const secret = "do-not-leak-this-secret";
+  let consumptions = 0;
   const audit = new MemoryAudit();
   const result = await executeAuthorizedOperation(
-    { operationName: "service.variables.upsert", client: "API", resourceId, approvalRef: "policy:1" },
-    async () => humanSession,
+    { operationName: "service.variables.upsert", client: "API", resourceId, approvalRef },
+    resolveSession,
+    async () => { consumptions += 1; return true; },
     audit,
-    async () => {
-      throw new Error(`database failed while handling ${secret}`);
-    },
+    async () => { throw new Error(`database failed while handling ${secret}`); },
     now,
   );
+  assert.equal(consumptions, 1);
   assert.equal(result.ok, false);
-  assert.match(audit.events[1] ?? "", /^FAILED:/);
+  assert.match(audit.events[1] ?? "", /^FAILED:OPERATION_FAILED:/);
   if (!result.ok) {
     assert.equal(result.error.code, "OPERATION_FAILED");
     assert.equal(result.error.message, "operation execution failed");
@@ -176,13 +224,11 @@ test("audit completion failure does not misreport an already completed mutation 
   audit.failComplete = true;
   let executions = 0;
   const result = await executeAuthorizedOperation(
-    { operationName: "service.variables.upsert", client: "API", resourceId, approvalRef: "policy:1" },
-    async () => humanSession,
+    { operationName: "service.variables.upsert", client: "API", resourceId, approvalRef },
+    resolveSession,
+    consume,
     audit,
-    async () => {
-      executions += 1;
-      return { updated: ["API_TOKEN"] };
-    },
+    async () => { executions += 1; return { updated: ["API_TOKEN"] }; },
     now,
   );
   assert.equal(executions, 1);

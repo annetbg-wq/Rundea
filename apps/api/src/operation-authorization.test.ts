@@ -67,6 +67,19 @@ test("malformed and unknown approval references cannot authorize a write", async
   assert.match(unknown.decision.reason, /unknown or unavailable/);
 });
 
+test("approval resolver outage is a bounded denial, not an uncaught exception", async () => {
+  const secret = "approval-database-secret";
+  const result = await authorizeOperation(
+    { operationName: "service.variables.upsert", client: "MCP", resourceId, approvalRef: "approval:present" },
+    async () => { throw new Error(secret); },
+    now,
+  );
+  assert.equal(result.decision.allowed, false);
+  assert.equal(result.approvalRef, "approval:present");
+  assert.equal(result.decision.reason, "approval service is unavailable");
+  assert.equal(JSON.stringify(result).includes(secret), false);
+});
+
 test("only evidence returned by the server resolver reaches policy evaluation", async () => {
   const calls: string[] = [];
   const result = await authorizeOperation(

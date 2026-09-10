@@ -2,13 +2,15 @@ import type { Pool } from "pg";
 import type { OperationName, OperationRiskClass } from "./operation-registry";
 import type { OperationClient } from "./operation-policy";
 
+export type OperationAuditErrorCode = "OPERATION_NOT_AUTHORIZED" | "APPROVAL_UNAVAILABLE" | "OPERATION_FAILED";
+
 export type OperationAuditStart = Readonly<{
   correlationId: string;
   operationName: OperationName;
   client: OperationClient;
   resourceId: string;
   effectiveRiskClass: OperationRiskClass;
-  approvalRef: string | null;
+  approvalRefHash: string | null;
 }>;
 
 export type OperationAuditOutcome = "SUCCEEDED" | "FAILED";
@@ -16,7 +18,7 @@ export type OperationAuditOutcome = "SUCCEEDED" | "FAILED";
 export interface OperationAuditRecorder {
   recordDenied(entry: OperationAuditStart, errorCode: "OPERATION_NOT_AUTHORIZED"): Promise<void>;
   beginAuthorized(entry: OperationAuditStart): Promise<void>;
-  complete(correlationId: string, outcome: OperationAuditOutcome, errorCode?: "OPERATION_FAILED"): Promise<void>;
+  complete(correlationId: string, outcome: OperationAuditOutcome, errorCode?: Exclude<OperationAuditErrorCode, "OPERATION_NOT_AUTHORIZED">): Promise<void>;
 }
 
 export class PostgresOperationAuditRecorder implements OperationAuditRecorder {
@@ -25,7 +27,7 @@ export class PostgresOperationAuditRecorder implements OperationAuditRecorder {
   async recordDenied(entry: OperationAuditStart, errorCode: "OPERATION_NOT_AUTHORIZED"): Promise<void> {
     await this.pool.query(
       `INSERT INTO operation_audit(
-         correlation_id,operation_name,client,resource_id,effective_risk_class,approval_ref,state,error_code,completed_at
+         correlation_id,operation_name,client,resource_id,effective_risk_class,approval_ref_hash,state,error_code,completed_at
        ) VALUES($1,$2,$3,$4,$5,$6,'DENIED',$7,now())`,
       [
         entry.correlationId,
@@ -33,7 +35,7 @@ export class PostgresOperationAuditRecorder implements OperationAuditRecorder {
         entry.client,
         entry.resourceId,
         entry.effectiveRiskClass,
-        entry.approvalRef,
+        entry.approvalRefHash,
         errorCode,
       ],
     );
@@ -42,7 +44,7 @@ export class PostgresOperationAuditRecorder implements OperationAuditRecorder {
   async beginAuthorized(entry: OperationAuditStart): Promise<void> {
     await this.pool.query(
       `INSERT INTO operation_audit(
-         correlation_id,operation_name,client,resource_id,effective_risk_class,approval_ref,state
+         correlation_id,operation_name,client,resource_id,effective_risk_class,approval_ref_hash,state
        ) VALUES($1,$2,$3,$4,$5,$6,'AUTHORIZED')`,
       [
         entry.correlationId,
@@ -50,12 +52,16 @@ export class PostgresOperationAuditRecorder implements OperationAuditRecorder {
         entry.client,
         entry.resourceId,
         entry.effectiveRiskClass,
-        entry.approvalRef,
+        entry.approvalRefHash,
       ],
     );
   }
 
-  async complete(correlationId: string, outcome: OperationAuditOutcome, errorCode?: "OPERATION_FAILED"): Promise<void> {
+  async complete(
+    correlationId: string,
+    outcome: OperationAuditOutcome,
+    errorCode?: Exclude<OperationAuditErrorCode, "OPERATION_NOT_AUTHORIZED">,
+  ): Promise<void> {
     const result = await this.pool.query(
       `UPDATE operation_audit
           SET state=$2,error_code=$3,completed_at=now()
