@@ -79,11 +79,11 @@ async function json(response: Response): Promise<Record<string, any>> {
   return JSON.parse(text) as Record<string, any>;
 }
 
-test("MCP HTTP stays disabled when no MCP token is configured", () => {
+test("MCP HTTP stays disabled when neither static nor OAuth auth is configured", () => {
   assert.equal(resolveReadonlyMcpHttpConfig({}, controlToken), null);
 });
 
-test("MCP HTTP requires explicit host allowlist and a distinct strong token", () => {
+test("MCP HTTP requires explicit host allowlist and a distinct strong static token", () => {
   assert.throws(
     () => resolveReadonlyMcpHttpConfig({ RUNDEA_MCP_TOKEN: mcpToken }, controlToken),
     /RUNDEA_MCP_ALLOWED_HOSTS is required/,
@@ -98,6 +98,35 @@ test("MCP HTTP requires explicit host allowlist and a distinct strong token", ()
   );
 });
 
+test("MCP HTTP selects exactly one authentication mode", () => {
+  const staticConfig = resolveReadonlyMcpHttpConfig({
+    RUNDEA_MCP_TOKEN: mcpToken,
+    RUNDEA_MCP_ALLOWED_HOSTS: "mcp.rundea.test",
+  }, controlToken);
+  assert.ok(staticConfig);
+  assert.equal(staticConfig.authMode, "static");
+
+  const oauthConfig = resolveReadonlyMcpHttpConfig({
+    RUNDEA_MCP_ALLOWED_HOSTS: "mcp.rundea.test",
+    RUNDEA_MCP_OAUTH_ISSUER: "https://auth.rundea.test",
+    RUNDEA_MCP_OAUTH_RESOURCE: "https://mcp.rundea.test/mcp",
+    RUNDEA_MCP_OAUTH_JWKS_URI: "https://auth.rundea.test/.well-known/jwks.json",
+  }, controlToken);
+  assert.ok(oauthConfig);
+  assert.equal(oauthConfig.authMode, "oauth");
+
+  assert.throws(
+    () => resolveReadonlyMcpHttpConfig({
+      RUNDEA_MCP_TOKEN: mcpToken,
+      RUNDEA_MCP_ALLOWED_HOSTS: "mcp.rundea.test",
+      RUNDEA_MCP_OAUTH_ISSUER: "https://auth.rundea.test",
+      RUNDEA_MCP_OAUTH_RESOURCE: "https://mcp.rundea.test/mcp",
+      RUNDEA_MCP_OAUTH_JWKS_URI: "https://auth.rundea.test/.well-known/jwks.json",
+    }, controlToken),
+    /mutually exclusive/,
+  );
+});
+
 test("MCP host/origin configuration is normalized and origin defaults to host allowlist", () => {
   const config = resolveReadonlyMcpHttpConfig({
     RUNDEA_MCP_TOKEN: mcpToken,
@@ -108,7 +137,7 @@ test("MCP host/origin configuration is normalized and origin defaults to host al
   assert.deepEqual(config.allowedOrigins, ["mcp.rundea.test", "localhost"]);
 });
 
-test("MCP bearer authentication accepts only the configured token", () => {
+test("MCP bearer authentication accepts only the configured static token", () => {
   const expected = hashToken(mcpToken);
   assert.equal(isReadonlyMcpBearerAuthorized(`Bearer ${mcpToken}`, expected), true);
   assert.equal(isReadonlyMcpBearerAuthorized(`bearer ${mcpToken}`, expected), true);

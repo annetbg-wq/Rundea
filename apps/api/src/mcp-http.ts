@@ -1,4 +1,4 @@
-import type { FastifyInstance } from "fastify";
+import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { hostHeaderValidation, originValidation, toNodeHandler } from "@modelcontextprotocol/node";
 import { createMcpHandler, McpServer } from "@modelcontextprotocol/server";
 import { equalTokenHash, hashToken } from "@rundea/crypto";
@@ -9,6 +9,14 @@ import {
   executeReadonlyMcpTool,
   type McpReadonlyDependencies,
 } from "./mcp-readonly-catalog";
+import {
+  createMcpOAuthTokenVerifier,
+  McpOAuthAuthorizationError,
+  oauthBearerChallenge,
+  protectedResourceMetadata,
+  resolveMcpOAuthConfig,
+  type McpOAuthConfig,
+} from "./mcp-oauth";
 import type { OperationExecutionResult } from "./operation-execution";
 
 const maxMcpTokenLength = 512;
@@ -17,11 +25,21 @@ const maxMcpRequestBodyBytes = 256 * 1024;
 const maxToolResponseBytes = 512 * 1024;
 const maxAllowedHostnames = 64;
 
-export type ReadonlyMcpHttpConfig = Readonly<{
+export type StaticReadonlyMcpHttpConfig = Readonly<{
+  authMode: "static";
   token: string;
   allowedHosts: readonly string[];
   allowedOrigins: readonly string[];
 }>;
+
+export type OAuthReadonlyMcpHttpConfig = Readonly<{
+  authMode: "oauth";
+  oauth: McpOAuthConfig;
+  allowedHosts: readonly string[];
+  allowedOrigins: readonly string[];
+}>;
+
+export type ReadonlyMcpHttpConfig = StaticReadonlyMcpHttpConfig | OAuthReadonlyMcpHttpConfig;
 
 export type ReadonlyMcpHttpRegistration = Readonly<{
   close(): Promise<void>;
@@ -40,11 +58,19 @@ function parseAllowedHostname(value: string): string {
 }
 
 function parseHostnameList(raw: string | undefined, name: string): string[] {
-  if (!raw?.trim()) throw new Error(`${name} is required when RUNDEA_MCP_TOKEN is configured`);
+  if (!raw?.trim()) throw new Error(`${name} is required when MCP HTTP is configured`);
   const items = raw.split(",").map(parseAllowedHostname);
   if (items.length < 1 || items.length > maxAllowedHostnames) throw new Error(`${name} contains too many entries`);
   if (new Set(items).size !== items.length) throw new Error(`${name} contains duplicate hostnames`);
   return items;
+}
+
+function oauthEnvironmentPresent(env: Environment): boolean {
+  return [
+    env.RUNDEA_MCP_OAUTH_ISSUER,
+    env.RUNDEA_MCP_OAUTH_RESOURCE,
+    env.RUNDEA_MCP_OAUTH_JWKS_URI,
+  ].some((value) => Boolean(value?.trim()));
 }
 
 export function resolveReadonlyMcpHttpConfig(
@@ -52,18 +78,30 @@ export function resolveReadonlyMcpHttpConfig(
   controlToken: string,
 ): ReadonlyMcpHttpConfig | null {
   const token = env.RUNDEA_MCP_TOKEN?.trim();
-  if (!token) return null;
-  if (token.length < minMcpTokenLength || token.length > maxMcpTokenLength || /[\s\u0000-\u001f\u007f]/.test(token)) {
-    throw new Error(`RUNDEA_MCP_TOKEN must contain ${minMcpTokenLength}-${maxMcpTokenLength} non-whitespace safe characters`);
+  const oauthConfigured = oauthEnvironmentPresent(env);
+  if (!token && !oauthConfigured) return null;
+  if (token && oauthConfigured) {
+    throw new Error("RUNDEA_MCP_TOKEN and MCP OAuth configuration are mutually exclusive");
   }
-  if (equalTokenHash(hashToken(token), hashToken(controlToken))) {
-    throw new Error("RUNDEA_MCP_TOKEN must be distinct from RUNDEA_CONTROL_TOKEN");
-  }
+
   const allowedHosts = parseHostnameList(env.RUNDEA_MCP_ALLOWED_HOSTS, "RUNDEA_MCP_ALLOWED_HOSTS");
   const allowedOrigins = env.RUNDEA_MCP_ALLOWED_ORIGINS?.trim()
     ? parseHostnameList(env.RUNDEA_MCP_ALLOWED_ORIGINS, "RUNDEA_MCP_ALLOWED_ORIGINS")
     : [...allowedHosts];
-  return { token, allowedHosts, allowedOrigins };
+
+  if (token) {
+    if (token.length < minMcpTokenLength || token.length > maxMcpTokenLength || /[\s\u0000-\u001f\u007f]/.test(token)) {
+      throw new Error(`RUNDEA_MCP_TOKEN must contain ${minMcpTokenLength}-${maxMcpTokenLength} non-whitespace safe characters`);
+    }
+    if (equalTokenHash(hashToken(token), hashToken(controlToken))) {
+      throw new Error("RUNDEA_MCP_TOKEN must be distinct from RUNDEA_CONTROL_TOKEN");
+    }
+    return { authMode: "static", token, allowedHosts, allowedOrigins };
+  }
+
+  const oauth = resolveMcpOAuthConfig(env, allowedHosts);
+  if (!oauth) throw new Error("MCP OAuth configuration is incomplete");
+  return { authMode: "oauth", oauth, allowedHosts, allowedOrigins };
 }
 
 function bearer(header: string | undefined): string | null {
@@ -171,12 +209,47 @@ export function createReadonlyMcpHandler(dependencies: McpReadonlyDependencies) 
   });
 }
 
+async function authorizeMcpRequest(
+  request: FastifyRequest,
+  reply: FastifyReply,
+  config: ReadonlyMcpHttpConfig,
+  expectedStaticTokenHash: string | null,
+  oauthVerifier: ReturnType<typeof createMcpOAuthTokenVerifier> | null,
+): Promise<boolean> {
+  if (config.authMode === "static") {
+    if (!expectedStaticTokenHash || !isReadonlyMcpBearerAuthorized(request.headers.authorization, expectedStaticTokenHash)) {
+      reply.header("WWW-Authenticate", 'Bearer realm="rundea-mcp"');
+      await reply.code(401).send({ error: "unauthorized" });
+      return false;
+    }
+    return true;
+  }
+
+  const token = bearer(request.headers.authorization);
+  if (!token || !oauthVerifier) {
+    reply.header("WWW-Authenticate", oauthBearerChallenge(config.oauth));
+    await reply.code(401).send({ error: "unauthorized" });
+    return false;
+  }
+
+  try {
+    await oauthVerifier(token);
+    return true;
+  } catch (error) {
+    const reason = error instanceof McpOAuthAuthorizationError ? error.reason : "invalid_token";
+    reply.header("WWW-Authenticate", oauthBearerChallenge(config.oauth, reason));
+    await reply.code(reason === "insufficient_scope" ? 403 : 401).send({ error: reason });
+    return false;
+  }
+}
+
 export function registerReadonlyMcpHttp(
   app: FastifyInstance,
   pool: Pool,
   config: ReadonlyMcpHttpConfig,
 ): ReadonlyMcpHttpRegistration {
-  const expectedTokenHash = hashToken(config.token);
+  const expectedStaticTokenHash = config.authMode === "static" ? hashToken(config.token) : null;
+  const oauthVerifier = config.authMode === "oauth" ? createMcpOAuthTokenVerifier(config.oauth) : null;
   const dependencies = createPostgresReadonlyMcpDependencies(pool);
   const handler = createMcpHandler(() => createReadonlyMcpServer(dependencies), {
     onerror: (error) => app.log.error({ err: error }, "MCP protocol handler failed"),
@@ -187,15 +260,29 @@ export function registerReadonlyMcpHttp(
   const validateHost = hostHeaderValidation([...config.allowedHosts]);
   const validateOrigin = originValidation([...config.allowedOrigins]);
 
+  if (config.authMode === "oauth") {
+    app.get(config.oauth.resourceMetadataPath, async (request, reply) => {
+      if (!validateHost(request.raw, reply.raw)) {
+        reply.hijack();
+        return;
+      }
+      reply.header("Cache-Control", "public, max-age=300");
+      return reply.send(protectedResourceMetadata(config.oauth));
+    });
+  }
+
   app.all("/mcp", { bodyLimit: maxMcpRequestBodyBytes }, async (request, reply) => {
-    if (!isReadonlyMcpBearerAuthorized(request.headers.authorization, expectedTokenHash)) {
-      reply.header("WWW-Authenticate", 'Bearer realm="rundea-mcp"');
-      return reply.code(401).send({ error: "unauthorized" });
+    if (!validateHost(request.raw, reply.raw)) {
+      reply.hijack();
+      return;
     }
+    if (!validateOrigin(request.raw, reply.raw)) {
+      reply.hijack();
+      return;
+    }
+    if (!await authorizeMcpRequest(request, reply, config, expectedStaticTokenHash, oauthVerifier)) return;
 
     reply.hijack();
-    if (!validateHost(request.raw, reply.raw)) return;
-    if (!validateOrigin(request.raw, reply.raw)) return;
     await nodeHandler(request.raw, reply.raw, request.body);
   });
 
