@@ -66,6 +66,7 @@ for (const migration of [
   "007_source_broker.sql",
   "008_runtime_metrics.sql",
   "009_operation_audit.sql",
+  "010_operation_approvals.sql",
 ]) {
   const migrationUrl = new URL(`../migrations/${migration}`, import.meta.url);
   await pool.query(await readFile(migrationUrl, "utf8"));
