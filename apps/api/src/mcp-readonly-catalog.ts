@@ -1,4 +1,5 @@
 import type { Pool } from "pg";
+import type { OperationActor } from "./operation-actor";
 import { PostgresOperationAuditRecorder, type OperationAuditRecorder } from "./operation-audit";
 import { executeAuthorizedOperation, type OperationExecutionResult } from "./operation-execution";
 import { getOperationDefinition, type OperationName } from "./operation-registry";
@@ -68,6 +69,7 @@ export type McpReadonlyOperations = Readonly<{
 export type McpReadonlyDependencies = Readonly<{
   audit: OperationAuditRecorder;
   operations: McpReadonlyOperations;
+  actorProvider?: () => OperationActor | undefined;
 }>;
 
 function objectInput(value: unknown): Record<string, unknown> {
@@ -117,6 +119,8 @@ export async function executeReadonlyMcpTool(
   toolName: McpReadonlyToolName,
   rawInput: unknown,
 ): Promise<OperationExecutionResult<unknown>> {
+  const actor = dependencies.actorProvider?.();
+
   if (toolName === "rundea_deployment_metrics_read") {
     const input = metricsInput(rawInput);
     return executeAuthorizedOperation(
@@ -124,6 +128,7 @@ export async function executeReadonlyMcpTool(
         operationName: "deployment.metrics.read",
         client: "MCP",
         resourceId: `deployment:${input.deploymentId}`,
+        actor,
       },
       neverResolveApproval,
       neverConsumeApproval,
@@ -139,6 +144,7 @@ export async function executeReadonlyMcpTool(
         operationName: "node.qualifications.read",
         client: "MCP",
         resourceId: `node:${input.nodeId}`,
+        actor,
       },
       neverResolveApproval,
       neverConsumeApproval,
@@ -151,12 +157,16 @@ export async function executeReadonlyMcpTool(
   throw new McpReadonlyInputError(`unknown MCP tool: ${String(exhaustive)}`);
 }
 
-export function createPostgresReadonlyMcpDependencies(pool: Pool): McpReadonlyDependencies {
+export function createPostgresReadonlyMcpDependencies(
+  pool: Pool,
+  actorProvider?: () => OperationActor | undefined,
+): McpReadonlyDependencies {
   return {
     audit: new PostgresOperationAuditRecorder(pool),
     operations: {
       readDeploymentMetrics: async (input) => executeRuntimeMetricsReadOperation(pool, input),
       readNodeQualifications: async (nodeId) => executeNodeQualificationsReadOperation(pool, nodeId),
     },
+    actorProvider,
   };
 }

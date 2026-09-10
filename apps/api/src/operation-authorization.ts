@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import type { OperationActor } from "./operation-actor";
 import type { OperationName, OperationRiskClass } from "./operation-registry";
 import {
   evaluateOperationPolicy,
@@ -14,6 +15,7 @@ export type OperationAuthorizationRequest = Readonly<{
   operationName: OperationName;
   client: OperationClient;
   resourceId: string;
+  actor?: OperationActor;
   approvalRef?: ApprovalReference;
   contextualRiskClass?: OperationRiskClass;
 }>;
