@@ -3,7 +3,7 @@ export type OperationRiskClass = "READ_ONLY" | "SAFE_WRITE" | "SENSITIVE_WRITE" 
 export type OperationDefinition<Name extends string = string> = Readonly<{
   name: Name;
   riskClass: OperationRiskClass;
-  resource: "deployment" | "node";
+  resource: "deployment" | "node" | "service";
   mutation: boolean;
   verification: "none" | "runtime-health" | "deployment-ready";
   approval: "none" | "session-policy" | "explicit-or-policy";
@@ -25,6 +25,30 @@ export const operationRegistry = {
     mutation: false,
     verification: "none",
     approval: "none",
+  },
+  "service.variables.read": {
+    name: "service.variables.read",
+    riskClass: "READ_ONLY",
+    resource: "service",
+    mutation: false,
+    verification: "none",
+    approval: "none",
+  },
+  "service.variables.upsert": {
+    name: "service.variables.upsert",
+    riskClass: "SAFE_WRITE",
+    resource: "service",
+    mutation: true,
+    verification: "none",
+    approval: "session-policy",
+  },
+  "service.variable.delete": {
+    name: "service.variable.delete",
+    riskClass: "SENSITIVE_WRITE",
+    resource: "service",
+    mutation: true,
+    verification: "none",
+    approval: "explicit-or-policy",
   },
   "deployment.restart": {
     name: "deployment.restart",

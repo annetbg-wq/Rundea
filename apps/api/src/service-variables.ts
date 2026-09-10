@@ -13,9 +13,25 @@ export type ServiceVariableView = {
   value?: string;
 };
 
+export type ServiceVariableMutationView = {
+  key: string;
+  secret: boolean;
+};
+
+const serviceNamePattern = /^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/;
 const variableKey = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const maxVariables = 256;
 const maxValueBytes = 64 * 1024;
+
+function requireServiceName(value: string): string {
+  if (!serviceNamePattern.test(value)) throw new Error("invalid service name");
+  return value;
+}
+
+function requireVariableKey(value: string): string {
+  if (!variableKey.test(value)) throw new Error("invalid environment variable name");
+  return value;
+}
 
 export function validateVariables(inputs: ServiceVariableInput[]): void {
   if (inputs.length > maxVariables) throw new Error(`at most ${maxVariables} variables are allowed per write`);
@@ -33,8 +49,7 @@ export function validateVariables(inputs: ServiceVariableInput[]): void {
   }
 }
 
-export async function upsertServiceVariables(pool: Pool, masterKey: Buffer, serviceName: string, inputs: ServiceVariableInput[]): Promise<void> {
-  validateVariables(inputs);
+async function persistServiceVariables(pool: Pool, masterKey: Buffer, serviceName: string, inputs: ServiceVariableInput[]): Promise<void> {
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
@@ -71,7 +86,7 @@ function encryptedFromRow(row: Record<string, unknown>): EncryptedValue {
   };
 }
 
-export async function listServiceVariables(pool: Pool, masterKey: Buffer, serviceName: string): Promise<ServiceVariableView[]> {
+async function readServiceVariableViews(pool: Pool, masterKey: Buffer, serviceName: string): Promise<ServiceVariableView[]> {
   const result = await pool.query(
     `SELECT key,encrypted_version,iv,ciphertext,auth_tag,is_secret
        FROM service_variables WHERE service_name=$1 ORDER BY key ASC`,
@@ -82,6 +97,48 @@ export async function listServiceVariables(pool: Pool, masterKey: Buffer, servic
     secret: row.is_secret,
     ...(row.is_secret ? {} : { value: decryptValue(encryptedFromRow(row), masterKey) }),
   }));
+}
+
+export async function executeServiceVariablesReadOperation(
+  pool: Pool,
+  masterKey: Buffer,
+  serviceName: string,
+): Promise<{ variables: ServiceVariableView[] }> {
+  const normalizedServiceName = requireServiceName(serviceName);
+  return { variables: await readServiceVariableViews(pool, masterKey, normalizedServiceName) };
+}
+
+export async function executeServiceVariablesUpsertOperation(
+  pool: Pool,
+  masterKey: Buffer,
+  serviceName: string,
+  inputs: ServiceVariableInput[],
+): Promise<{ updated: ServiceVariableMutationView[] }> {
+  const normalizedServiceName = requireServiceName(serviceName);
+  validateVariables(inputs);
+  await persistServiceVariables(pool, masterKey, normalizedServiceName, inputs);
+  return {
+    updated: inputs.map((item) => ({ key: item.key, secret: item.secret ?? true })),
+  };
+}
+
+export async function executeServiceVariableDeleteOperation(
+  pool: Pool,
+  serviceName: string,
+  key: string,
+): Promise<{ deleted: boolean; key: string }> {
+  const normalizedServiceName = requireServiceName(serviceName);
+  const normalizedKey = requireVariableKey(key);
+  const result = await pool.query("DELETE FROM service_variables WHERE service_name=$1 AND key=$2", [normalizedServiceName, normalizedKey]);
+  return { deleted: (result.rowCount ?? 0) > 0, key: normalizedKey };
+}
+
+export async function upsertServiceVariables(pool: Pool, masterKey: Buffer, serviceName: string, inputs: ServiceVariableInput[]): Promise<void> {
+  await executeServiceVariablesUpsertOperation(pool, masterKey, serviceName, inputs);
+}
+
+export async function listServiceVariables(pool: Pool, masterKey: Buffer, serviceName: string): Promise<ServiceVariableView[]> {
+  return (await executeServiceVariablesReadOperation(pool, masterKey, serviceName)).variables;
 }
 
 export async function loadServiceEnvironment(pool: Pool, masterKey: Buffer, serviceName: string): Promise<Record<string, string>> {
@@ -136,7 +193,5 @@ export async function loadDeploymentEnvironment(
 }
 
 export async function deleteServiceVariable(pool: Pool, serviceName: string, key: string): Promise<boolean> {
-  if (!variableKey.test(key)) throw new Error("invalid environment variable name");
-  const result = await pool.query("DELETE FROM service_variables WHERE service_name=$1 AND key=$2", [serviceName, key]);
-  return (result.rowCount ?? 0) > 0;
+  return (await executeServiceVariableDeleteOperation(pool, serviceName, key)).deleted;
 }
