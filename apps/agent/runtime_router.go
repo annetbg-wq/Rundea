@@ -561,12 +561,14 @@ func recoverRuntimeRouter(cfg config, w *writer) error {
 			w.log(route.DeploymentID, "system", "runtime route recovered but backend identity could not be read: "+err.Error())
 			continue
 		}
-		_ = w.send(map[string]any{
+		if err := w.send(map[string]any{
 			"type": "runtimeRecovered",
 			"deploymentId": route.DeploymentID,
 			"containerId": containerID,
 			"at": time.Now().UTC().Format(time.RFC3339Nano),
-		})
+		}); err != nil {
+			return fmt.Errorf("publish recovered runtime %s: %w", route.DeploymentID, err)
+		}
 	}
 	return nil
 }
