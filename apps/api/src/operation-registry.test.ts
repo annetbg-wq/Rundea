@@ -19,6 +19,30 @@ test("node qualification history is a read-only node operation", () => {
   assert.equal(definition.approval, "none");
 });
 
+test("service variable metadata is read-only", () => {
+  const definition = getOperationDefinition("service.variables.read");
+  assert.equal(definition.riskClass, "READ_ONLY");
+  assert.equal(definition.resource, "service");
+  assert.equal(definition.mutation, false);
+  assert.equal(definition.approval, "none");
+});
+
+test("service variable upsert is a policy-controlled safe write", () => {
+  const definition = getOperationDefinition("service.variables.upsert");
+  assert.equal(definition.riskClass, "SAFE_WRITE");
+  assert.equal(definition.resource, "service");
+  assert.equal(definition.mutation, true);
+  assert.equal(definition.approval, "session-policy");
+});
+
+test("service variable deletion is a sensitive write", () => {
+  const definition = getOperationDefinition("service.variable.delete");
+  assert.equal(definition.riskClass, "SENSITIVE_WRITE");
+  assert.equal(definition.resource, "service");
+  assert.equal(definition.mutation, true);
+  assert.equal(definition.approval, "explicit-or-policy");
+});
+
 test("runtime operation registry classifies restart as safe write", () => {
   const definition = getOperationDefinition("deployment.restart");
   assert.equal(definition.name, "deployment.restart");
