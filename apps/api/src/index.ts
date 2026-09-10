@@ -9,6 +9,7 @@ import type { AgentCommand, AgentEvent, DeploymentStatus } from "@rundea/contrac
 import { deploymentStatuses } from "@rundea/contracts";
 import { createOpaqueToken, equalTokenHash, hashToken, parseMasterKey } from "@rundea/crypto";
 import { assertTransition } from "@rundea/deployer";
+import { registerReadonlyMcpHttp, resolveReadonlyMcpHttpConfig } from "./mcp-http";
 import {
   failRunningIngressForNode,
   recordIngressResult,
@@ -51,6 +52,7 @@ const masterKeyEncoded = process.env.RUNDEA_MASTER_KEY;
 if (!masterKeyEncoded) throw new Error("RUNDEA_MASTER_KEY is required");
 const controlTokenHash = hashToken(controlToken);
 const masterKey = parseMasterKey(masterKeyEncoded);
+const mcpHttpConfig = resolveReadonlyMcpHttpConfig(process.env, controlToken);
 
 const pool = new Pool({ connectionString: databaseUrl });
 const app = Fastify({ logger: true });
@@ -454,6 +456,7 @@ registerDomainRoutes(app, pool, sockets, requireControl);
 registerRuntimeControlRoutes(app, pool, sockets, requireControl, dispatchQueued);
 registerSourceBrokerRoutes(app, pool);
 registerRuntimeMetricRoutes(app, pool, requireControl);
+const mcpHttp = mcpHttpConfig ? registerReadonlyMcpHttp(app, pool, mcpHttpConfig) : null;
 
 app.put<{ Params: { serviceName: string }; Body: { variables?: ServiceVariableInput[] } }>(
   "/v0/services/:serviceName/variables",
@@ -713,6 +716,7 @@ const port = Number(process.env.PORT ?? 4000);
 await app.listen({ host: "0.0.0.0", port });
 
 async function shutdown(): Promise<void> {
+  await mcpHttp?.close();
   await app.close();
   await pool.end();
 }
