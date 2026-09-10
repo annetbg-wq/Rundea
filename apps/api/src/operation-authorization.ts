@@ -16,6 +16,7 @@ export type OperationAuthorizationRequest = Readonly<{
   client: OperationClient;
   resourceId: string;
   actor?: OperationActor;
+  resourceAccessGranted?: boolean;
   approvalRef?: ApprovalReference;
   contextualRiskClass?: OperationRiskClass;
 }>;
@@ -56,6 +57,9 @@ export async function authorizeOperation(
 
   if (!request.resourceId || request.resourceId.length > 256 || /[\r\n\u0000]/.test(request.resourceId)) {
     return deniedWithoutEvidence(request, correlationId, "invalid operation resource scope");
+  }
+  if (request.resourceAccessGranted === false) {
+    return deniedWithoutEvidence(request, correlationId, "authenticated actor is not authorized for operation resource");
   }
 
   const probe = evaluateOperationPolicy({

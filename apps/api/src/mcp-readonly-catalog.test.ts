@@ -47,6 +47,16 @@ function dependencies() {
   return { audit, calls, deps };
 }
 
+const oauthActor = {
+  authenticationMethod: "OAUTH" as const,
+  issuer: "https://auth.rundea.test",
+  subject: "user-42",
+  scopes: ["rundea:mcp:diagnostics:read"],
+};
+
+const deploymentId = "123e4567-e89b-42d3-a456-426614174000";
+const nodeId = "223e4567-e89b-42d3-a456-426614174000";
+
 test("initial MCP catalog exposes only two diagnostic read-only operations", () => {
   assert.deepEqual(
     readonlyMcpTools.map((tool) => tool.name),
@@ -62,48 +72,105 @@ test("initial MCP catalog exposes only two diagnostic read-only operations", () 
   assert.equal(exposedOperations.includes("service.variables.read"), false);
 });
 
-test("deployment metrics MCP tool goes through policy and audit before the typed operation", async () => {
+test("non-OAuth MCP path still goes through policy and audit before the typed operation", async () => {
   const { audit, calls, deps } = dependencies();
   const result = await executeReadonlyMcpTool(
     deps,
     "rundea_deployment_metrics_read",
-    { deploymentId: "123e4567-e89b-42d3-a456-426614174000", minutes: 30 },
+    { deploymentId, minutes: 30 },
   );
 
   assert.equal(result.ok, true);
-  assert.equal(calls.length, 1);
-  assert.deepEqual(calls[0], {
+  assert.deepEqual(calls, [{
     name: "deployment.metrics.read",
-    input: { deploymentId: "123e4567-e89b-42d3-a456-426614174000", minutes: 30 },
-  });
+    input: { deploymentId, minutes: 30 },
+  }]);
   assert.match(audit.events[0] ?? "", /^AUTHORIZED:deployment\.metrics\.read:deployment:/);
   assert.match(audit.events[1] ?? "", /^SUCCEEDED:/);
   assert.equal(audit.starts[0]?.actor, null);
 });
 
-test("authenticated MCP actor is transport context, not tool input, and reaches audit", async () => {
-  const { audit, deps } = dependencies();
-  const actor = {
-    authenticationMethod: "OAUTH" as const,
-    issuer: "https://auth.rundea.test",
-    subject: "user-42",
-    scopes: ["rundea:mcp:diagnostics:read"],
+test("OAuth actor with an exact resource grant reaches the typed operation and audit", async () => {
+  const { audit, calls, deps } = dependencies();
+  const accessRequests: unknown[] = [];
+  const actorDeps: McpReadonlyDependencies = {
+    ...deps,
+    actorProvider: () => oauthActor,
+    resourceAccess: async (request) => {
+      accessRequests.push(request);
+      return true;
+    },
   };
-  const actorDeps: McpReadonlyDependencies = { ...deps, actorProvider: () => actor };
 
   const result = await executeReadonlyMcpTool(
     actorDeps,
     "rundea_deployment_metrics_read",
-    { deploymentId: "123e4567-e89b-42d3-a456-426614174000" },
+    { deploymentId },
   );
 
   assert.equal(result.ok, true);
-  assert.deepEqual(audit.starts[0]?.actor, actor);
+  assert.equal(calls.length, 1);
+  assert.deepEqual(audit.starts[0]?.actor, oauthActor);
+  assert.deepEqual(accessRequests, [{
+    actor: oauthActor,
+    resourceKind: "DEPLOYMENT",
+    resourceId: deploymentId,
+    permission: "DIAGNOSTICS_READ",
+  }]);
 });
 
-test("node qualification MCP tool delegates to the existing typed operation", async () => {
+test("OAuth actor without a resource grant is denied and the typed operation is never called", async () => {
   const { audit, calls, deps } = dependencies();
-  const nodeId = "123e4567-e89b-42d3-a456-426614174000";
+  const actorDeps: McpReadonlyDependencies = {
+    ...deps,
+    actorProvider: () => oauthActor,
+    resourceAccess: async () => false,
+  };
+
+  const result = await executeReadonlyMcpTool(
+    actorDeps,
+    "rundea_node_qualifications_read",
+    { nodeId },
+  );
+
+  assert.equal(result.ok, false);
+  assert.equal(calls.length, 0);
+  assert.match(audit.events[0] ?? "", /^DENIED:node\.qualifications\.read:node:/);
+  assert.deepEqual(audit.starts[0]?.actor, oauthActor);
+  if (!result.ok) {
+    assert.equal(result.error.code, "OPERATION_NOT_AUTHORIZED");
+    assert.equal(result.error.message, "authenticated actor is not authorized for operation resource");
+  }
+});
+
+test("OAuth resource access fails closed when no resolver is wired", async () => {
+  const { calls, deps } = dependencies();
+  const result = await executeReadonlyMcpTool(
+    { ...deps, actorProvider: () => oauthActor },
+    "rundea_deployment_metrics_read",
+    { deploymentId },
+  );
+  assert.equal(result.ok, false);
+  assert.equal(calls.length, 0);
+});
+
+test("OAuth resource access fails closed when the grant resolver is unavailable", async () => {
+  const { calls, deps } = dependencies();
+  const result = await executeReadonlyMcpTool(
+    {
+      ...deps,
+      actorProvider: () => oauthActor,
+      resourceAccess: async () => { throw new Error("database unavailable"); },
+    },
+    "rundea_deployment_metrics_read",
+    { deploymentId },
+  );
+  assert.equal(result.ok, false);
+  assert.equal(calls.length, 0);
+});
+
+test("node qualification MCP tool delegates to the existing typed operation without OAuth actor", async () => {
+  const { audit, calls, deps } = dependencies();
   const result = await executeReadonlyMcpTool(
     deps,
     "rundea_node_qualifications_read",
@@ -121,10 +188,7 @@ test("MCP adapter rejects extra fields before touching an operation", async () =
     executeReadonlyMcpTool(
       deps,
       "rundea_deployment_metrics_read",
-      {
-        deploymentId: "123e4567-e89b-42d3-a456-426614174000",
-        shell: "cat /etc/passwd",
-      },
+      { deploymentId, shell: "unexpected" },
     ),
     McpReadonlyInputError,
   );
@@ -160,7 +224,7 @@ test("typed operation failures are sanitized by the common execution gateway", a
   const result = await executeReadonlyMcpTool(
     deps,
     "rundea_deployment_metrics_read",
-    { deploymentId: "123e4567-e89b-42d3-a456-426614174000" },
+    { deploymentId },
   );
   assert.equal(result.ok, false);
   assert.equal(JSON.stringify(result).includes(secret), false);

@@ -3,6 +3,11 @@ import type { OperationActor } from "./operation-actor";
 import { PostgresOperationAuditRecorder, type OperationAuditRecorder } from "./operation-audit";
 import { executeAuthorizedOperation, type OperationExecutionResult } from "./operation-execution";
 import { getOperationDefinition, type OperationName } from "./operation-registry";
+import {
+  createPostgresMcpResourceAccessResolver,
+  type McpResourceAccessResolver,
+  type McpResourceKind,
+} from "./mcp-resource-access";
 import { executeNodeQualificationsReadOperation } from "./node-qualification-operations";
 import { executeRuntimeMetricsReadOperation } from "./runtime-metric-operations";
 
@@ -70,6 +75,7 @@ export type McpReadonlyDependencies = Readonly<{
   audit: OperationAuditRecorder;
   operations: McpReadonlyOperations;
   actorProvider?: () => OperationActor | undefined;
+  resourceAccess?: McpResourceAccessResolver;
 }>;
 
 function objectInput(value: unknown): Record<string, unknown> {
@@ -114,6 +120,26 @@ function neverConsumeApproval(): Promise<boolean> {
   throw new Error("READ_ONLY MCP operation attempted to consume approval state");
 }
 
+async function canAccessResource(
+  dependencies: McpReadonlyDependencies,
+  actor: OperationActor | undefined,
+  resourceKind: McpResourceKind,
+  resourceId: string,
+): Promise<boolean> {
+  if (actor?.authenticationMethod !== "OAUTH") return true;
+  if (!dependencies.resourceAccess) return false;
+  try {
+    return await dependencies.resourceAccess({
+      actor,
+      resourceKind,
+      resourceId,
+      permission: "DIAGNOSTICS_READ",
+    });
+  } catch {
+    return false;
+  }
+}
+
 export async function executeReadonlyMcpTool(
   dependencies: McpReadonlyDependencies,
   toolName: McpReadonlyToolName,
@@ -123,12 +149,14 @@ export async function executeReadonlyMcpTool(
 
   if (toolName === "rundea_deployment_metrics_read") {
     const input = metricsInput(rawInput);
+    const resourceAccessGranted = await canAccessResource(dependencies, actor, "DEPLOYMENT", input.deploymentId);
     return executeAuthorizedOperation(
       {
         operationName: "deployment.metrics.read",
         client: "MCP",
         resourceId: `deployment:${input.deploymentId}`,
         actor,
+        resourceAccessGranted,
       },
       neverResolveApproval,
       neverConsumeApproval,
@@ -139,12 +167,14 @@ export async function executeReadonlyMcpTool(
 
   if (toolName === "rundea_node_qualifications_read") {
     const input = nodeInput(rawInput);
+    const resourceAccessGranted = await canAccessResource(dependencies, actor, "NODE", input.nodeId);
     return executeAuthorizedOperation(
       {
         operationName: "node.qualifications.read",
         client: "MCP",
         resourceId: `node:${input.nodeId}`,
         actor,
+        resourceAccessGranted,
       },
       neverResolveApproval,
       neverConsumeApproval,
@@ -168,5 +198,6 @@ export function createPostgresReadonlyMcpDependencies(
       readNodeQualifications: async (nodeId) => executeNodeQualificationsReadOperation(pool, nodeId),
     },
     actorProvider,
+    resourceAccess: createPostgresMcpResourceAccessResolver(pool),
   };
 }
