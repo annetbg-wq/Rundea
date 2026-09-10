@@ -72,7 +72,16 @@ export async function authorizeOperation(
     return { correlationId, approvalRef: null, decision: probe };
   }
 
-  const evidence = await resolveApproval(request.approvalRef);
+  let evidence: ApprovalEvidence | null;
+  try {
+    evidence = await resolveApproval(request.approvalRef);
+  } catch {
+    return {
+      correlationId,
+      approvalRef: request.approvalRef,
+      decision: { ...probe, reason: "approval service is unavailable" },
+    };
+  }
   if (!evidence) {
     return {
       correlationId,

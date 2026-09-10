@@ -9,10 +9,10 @@ const entry: OperationAuditStart = {
   client: "MCP",
   resourceId: "service:backend",
   effectiveRiskClass: "SAFE_WRITE",
-  approvalRef: "policy:1",
+  approvalRefHash: "a".repeat(64),
 };
 
-test("audit recorder writes only bounded operation metadata", async () => {
+test("audit recorder writes only bounded operation metadata and approval hash", async () => {
   const calls: Array<{ text: string; params?: unknown[] }> = [];
   const pool = {
     query: async (text: string, params?: unknown[]) => {
@@ -26,19 +26,21 @@ test("audit recorder writes only bounded operation metadata", async () => {
   await recorder.complete(entry.correlationId, "SUCCEEDED");
 
   assert.equal(calls.length, 2);
+  assert.match(calls[0]?.text ?? "", /approval_ref_hash/);
   assert.deepEqual(calls[0]?.params, [
     entry.correlationId,
     entry.operationName,
     entry.client,
     entry.resourceId,
     entry.effectiveRiskClass,
-    entry.approvalRef,
+    entry.approvalRefHash,
   ]);
   assert.deepEqual(calls[1]?.params, [entry.correlationId, "SUCCEEDED", null]);
 
   const serialized = JSON.stringify(calls);
   assert.equal(serialized.includes("value"), false);
   assert.equal(serialized.includes("payload"), false);
+  assert.equal(serialized.includes("approval:raw-secret"), false);
 });
 
 test("denied audit row is terminal and carries only authorization error code", async () => {
@@ -57,9 +59,22 @@ test("denied audit row is terminal and carries only authorization error code", a
     entry.client,
     entry.resourceId,
     entry.effectiveRiskClass,
-    entry.approvalRef,
+    entry.approvalRefHash,
     "OPERATION_NOT_AUTHORIZED",
   ]);
+});
+
+test("audit completion accepts bounded approval failure code", async () => {
+  let captured: unknown[] | undefined;
+  const pool = {
+    query: async (_text: string, params?: unknown[]) => {
+      captured = params;
+      return { rowCount: 1, rows: [] };
+    },
+  } as unknown as Pool;
+  const recorder = new PostgresOperationAuditRecorder(pool);
+  await recorder.complete(entry.correlationId, "FAILED", "APPROVAL_UNAVAILABLE");
+  assert.deepEqual(captured, [entry.correlationId, "FAILED", "APPROVAL_UNAVAILABLE"]);
 });
 
 test("audit completion requires an existing authorized row", async () => {

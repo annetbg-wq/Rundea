@@ -1,3 +1,4 @@
+import { hashToken } from "@rundea/crypto";
 import type { OperationName, OperationRiskClass } from "./operation-registry";
 import {
   authorizeOperation,
@@ -7,13 +8,14 @@ import {
 import type { OperationClient } from "./operation-policy";
 import type { OperationAuditRecorder, OperationAuditStart } from "./operation-audit";
 
+export type ApprovalConsumer = (approvalRef: string, now?: Date) => Promise<boolean>;
+
 export type AuthorizedExecutionContext = Readonly<{
   correlationId: string;
   operationName: OperationName;
   client: OperationClient;
   resourceId: string;
   effectiveRiskClass: OperationRiskClass;
-  approvalRef: string | null;
 }>;
 
 export type OperationExecutionSuccess<Result> = Readonly<{
@@ -30,7 +32,7 @@ export type OperationExecutionFailure = Readonly<{
   operationName: OperationName;
   auditFinalized: boolean;
   error: Readonly<{
-    code: "OPERATION_NOT_AUTHORIZED" | "AUDIT_UNAVAILABLE" | "OPERATION_FAILED";
+    code: "OPERATION_NOT_AUTHORIZED" | "AUDIT_UNAVAILABLE" | "APPROVAL_UNAVAILABLE" | "OPERATION_FAILED";
     message: string;
     requiredApproval?: "NONE" | "SESSION_OR_EXPLICIT" | "EXPLICIT_OR_NARROW_POLICY" | "FRESH_EXPLICIT";
     effectiveRiskClass?: OperationRiskClass;
@@ -53,13 +55,28 @@ function auditStart(
     client: request.client,
     resourceId: request.resourceId,
     effectiveRiskClass,
-    approvalRef,
+    approvalRefHash: approvalRef ? hashToken(approvalRef) : null,
   };
+}
+
+async function finalizeApprovalFailure(
+  audit: OperationAuditRecorder,
+  correlationId: string,
+  auditStarted: boolean,
+): Promise<boolean> {
+  if (!auditStarted) return false;
+  try {
+    await audit.complete(correlationId, "FAILED", "APPROVAL_UNAVAILABLE");
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export async function executeAuthorizedOperation<Result>(
   request: OperationAuthorizationRequest,
   resolveApproval: ApprovalResolver,
+  consumeApproval: ApprovalConsumer,
   audit: OperationAuditRecorder,
   executor: OperationExecutor<Result>,
   now = new Date(),
@@ -113,13 +130,39 @@ export async function executeAuthorizedOperation<Result>(
     }
   }
 
+  if (authorization.decision.effectiveRiskClass !== "READ_ONLY") {
+    const approvalRef = authorization.approvalRef;
+    let consumed = false;
+    if (approvalRef) {
+      try {
+        consumed = await consumeApproval(approvalRef, now);
+      } catch {
+        consumed = false;
+      }
+    }
+    if (!consumed) {
+      const auditFinalized = await finalizeApprovalFailure(audit, authorization.correlationId, auditStarted);
+      return {
+        ok: false,
+        correlationId: authorization.correlationId,
+        operationName: request.operationName,
+        auditFinalized,
+        error: {
+          code: "APPROVAL_UNAVAILABLE",
+          message: "operation approval is unavailable",
+          requiredApproval: authorization.decision.requiredApproval,
+          effectiveRiskClass: authorization.decision.effectiveRiskClass,
+        },
+      };
+    }
+  }
+
   const context: AuthorizedExecutionContext = {
     correlationId: authorization.correlationId,
     operationName: request.operationName,
     client: request.client,
     resourceId: request.resourceId,
     effectiveRiskClass: authorization.decision.effectiveRiskClass,
-    approvalRef: authorization.approvalRef,
   };
 
   try {
