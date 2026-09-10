@@ -1,4 +1,5 @@
 import { hashToken } from "@rundea/crypto";
+import type { OperationActor } from "./operation-actor";
 import type { OperationName, OperationRiskClass } from "./operation-registry";
 import {
   authorizeOperation,
@@ -16,6 +17,7 @@ export type AuthorizedExecutionContext = Readonly<{
   client: OperationClient;
   resourceId: string;
   effectiveRiskClass: OperationRiskClass;
+  actor: OperationActor | null;
 }>;
 
 export type OperationExecutionSuccess<Result> = Readonly<{
@@ -56,6 +58,7 @@ function auditStart(
     resourceId: request.resourceId,
     effectiveRiskClass,
     approvalRefHash: approvalRef ? hashToken(approvalRef) : null,
+    actor: request.actor ?? null,
   };
 }
 
@@ -163,6 +166,7 @@ export async function executeAuthorizedOperation<Result>(
     client: request.client,
     resourceId: request.resourceId,
     effectiveRiskClass: authorization.decision.effectiveRiskClass,
+    actor: request.actor ?? null,
   };
 
   try {

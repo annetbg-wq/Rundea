@@ -5,6 +5,7 @@ export const MCP_DIAGNOSTICS_READ_SCOPE = "rundea:mcp:diagnostics:read";
 const maxAccessTokenLength = 16 * 1024;
 const maxSubjectLength = 256;
 const maxScopeClaimLength = 2048;
+const maxOAuthUrlLength = 2048;
 const allowedAlgorithms = [
   "RS256",
   "RS384",
@@ -31,6 +32,7 @@ export type McpOAuthConfig = Readonly<{
 }>;
 
 export type McpOAuthPrincipal = Readonly<{
+  issuer: string;
   subject: string;
   scopes: readonly string[];
 }>;
@@ -50,6 +52,7 @@ export class McpOAuthAuthorizationError extends Error {
 function requireHttpsUrl(raw: string | undefined, name: string): { value: string; url: URL } {
   const value = raw?.trim();
   if (!value) throw new Error(`${name} is required when MCP OAuth is configured`);
+  if (value.length > maxOAuthUrlLength) throw new Error(`${name} is too long`);
 
   let url: URL;
   try {
@@ -162,7 +165,11 @@ export function createMcpOAuthTokenVerifier(config: McpOAuthConfig, key?: Verifi
       );
     }
 
-    return { subject, scopes };
+    return {
+      issuer: config.issuer,
+      subject,
+      scopes: [config.requiredScope],
+    };
   };
 }
 

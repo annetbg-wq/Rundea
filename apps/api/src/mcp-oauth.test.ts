@@ -87,12 +87,20 @@ test("OAuth protected-resource metadata uses the RFC 9728 path for the /mcp reso
   );
 });
 
-test("OAuth verifier accepts only a signed token for the exact issuer, audience and read scope", async () => {
+test("OAuth verifier returns only verified identity and the effective Rundea scope", async () => {
   const { publicKey, privateKey } = await generateKeyPair("RS256");
   const verify = createMcpOAuthTokenVerifier(config(), publicKey);
-  const principal = await verify(await accessToken(privateKey));
+  const principal = await verify(await accessToken(privateKey, {
+    scope: `${MCP_DIAGNOSTICS_READ_SCOPE} profile offline_access`,
+  }));
+  assert.equal(principal.issuer, issuer);
   assert.equal(principal.subject, "rundea-user-123");
   assert.deepEqual(principal.scopes, [MCP_DIAGNOSTICS_READ_SCOPE]);
+});
+
+test("OAuth verifier accepts only a signed token for the exact issuer and audience", async () => {
+  const { publicKey, privateKey } = await generateKeyPair("RS256");
+  const verify = createMcpOAuthTokenVerifier(config(), publicKey);
 
   await assert.rejects(
     verify(await accessToken(privateKey, { audience: "https://other.rundea.test/mcp" })),

@@ -17,6 +17,7 @@ import {
   resolveMcpOAuthConfig,
   type McpOAuthConfig,
 } from "./mcp-oauth";
+import { OperationActorContext, staticTokenOperationActor, type OperationActor } from "./operation-actor";
 import type { OperationExecutionResult } from "./operation-execution";
 
 const maxMcpTokenLength = 512;
@@ -215,31 +216,36 @@ async function authorizeMcpRequest(
   config: ReadonlyMcpHttpConfig,
   expectedStaticTokenHash: string | null,
   oauthVerifier: ReturnType<typeof createMcpOAuthTokenVerifier> | null,
-): Promise<boolean> {
+): Promise<OperationActor | null> {
   if (config.authMode === "static") {
     if (!expectedStaticTokenHash || !isReadonlyMcpBearerAuthorized(request.headers.authorization, expectedStaticTokenHash)) {
       reply.header("WWW-Authenticate", 'Bearer realm="rundea-mcp"');
       await reply.code(401).send({ error: "unauthorized" });
-      return false;
+      return null;
     }
-    return true;
+    return staticTokenOperationActor;
   }
 
   const token = bearer(request.headers.authorization);
   if (!token || !oauthVerifier) {
     reply.header("WWW-Authenticate", oauthBearerChallenge(config.oauth));
     await reply.code(401).send({ error: "unauthorized" });
-    return false;
+    return null;
   }
 
   try {
-    await oauthVerifier(token);
-    return true;
+    const principal = await oauthVerifier(token);
+    return {
+      authenticationMethod: "OAUTH",
+      issuer: principal.issuer,
+      subject: principal.subject,
+      scopes: principal.scopes,
+    };
   } catch (error) {
     const reason = error instanceof McpOAuthAuthorizationError ? error.reason : "invalid_token";
     reply.header("WWW-Authenticate", oauthBearerChallenge(config.oauth, reason));
     await reply.code(reason === "insufficient_scope" ? 403 : 401).send({ error: reason });
-    return false;
+    return null;
   }
 }
 
@@ -250,7 +256,8 @@ export function registerReadonlyMcpHttp(
 ): ReadonlyMcpHttpRegistration {
   const expectedStaticTokenHash = config.authMode === "static" ? hashToken(config.token) : null;
   const oauthVerifier = config.authMode === "oauth" ? createMcpOAuthTokenVerifier(config.oauth) : null;
-  const dependencies = createPostgresReadonlyMcpDependencies(pool);
+  const actorContext = new OperationActorContext();
+  const dependencies = createPostgresReadonlyMcpDependencies(pool, () => actorContext.current());
   const handler = createMcpHandler(() => createReadonlyMcpServer(dependencies), {
     onerror: (error) => app.log.error({ err: error }, "MCP protocol handler failed"),
   });
@@ -280,10 +287,13 @@ export function registerReadonlyMcpHttp(
       reply.hijack();
       return;
     }
-    if (!await authorizeMcpRequest(request, reply, config, expectedStaticTokenHash, oauthVerifier)) return;
+    const actor = await authorizeMcpRequest(request, reply, config, expectedStaticTokenHash, oauthVerifier);
+    if (!actor) return;
 
     reply.hijack();
-    await nodeHandler(request.raw, reply.raw, request.body);
+    await actorContext.run(actor, async () => {
+      await nodeHandler(request.raw, reply.raw, request.body);
+    });
   });
 
   return { close: () => handler.close() };

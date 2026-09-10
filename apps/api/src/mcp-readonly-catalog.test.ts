@@ -11,12 +11,15 @@ import {
 
 class MemoryAudit implements OperationAuditRecorder {
   readonly events: string[] = [];
+  readonly starts: OperationAuditStart[] = [];
 
   async recordDenied(entry: OperationAuditStart): Promise<void> {
+    this.starts.push(entry);
     this.events.push(`DENIED:${entry.operationName}:${entry.resourceId}`);
   }
 
   async beginAuthorized(entry: OperationAuditStart): Promise<void> {
+    this.starts.push(entry);
     this.events.push(`AUTHORIZED:${entry.operationName}:${entry.resourceId}`);
   }
 
@@ -75,6 +78,27 @@ test("deployment metrics MCP tool goes through policy and audit before the typed
   });
   assert.match(audit.events[0] ?? "", /^AUTHORIZED:deployment\.metrics\.read:deployment:/);
   assert.match(audit.events[1] ?? "", /^SUCCEEDED:/);
+  assert.equal(audit.starts[0]?.actor, null);
+});
+
+test("authenticated MCP actor is transport context, not tool input, and reaches audit", async () => {
+  const { audit, deps } = dependencies();
+  const actor = {
+    authenticationMethod: "OAUTH" as const,
+    issuer: "https://auth.rundea.test",
+    subject: "user-42",
+    scopes: ["rundea:mcp:diagnostics:read"],
+  };
+  const actorDeps: McpReadonlyDependencies = { ...deps, actorProvider: () => actor };
+
+  const result = await executeReadonlyMcpTool(
+    actorDeps,
+    "rundea_deployment_metrics_read",
+    { deploymentId: "123e4567-e89b-42d3-a456-426614174000" },
+  );
+
+  assert.equal(result.ok, true);
+  assert.deepEqual(audit.starts[0]?.actor, actor);
 });
 
 test("node qualification MCP tool delegates to the existing typed operation", async () => {
