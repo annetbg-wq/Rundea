@@ -89,7 +89,7 @@ A supported repository should reach a reviewable deployment configuration withou
 
 After selecting the source project, the user chooses where it should run.
 
-### Preset provider catalog — first 10
+### Initial preset provider catalog
 
 Initial compute-target presets:
 
@@ -101,14 +101,15 @@ Initial compute-target presets:
 6. OVHcloud
 7. Vultr
 8. Akamai / Linode
-9. Oracle Cloud
-10. Scaleway
+9. Scaleway
+
+**Oracle Cloud is explicitly excluded from the preset catalog and must not be recommended by Rundea.**
 
 The UI must also contain:
 
 > Other server / Generic VPS
 
-The architecture must not hard-code the product to the initial ten providers. Provider support is registry-driven.
+The architecture must not hard-code the product to the initial preset catalog. Provider support is registry-driven.
 
 Railway and Render remain important platform/import adapters but are treated separately from the initial compute-target list because their control model differs from raw VM/VPS providers.
 
