@@ -1,0 +1,15 @@
+export const migrationFiles = [
+  "001_init.sql",
+  "002_service_variables_and_auto_build.sql",
+  "003_node_qualification.sql",
+  "004_service_domains.sql",
+  "005_runtime_controls.sql",
+  "006_github_autodeploy.sql",
+  "007_source_broker.sql",
+  "008_runtime_metrics.sql",
+  "009_operation_audit.sql",
+  "010_operation_approvals.sql",
+  "011_operation_audit_approval_hash.sql",
+  "012_operation_audit_actor.sql",
+  "013_mcp_resource_grants.sql",
+] as const;
