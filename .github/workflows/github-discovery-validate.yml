@@ -24,7 +24,7 @@ jobs:
           from pathlib import Path
           p = Path('apps/api/src/index.ts')
           s = p.read_text()
-          anchor = 'import { registerSourceBrokerRoutes, issueSourceBundleTicket, validateSourceDelivery } from "./source-broker";\n'
+          anchor = '} from "./source-broker";\n'
           import_line = 'import { registerGitHubSourceDiscoveryRoutes } from "./github-source-discovery-routes";\n'
           if import_line not in s:
               if anchor not in s:
