@@ -2,6 +2,14 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { getOperationDefinition, operationRegistry } from "./operation-registry";
 
+test("GitHub source discovery is a read-only source operation", () => {
+  const definition = getOperationDefinition("source.github.discover");
+  assert.equal(definition.riskClass, "READ_ONLY");
+  assert.equal(definition.resource, "source");
+  assert.equal(definition.mutation, false);
+  assert.equal(definition.approval, "none");
+});
+
 test("runtime metrics are a read-only operation", () => {
   const definition = getOperationDefinition("deployment.metrics.read");
   assert.equal(definition.name, "deployment.metrics.read");
