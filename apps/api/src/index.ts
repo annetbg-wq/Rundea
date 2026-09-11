@@ -9,6 +9,7 @@ import type { AgentCommand, AgentEvent, DeploymentStatus } from "@rundea/contrac
 import { deploymentStatuses } from "@rundea/contracts";
 import { createOpaqueToken, equalTokenHash, hashToken, parseMasterKey } from "@rundea/crypto";
 import { assertTransition } from "@rundea/deployer";
+import { migrationFiles } from "./migration-manifest";
 import { registerReadonlyMcpHttp, resolveReadonlyMcpHttpConfig } from "./mcp-http";
 import {
   failRunningIngressForNode,
@@ -59,18 +60,7 @@ const app = Fastify({ logger: true });
 await app.register(cors, { origin: process.env.RUNDEA_WEB_ORIGIN ?? "http://localhost:5173" });
 await app.register(websocket);
 
-for (const migration of [
-  "001_init.sql",
-  "002_service_variables_and_auto_build.sql",
-  "003_node_qualification.sql",
-  "004_service_domains.sql",
-  "005_runtime_controls.sql",
-  "007_source_broker.sql",
-  "008_runtime_metrics.sql",
-  "009_operation_audit.sql",
-  "010_operation_approvals.sql",
-  "011_operation_audit_approval_hash.sql",
-]) {
+for (const migration of migrationFiles) {
   const migrationUrl = new URL(`../migrations/${migration}`, import.meta.url);
   await pool.query(await readFile(migrationUrl, "utf8"));
 }
