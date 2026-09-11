@@ -43,6 +43,7 @@ import {
   registerSourceBrokerRoutes,
   validateSourceDelivery,
 } from "./source-broker";
+import { registerGitHubSourceDiscoveryRoutes } from "./github-source-discovery-routes";
 
 type NodeSocket = { send(payload: string): void; close(code?: number, reason?: string): void };
 
@@ -447,6 +448,7 @@ registerNodeQualificationRoutes(app, pool, sockets, requireControl);
 registerDomainRoutes(app, pool, sockets, requireControl);
 registerRuntimeControlRoutes(app, pool, sockets, requireControl, dispatchQueued);
 registerSourceBrokerRoutes(app, pool);
+registerGitHubSourceDiscoveryRoutes(app, pool, requireControl);
 registerRuntimeMetricRoutes(app, pool, requireControl);
 const mcpHttp = mcpHttpConfig ? registerReadonlyMcpHttp(app, pool, mcpHttpConfig) : null;
 
