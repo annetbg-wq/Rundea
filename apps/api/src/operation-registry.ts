@@ -3,13 +3,21 @@ export type OperationRiskClass = "READ_ONLY" | "SAFE_WRITE" | "SENSITIVE_WRITE" 
 export type OperationDefinition<Name extends string = string> = Readonly<{
   name: Name;
   riskClass: OperationRiskClass;
-  resource: "deployment" | "node" | "service";
+  resource: "deployment" | "node" | "service" | "source";
   mutation: boolean;
   verification: "none" | "runtime-health" | "deployment-ready";
   approval: "none" | "session-policy" | "explicit-or-policy";
 }>;
 
 export const operationRegistry = {
+  "source.github.discover": {
+    name: "source.github.discover",
+    riskClass: "READ_ONLY",
+    resource: "source",
+    mutation: false,
+    verification: "none",
+    approval: "none",
+  },
   "deployment.metrics.read": {
     name: "deployment.metrics.read",
     riskClass: "READ_ONLY",
