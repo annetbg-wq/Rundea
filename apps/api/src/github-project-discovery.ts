@@ -177,9 +177,17 @@ export function inferGitHubProjectDiscovery(inspection: GitHubRepositoryInspecti
   } else if (files["pom.xml"]) {
     buildCommand = { value: "mvn package", confidence: "NEEDS_CONFIRMATION", evidence: ["pom.xml"] };
   } else if (files["build.gradle"] || files["build.gradle.kts"]) {
-    buildCommand = { value: rootEntries.has("gradlew") ? "./gradlew build" : "gradle build", confidence: "NEEDS_CONFIRMATION", evidence: [files["build.gradle.kts"] ? "build.gradle.kts" : "build.gradle"] };
+    buildCommand = {
+      value: rootEntries.has("gradlew") ? "./gradlew build" : "gradle build",
+      confidence: "NEEDS_CONFIRMATION",
+      evidence: [files["build.gradle.kts"] ? "build.gradle.kts" : "build.gradle"],
+    };
   } else {
-    buildCommand = { value: null, confidence: dockerfile ? "UNSUPPORTED" : "MISSING", evidence: dockerfile ? ["Dockerfile owns the build"] : [] };
+    buildCommand = {
+      value: null,
+      confidence: dockerfile ? "UNSUPPORTED" : "MISSING",
+      evidence: dockerfile ? ["Dockerfile owns the build"] : [],
+    };
   }
 
   let startCommand: DiscoveryValue<string | null>;
@@ -188,7 +196,11 @@ export function inferGitHubProjectDiscovery(inspection: GitHubRepositoryInspecti
   } else if (procfileStart(files["Procfile"])) {
     startCommand = { value: "Procfile:web", confidence: "CONFIRMED", evidence: ["Procfile#web"] };
   } else {
-    startCommand = { value: null, confidence: dockerfile ? "UNSUPPORTED" : "MISSING", evidence: dockerfile ? ["Dockerfile owns the start command"] : [] };
+    startCommand = {
+      value: null,
+      confidence: dockerfile ? "UNSUPPORTED" : "MISSING",
+      evidence: dockerfile ? ["Dockerfile owns the start command"] : [],
+    };
   }
 
   const ports = dockerPorts(files["Dockerfile"]);
@@ -229,6 +241,11 @@ export function inferGitHubProjectDiscovery(inspection: GitHubRepositoryInspecti
       ...(environmentNamesFromDockerfile(files["Dockerfile"]).length > 0 ? ["Dockerfile#ARG/ENV names"] : []),
     ],
   };
+  const manifestPathsDiscovery: DiscoveryValue<readonly string[]> = {
+    value: Object.freeze([...manifestPaths]),
+    confidence: manifestPaths.length > 0 ? "CONFIRMED" : "MISSING",
+    evidence: manifestPaths,
+  };
 
   const needsConfirmation =
     runtimeConfidence === "NEEDS_CONFIRMATION" ||
@@ -250,14 +267,20 @@ export function inferGitHubProjectDiscovery(inspection: GitHubRepositoryInspecti
     revisionSha: inspection.revisionSha,
     reviewState: needsConfirmation ? "NEEDS_CONFIRMATION" : "READY_FOR_REVIEW",
     discovery: Object.freeze({
-      runtimes: { value: Object.freeze(runtimes), confidence: runtimeConfidence, evidence: manifestPaths.filter((path) => ["package.json", "go.mod", "pom.xml", "build.gradle", "build.gradle.kts", "requirements.txt", "pyproject.toml"].includes(path)) },
+      runtimes: {
+        value: Object.freeze(runtimes),
+        confidence: runtimeConfidence,
+        evidence: manifestPaths.filter((path) =>
+          ["package.json", "go.mod", "pom.xml", "build.gradle", "build.gradle.kts", "requirements.txt", "pyproject.toml"].includes(path),
+        ),
+      },
       dockerfile: dockerfileValue,
       buildCommand,
       startCommand,
       containerPorts: { ...containerPorts, value: Object.freeze([...containerPorts.value]) },
       monorepo,
       serviceCandidates: { ...serviceCandidates, value: Object.freeze([...serviceCandidates.value]) },
-      manifestPaths: { value: Object.freeze(manifestPaths), confidence: manifestPaths.length > 0 ? "CONFIRMED" : "MISSING", evidence: manifestPaths },
+      manifestPaths: manifestPathsDiscovery,
       environmentVariableNames: { ...environmentVariables, value: Object.freeze([...environmentVariables.value]) },
     }),
   });
