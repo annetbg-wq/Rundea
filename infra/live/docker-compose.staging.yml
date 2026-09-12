@@ -26,15 +26,15 @@ services:
       PORT: "4000"
       DATABASE_URL: postgres://rundea:${POSTGRES_PASSWORD}@postgres:5432/rundea
       RUNDEA_ENVIRONMENT: staging
-      RUNDEA_PUBLIC_ORIGIN: https://rundea-staging.buxopus.com
-      RUNDEA_WEB_ORIGIN: https://rundea-staging.buxopus.com
-      RUNDEA_PUBLIC_CONTROL_PLANE_URL: https://rundea-staging.buxopus.com
+      RUNDEA_PUBLIC_ORIGIN: https://rundea.bachopus.com
+      RUNDEA_WEB_ORIGIN: https://rundea.bachopus.com
+      RUNDEA_PUBLIC_CONTROL_PLANE_URL: https://rundea.bachopus.com
       RUNDEA_PUBLIC_WEB_MODE: disabled
       RUNDEA_CONTROL_TOKEN: ${RUNDEA_CONTROL_TOKEN:?RUNDEA_CONTROL_TOKEN is required}
       RUNDEA_MASTER_KEY: ${RUNDEA_MASTER_KEY:?RUNDEA_MASTER_KEY is required}
       RUNDEA_MCP_TOKEN: ${RUNDEA_MCP_TOKEN:-}
-      RUNDEA_MCP_ALLOWED_HOSTS: rundea-staging.buxopus.com
-      RUNDEA_MCP_ALLOWED_ORIGINS: https://rundea-staging.buxopus.com
+      RUNDEA_MCP_ALLOWED_HOSTS: rundea.bachopus.com
+      RUNDEA_MCP_ALLOWED_ORIGINS: https://rundea.bachopus.com
     healthcheck:
       test:
         [
