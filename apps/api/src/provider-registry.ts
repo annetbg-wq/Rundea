@@ -92,9 +92,19 @@ const catalog: readonly ProviderDefinition[] = Object.freeze([
     id: "digitalocean",
     name: "DigitalOcean",
     connectionMethods: ["API_TOKEN", "AGENT_BOOTSTRAP", "SSH_GUIDED"],
-    capabilities: ["ACCOUNT_DISCOVERY", "COMPUTE_DISCOVERY", "NETWORK_DISCOVERY", "FIREWALL_DISCOVERY", "COST_METADATA", "AGENT_INSTALL"],
-    adapterStatus: "GUIDED_ONLY",
-    guidance: [],
+    capabilities: ["ACCOUNT_DISCOVERY", "COMPUTE_DISCOVERY", "NETWORK_DISCOVERY", "FIREWALL_DISCOVERY", "AGENT_INSTALL"],
+    adapterStatus: "AVAILABLE",
+    guidance: [
+      {
+        id: "digitalocean-api-token",
+        title: "Create a DigitalOcean personal access token",
+        path: ["Account", "API", "Applications & API", "Personal access tokens", "Generate New Token"],
+        instructions: "Create a dedicated token for Rundea and paste it only into Rundea's protected credential field.",
+        requiredPermissions: ["Read Only (api:read)"],
+        verification: "Rundea verifies the token by reading account, Droplet, VPC, and firewall inventory before storing the encrypted credential.",
+        lastVerifiedAt: "2026-09-12",
+      },
+    ],
   },
   {
     id: "ovhcloud",
