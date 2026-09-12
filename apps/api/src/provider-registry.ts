@@ -50,7 +50,7 @@ const catalog: readonly ProviderDefinition[] = Object.freeze([
     id: "hetzner",
     name: "Hetzner Cloud",
     connectionMethods: ["API_TOKEN", "AGENT_BOOTSTRAP", "SSH_GUIDED"],
-    capabilities: ["ACCOUNT_DISCOVERY", "COMPUTE_DISCOVERY", "NETWORK_DISCOVERY", "FIREWALL_DISCOVERY", "COST_METADATA", "AGENT_INSTALL"],
+    capabilities: ["ACCOUNT_DISCOVERY", "COMPUTE_DISCOVERY", "NETWORK_DISCOVERY", "FIREWALL_DISCOVERY", "AGENT_INSTALL"],
     adapterStatus: "AVAILABLE",
     guidance: [
       {
