@@ -9,6 +9,7 @@ import type { AgentCommand, AgentEvent, DeploymentStatus } from "@rundea/contrac
 import { deploymentStatuses } from "@rundea/contracts";
 import { createOpaqueToken, equalTokenHash, hashToken, parseMasterKey } from "@rundea/crypto";
 import { assertTransition } from "@rundea/deployer";
+import { resolveLiveEnvironment } from "./live-environment";
 import { migrationFiles } from "./migration-manifest";
 import { registerReadonlyMcpHttp, resolveReadonlyMcpHttpConfig } from "./mcp-http";
 import {
@@ -53,11 +54,12 @@ const masterKeyEncoded = process.env.RUNDEA_MASTER_KEY;
 if (!masterKeyEncoded) throw new Error("RUNDEA_MASTER_KEY is required");
 const controlTokenHash = hashToken(controlToken);
 const masterKey = parseMasterKey(masterKeyEncoded);
+const liveEnvironment = resolveLiveEnvironment(process.env);
 const mcpHttpConfig = resolveReadonlyMcpHttpConfig(process.env, controlToken);
 
 const pool = new Pool({ connectionString: databaseUrl });
 const app = Fastify({ logger: true });
-await app.register(cors, { origin: process.env.RUNDEA_WEB_ORIGIN ?? "http://localhost:5173" });
+await app.register(cors, { origin: liveEnvironment.webOrigin });
 await app.register(websocket);
 
 for (const migration of migrationFiles) {
