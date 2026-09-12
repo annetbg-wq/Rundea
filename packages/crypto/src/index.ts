@@ -7,7 +7,8 @@ export type EncryptedValue = {
   tag: string;
 };
 
-const secretAad = Buffer.from("rundea:service-variable:v1", "utf8");
+const serviceVariableAad = Buffer.from("rundea:service-variable:v1", "utf8");
+const providerCredentialAad = Buffer.from("rundea:provider-credential:v1", "utf8");
 
 export function createOpaqueToken(): string {
   return randomBytes(32).toString("base64url");
@@ -29,11 +30,11 @@ export function parseMasterKey(encoded: string): Buffer {
   return key;
 }
 
-export function encryptValue(value: string, key: Buffer): EncryptedValue {
+function encryptWithAad(value: string, key: Buffer, aad: Buffer): EncryptedValue {
   if (key.length !== 32) throw new Error("encryption key must be 32 bytes");
   const iv = randomBytes(12);
   const cipher = createCipheriv("aes-256-gcm", key, iv);
-  cipher.setAAD(secretAad);
+  cipher.setAAD(aad);
   const ciphertext = Buffer.concat([cipher.update(value, "utf8"), cipher.final()]);
   return {
     version: 1,
@@ -43,14 +44,30 @@ export function encryptValue(value: string, key: Buffer): EncryptedValue {
   };
 }
 
-export function decryptValue(value: EncryptedValue, key: Buffer): string {
+function decryptWithAad(value: EncryptedValue, key: Buffer, aad: Buffer): string {
   if (key.length !== 32) throw new Error("encryption key must be 32 bytes");
   if (value.version !== 1) throw new Error("unsupported encrypted value version");
   const decipher = createDecipheriv("aes-256-gcm", key, Buffer.from(value.iv, "base64"));
-  decipher.setAAD(secretAad);
+  decipher.setAAD(aad);
   decipher.setAuthTag(Buffer.from(value.tag, "base64"));
   return Buffer.concat([
     decipher.update(Buffer.from(value.ciphertext, "base64")),
     decipher.final(),
   ]).toString("utf8");
+}
+
+export function encryptValue(value: string, key: Buffer): EncryptedValue {
+  return encryptWithAad(value, key, serviceVariableAad);
+}
+
+export function decryptValue(value: EncryptedValue, key: Buffer): string {
+  return decryptWithAad(value, key, serviceVariableAad);
+}
+
+export function encryptProviderCredential(value: string, key: Buffer): EncryptedValue {
+  return encryptWithAad(value, key, providerCredentialAad);
+}
+
+export function decryptProviderCredential(value: EncryptedValue, key: Buffer): string {
+  return decryptWithAad(value, key, providerCredentialAad);
 }

@@ -15,4 +15,5 @@ export const migrationFiles = [
   "014_workspaces_projects.sql",
   "015_project_sources.sql",
   "016_build_args.sql",
+  "017_project_provider_connections.sql",
 ] as const;
