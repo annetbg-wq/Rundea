@@ -9,6 +9,7 @@ on:
       - 'package-lock.json'
       - 'apps/api/**'
       - 'packages/**'
+      - 'infra/agent/**'
       - '.github/workflows/live-runtime-image.yml'
   push:
     branches: [main]
@@ -19,6 +20,7 @@ on:
       - 'package-lock.json'
       - 'apps/api/**'
       - 'packages/**'
+      - 'infra/agent/**'
       - '.github/workflows/live-runtime-image.yml'
 
 permissions:
