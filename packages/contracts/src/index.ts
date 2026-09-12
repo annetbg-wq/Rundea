@@ -25,6 +25,10 @@ export type RuntimeSpec = {
   };
 };
 
+export type BuildSpec = {
+  args: Record<string, string>;
+};
+
 export type DirectGitSourceSpec = {
   mode?: "git";
   repository: string;
@@ -44,6 +48,7 @@ export type DeployCommand = {
   deploymentId: string;
   serviceName: string;
   source: DirectGitSourceSpec | BrokeredSourceSpec;
+  build?: BuildSpec;
   runtime: RuntimeSpec;
 };
 
