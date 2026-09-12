@@ -1,14 +1,17 @@
 # SignalKit dogfood deployment on Rundea
 
-SignalKit is the first non-trivial Rundea dogfood workload. It exercises a monorepo, two independent Dockerfiles, build-time public configuration, runtime secrets, external stateful dependencies, HTTP health checks, managed domains, and GitHub autodeploy.
+SignalKit is the first non-trivial Rundea dogfood workload. It exercises a monorepo, two independent Dockerfiles, build-time public configuration, runtime secrets, external stateful dependencies, HTTP health checks, managed domains, and rollback.
 
 ## Source
 
 - Repository: `https://github.com/vkpro72ai-create/signalkit.git`
-- Initial branch: `deploy/pdf-export-and-workspace-fix`
+- Preparation branch: `deploy/pdf-export-and-workspace-fix`
+- Initial pinned commit: `589bdd739eb2c27f1386a7a49faa36eeb3ec6a53`
 - Production source should move to `main` only after the deployment branch is reconciled and merged in SignalKit.
 
-For one-off deployments a mutable branch may use direct Git delivery. GitHub push autodeploy pins the deployment to the exact pushed commit SHA and uses Rundea brokered source delivery.
+The first dogfood deployments must use the exact pinned commit above, not a mutable branch ref. That makes the first Rundea build reproducible and gives rollback/debugging an unambiguous source identity.
+
+Because the SignalKit repository is public, the first deployment can use direct Git delivery while still pinning the exact commit SHA.
 
 ## Service: signalkit-api
 
@@ -37,7 +40,7 @@ The SignalKit API fails fast in production unless `DATABASE_URL`, `REDIS_URL`, `
 
 ### Database migrations
 
-The API Dockerfile intentionally does not run Prisma migrations during container startup. Before the first Rundea deployment, confirm the existing SignalKit database already contains the migrations expected by the selected commit. If it does not, run the migration job separately before routing production traffic.
+The API Dockerfile intentionally does not run Prisma migrations during container startup. Before the first Rundea deployment, confirm the existing SignalKit database already contains the migrations expected by the pinned commit. If it does not, run the migration job separately before routing production traffic.
 
 ### Export persistence
 
@@ -80,7 +83,7 @@ API deployment request:
   "serviceName": "signalkit-api",
   "nodeId": "<NODE_ID>",
   "sourceRepository": "https://github.com/vkpro72ai-create/signalkit.git",
-  "sourceRef": "deploy/pdf-export-and-workspace-fix",
+  "sourceRef": "589bdd739eb2c27f1386a7a49faa36eeb3ec6a53",
   "sourceDelivery": "DIRECT",
   "dockerfile": "apps/api/Dockerfile",
   "buildArgs": {},
@@ -97,7 +100,7 @@ Web deployment request:
   "serviceName": "signalkit-web",
   "nodeId": "<NODE_ID>",
   "sourceRepository": "https://github.com/vkpro72ai-create/signalkit.git",
-  "sourceRef": "deploy/pdf-export-and-workspace-fix",
+  "sourceRef": "589bdd739eb2c27f1386a7a49faa36eeb3ec6a53",
   "sourceDelivery": "DIRECT",
   "dockerfile": "apps/web/Dockerfile",
   "buildArgs": {
@@ -130,42 +133,22 @@ Create these domain mappings after readiness:
 
 Rundea then reconciles managed Caddy ingress to the READY deployment's host port. DNS must point both hostnames at the selected Rundea node before public TLS verification can succeed.
 
-## GitHub autodeploy after the first healthy release
+## GitHub autodeploy follow-up
 
-Configure each service against the same SignalKit branch. Build args belong to the web autodeploy configuration so every GitHub-triggered rebuild is reproducible.
+The repository already contains a GitHub autodeploy module. This change makes its stored configuration preserve `buildArgs` so a future push-triggered rebuild can reproduce the web image correctly.
 
-Web autodeploy configuration shape:
-
-```json
-{
-  "nodeId": "<NODE_ID>",
-  "repository": "https://github.com/vkpro72ai-create/signalkit",
-  "branch": "deploy/pdf-export-and-workspace-fix",
-  "dockerfile": "apps/web/Dockerfile",
-  "buildArgs": {
-    "NEXT_PUBLIC_API_URL": "https://api.signalkit.sys.bachopus.com",
-    "NEXT_PUBLIC_DEFAULT_LOCALE": "en"
-  },
-  "containerPort": 3000,
-  "hostPort": "<WEB_HOST_PORT>",
-  "healthcheckPath": "/",
-  "enabled": true
-}
-```
-
-API autodeploy uses the same shape with `apps/api/Dockerfile`, `{}` build args, port `4000`, the API host port, and `/health`.
+However, the current Control Plane entrypoint does not register the autodeploy routes. Do not treat GitHub autodeploy as part of the initial SignalKit dogfood gate. Route registration, webhook-secret configuration, and exact-SHA webhook acceptance should be completed as a separate follow-up before enabling automatic deployments.
 
 ## Acceptance gate
 
-The dogfood migration is complete only when all of the following are true:
+The initial dogfood migration is complete only when all of the following are true:
 
-1. Rundea Agent and Control Plane versions containing the build-args contract are deployed.
-2. `signalkit-api` reaches `READY` using the existing database and external Redis.
+1. Rundea Control Plane containing the build-args contract is deployed and the selected node runs Rundea Agent `0.1.1` or later.
+2. `signalkit-api` reaches `READY` from pinned commit `589bdd739eb2c27f1386a7a49faa36eeb3ec6a53` using the existing database and external Redis.
 3. `https://api.signalkit.sys.bachopus.com/health` succeeds through managed ingress.
-4. `signalkit-web` reaches `READY` with `NEXT_PUBLIC_API_URL` supplied through Rundea build args.
+4. `signalkit-web` reaches `READY` from the same pinned commit with `NEXT_PUBLIC_API_URL` supplied through Rundea build args.
 5. `https://signalkit.sys.bachopus.com` loads and browser API requests reach the Rundea-hosted API.
-6. A GitHub push creates exact-SHA autodeployments and preserves the web build args.
-7. Rollback restores the retained previous image without rebuilding it.
-8. No secret is supplied through `buildArgs` or written to deployment logs.
+6. Rollback restores a retained previous image without rebuilding it.
+7. No secret is supplied through `buildArgs` or written to deployment logs.
 
-Known follow-up: durable volumes/object storage for SignalKit exports are a separate Rundea capability and are not silently emulated in this migration.
+Known follow-ups: durable volumes/object storage for SignalKit exports and GitHub autodeploy route wiring are separate Rundea capabilities and are not silently emulated in this migration.
