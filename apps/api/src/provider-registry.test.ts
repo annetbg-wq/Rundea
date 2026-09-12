@@ -11,6 +11,7 @@ test("initial provider catalog stays registry-driven and excludes Oracle Cloud",
   assert.equal(catalog.some((provider) => provider.id.includes("oracle")), false);
   assert.equal(providerDefinition("oracle"), null);
   assert.equal(providerDefinition("hetzner")?.adapterStatus, "AVAILABLE");
+  assert.equal(providerDefinition("digitalocean")?.adapterStatus, "AVAILABLE");
   assert.equal(providerDefinition("generic-vps")?.adapterStatus, "GENERIC");
 });
 
@@ -22,4 +23,14 @@ test("Hetzner guidance contains the exact console path and permission Rundea sho
   assert.deepEqual(hetzner.guidance[0]?.path, ["Project", "Security", "API Tokens", "Generate API Token"]);
   assert.deepEqual(hetzner.guidance[0]?.requiredPermissions, ["Read & Write"]);
   assert.match(hetzner.guidance[0]?.verification ?? "", /server inventory/i);
+});
+
+test("DigitalOcean guidance asks only for read-only API access and gives the exact token path", () => {
+  const digitalOcean = providerDefinition("digitalocean");
+  assert.ok(digitalOcean);
+  assert.deepEqual(digitalOcean.connectionMethods, ["API_TOKEN", "AGENT_BOOTSTRAP", "SSH_GUIDED"]);
+  assert.equal(digitalOcean.guidance.length, 1);
+  assert.deepEqual(digitalOcean.guidance[0]?.path, ["Account", "API", "Applications & API", "Personal access tokens", "Generate New Token"]);
+  assert.deepEqual(digitalOcean.guidance[0]?.requiredPermissions, ["Read Only (api:read)"]);
+  assert.match(digitalOcean.guidance[0]?.verification ?? "", /Droplet, VPC, and firewall inventory/i);
 });
