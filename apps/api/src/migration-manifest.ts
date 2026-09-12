@@ -12,4 +12,5 @@ export const migrationFiles = [
   "011_operation_audit_approval_hash.sql",
   "012_operation_audit_actor.sql",
   "013_mcp_resource_grants.sql",
+  "014_workspaces_projects.sql",
 ] as const;
