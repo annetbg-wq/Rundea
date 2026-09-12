@@ -14,4 +14,5 @@ export const migrationFiles = [
   "013_mcp_resource_grants.sql",
   "014_workspaces_projects.sql",
   "015_project_sources.sql",
+  "016_project_provider_connections.sql",
 ] as const;
