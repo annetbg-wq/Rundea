@@ -128,7 +128,7 @@ function publicSummary(connection: StoredProviderConnection): ProviderConnection
 
 function initialState(providerId: ProviderId): { state: ProviderConnectionState; guidanceStepId: string | null } {
   const provider = providerDefinition(providerId)!;
-  if (provider.id === "hetzner") {
+  if (provider.adapterStatus === "AVAILABLE" && provider.connectionMethods.includes("API_TOKEN")) {
     return { state: "AUTH_REQUIRED", guidanceStepId: provider.guidance[0]?.id ?? null };
   }
   return {
