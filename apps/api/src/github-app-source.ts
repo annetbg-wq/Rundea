@@ -6,6 +6,30 @@ const repoPartPattern = /^[A-Za-z0-9_.-]+$/;
 const githubApiBase = "https://api.github.com";
 const githubArchiveHost = "codeload.github.com";
 const githubApiVersion = "2022-11-28";
+const maxDiscoveryFileBytes = 1024 * 1024;
+
+const discoveryFileAllowlist = Object.freeze([
+  "Dockerfile",
+  "docker-compose.yml",
+  "docker-compose.yaml",
+  "package.json",
+  "package-lock.json",
+  "pnpm-lock.yaml",
+  "pnpm-workspace.yaml",
+  "yarn.lock",
+  "go.mod",
+  "pom.xml",
+  "build.gradle",
+  "build.gradle.kts",
+  "settings.gradle",
+  "settings.gradle.kts",
+  "requirements.txt",
+  "pyproject.toml",
+  "Procfile",
+  ".env.example",
+  ".env.sample",
+  "example.env",
+] as const);
 
 type FetchLike = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
 
@@ -18,6 +42,19 @@ export type GitHubArchiveResult = {
   archive: Buffer;
   authMode: "PUBLIC" | "GITHUB_APP";
 };
+
+export type GitHubRepositoryInspection = Readonly<{
+  installationId: number;
+  repositoryId: number;
+  repositoryFullName: string;
+  repositoryUrl: string;
+  visibility: "PUBLIC" | "PRIVATE" | "INTERNAL";
+  defaultBranch: string;
+  selectedBranch: string;
+  revisionSha: string;
+  rootEntries: readonly string[];
+  files: Readonly<Record<string, string>>;
+}>;
 
 function base64UrlJson(value: unknown): string {
   return Buffer.from(JSON.stringify(value), "utf8").toString("base64url");
@@ -38,6 +75,41 @@ function repositoryIdentity(fullName: string): { owner: string; repository: stri
     throw new Error("invalid GitHub repository identity");
   }
   return { owner: parts[0]!, repository: parts[1]! };
+}
+
+function validateDiscoveryBranch(value: string): string {
+  const branch = value.trim();
+  if (!branch || branch.length > 255) throw new Error("GitHub branch is invalid");
+  if (branch.startsWith("-") || branch.startsWith("/") || branch.endsWith("/") || branch.endsWith(".") || branch.endsWith(".lock")) {
+    throw new Error("GitHub branch is invalid");
+  }
+  if (/\s|[~^:?*\\[\x00-\x1f\x7f]/.test(branch) || branch.includes("..") || branch.includes("//") || branch.includes("@{")) {
+    throw new Error("GitHub branch is invalid");
+  }
+  return branch;
+}
+
+function visibilityFrom(body: any): "PUBLIC" | "PRIVATE" | "INTERNAL" {
+  if (body?.visibility === "public") return "PUBLIC";
+  if (body?.visibility === "private") return "PRIVATE";
+  if (body?.visibility === "internal") return "INTERNAL";
+  if (body?.private === true) return "PRIVATE";
+  if (body?.private === false) return "PUBLIC";
+  throw new Error("GitHub repository visibility is invalid");
+}
+
+function validateRepositoryUrl(value: unknown): string {
+  if (typeof value !== "string") throw new Error("GitHub repository URL is invalid");
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new Error("GitHub repository URL is invalid");
+  }
+  if (url.protocol !== "https:" || url.hostname.toLowerCase() !== "github.com" || url.username || url.password || url.search || url.hash) {
+    throw new Error("GitHub repository URL is invalid");
+  }
+  return url.toString().replace(/\/$/, "");
 }
 
 export function loadGitHubAppConfig(env: NodeJS.ProcessEnv = process.env): GitHubAppConfig | null {
@@ -173,6 +245,91 @@ export class GitHubArchiveProvider {
     const token = typeof body?.token === "string" ? body.token.trim() : "";
     if (!token || token.length > 4096 || /[\r\n]/.test(token)) throw new Error("GitHub App installation token response is invalid");
     return token;
+  }
+
+  private async authenticatedJson(url: string, token: string, label: string): Promise<any> {
+    const response = await this.fetchImpl(url, {
+      method: "GET",
+      redirect: "error",
+      headers: githubHeaders(`Bearer ${token}`),
+    });
+    if (!response.ok) {
+      await response.body?.cancel().catch(() => undefined);
+      throw new Error(`${label} returned ${response.status}`);
+    }
+    return await jsonBody(response);
+  }
+
+  private async discoveryFile(owner: string, repository: string, branch: string, file: string, token: string): Promise<string> {
+    const url = `${githubApiBase}/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repository)}/contents/${encodeURIComponent(file)}?ref=${encodeURIComponent(branch)}`;
+    const body = await this.authenticatedJson(url, token, `GitHub repository file ${file}`);
+    if (body?.type !== "file" || body?.encoding !== "base64" || typeof body?.content !== "string") {
+      throw new Error(`GitHub repository file ${file} response is invalid`);
+    }
+    const size = Number(body?.size);
+    if (!Number.isSafeInteger(size) || size < 0 || size > maxDiscoveryFileBytes) {
+      throw new Error(`GitHub repository file ${file} is too large for discovery`);
+    }
+    const bytes = Buffer.from(body.content.replace(/\n/g, ""), "base64");
+    if (bytes.length > maxDiscoveryFileBytes) throw new Error(`GitHub repository file ${file} is too large for discovery`);
+    return bytes.toString("utf8");
+  }
+
+  async inspectRepository(repositoryFullName: string, selectedBranch?: string): Promise<GitHubRepositoryInspection> {
+    if (!this.appConfig) throw new Error("GitHub App is required for repository discovery");
+    const { owner, repository } = repositoryIdentity(repositoryFullName);
+    const installationId = await this.repositoryInstallation(owner, repository);
+    const token = await this.installationToken(installationId, repository);
+    const repositoryApi = `${githubApiBase}/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repository)}`;
+    const metadata = await this.authenticatedJson(repositoryApi, token, "GitHub repository metadata");
+
+    const repositoryId = Number(metadata?.id);
+    if (!Number.isSafeInteger(repositoryId) || repositoryId <= 0) throw new Error("GitHub repository ID is invalid");
+    if (typeof metadata?.full_name !== "string" || metadata.full_name.toLowerCase() !== repositoryFullName.toLowerCase()) {
+      throw new Error("GitHub repository identity changed during discovery");
+    }
+    const defaultBranch = validateDiscoveryBranch(typeof metadata?.default_branch === "string" ? metadata.default_branch : "");
+    const branch = validateDiscoveryBranch(selectedBranch ?? defaultBranch);
+    const repositoryUrl = validateRepositoryUrl(metadata?.html_url);
+    const visibility = visibilityFrom(metadata);
+
+    const commit = await this.authenticatedJson(
+      `${repositoryApi}/commits/${encodeURIComponent(branch)}`,
+      token,
+      "GitHub repository revision",
+    );
+    const revisionSha = typeof commit?.sha === "string" ? commit.sha.toLowerCase() : "";
+    if (!fullCommitPattern.test(revisionSha)) throw new Error("GitHub repository revision is invalid");
+
+    const root = await this.authenticatedJson(
+      `${repositoryApi}/contents?ref=${encodeURIComponent(branch)}`,
+      token,
+      "GitHub repository root contents",
+    );
+    if (!Array.isArray(root)) throw new Error("GitHub repository root contents response is invalid");
+    const rootEntries = root
+      .flatMap((entry: any) => (typeof entry?.name === "string" && !/[\r\n\u0000]/.test(entry.name) ? [entry.name] : []))
+      .sort((left: string, right: string) => left.localeCompare(right));
+    const rootSet = new Set(rootEntries);
+
+    const files: Record<string, string> = {};
+    for (const file of discoveryFileAllowlist) {
+      if (!rootSet.has(file)) continue;
+      files[file] = await this.discoveryFile(owner, repository, branch, file, token);
+    }
+
+    return Object.freeze({
+      installationId,
+      repositoryId,
+      repositoryFullName: metadata.full_name.toLowerCase(),
+      repositoryUrl,
+      visibility,
+      defaultBranch,
+      selectedBranch: branch,
+      revisionSha,
+      rootEntries: Object.freeze(rootEntries),
+      files: Object.freeze(files),
+    });
   }
 
   private async privateArchive(owner: string, repository: string, commitSha: string): Promise<Buffer> {
