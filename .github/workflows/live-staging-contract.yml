@@ -1,0 +1,39 @@
+name: live-staging-contract
+
+on:
+  pull_request:
+    paths:
+      - 'infra/live/**'
+      - '.github/workflows/live-staging-contract.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'infra/live/**'
+      - '.github/workflows/live-staging-contract.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate staging compose contract
+        env:
+          RUNDEA_IMAGE_TAG: c6cd0d4b91e14f722c4a2b6c954a8c7a500c1fe1
+          POSTGRES_PASSWORD: test
+          RUNDEA_CONTROL_TOKEN: test
+          RUNDEA_MASTER_KEY: test
+          RUNDEA_MCP_TOKEN: test
+        run: |
+          set -euo pipefail
+          [[ "$RUNDEA_IMAGE_TAG" =~ ^[0-9a-f]{40}$ ]]
+          docker compose -f infra/live/docker-compose.staging.yml config > /tmp/rundea-staging-compose.yml
+          grep -F "ghcr.io/annetbg-wq/rundea-api:${RUNDEA_IMAGE_TAG}" /tmp/rundea-staging-compose.yml
+          grep -F "RUNDEA_ENVIRONMENT: staging" /tmp/rundea-staging-compose.yml
+          grep -F "RUNDEA_PUBLIC_ORIGIN: https://rundea-staging.buxopus.com" /tmp/rundea-staging-compose.yml
+          grep -F "RUNDEA_PUBLIC_WEB_MODE: disabled" /tmp/rundea-staging-compose.yml
+      - name: Validate Caddy configuration syntax
+        run: |
+          docker run --rm -v "$PWD/infra/live/Caddyfile.staging:/etc/caddy/Caddyfile:ro" caddy:2.10-alpine caddy validate --config /etc/caddy/Caddyfile
