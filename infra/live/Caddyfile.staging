@@ -1,0 +1,17 @@
+rundea-staging.buxopus.com {
+  encode zstd gzip
+
+  @health path /health
+  header @health Cache-Control "no-store"
+
+  reverse_proxy api:4000 {
+    health_uri /health
+    health_interval 15s
+    health_timeout 5s
+  }
+
+  log {
+    output stdout
+    format json
+  }
+}
