@@ -1,0 +1,74 @@
+services:
+  postgres:
+    image: postgres:17-bookworm
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: rundea
+      POSTGRES_USER: rundea
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+    volumes:
+      - rundea_staging_postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U rundea -d rundea"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks: [internal]
+
+  api:
+    image: ghcr.io/annetbg-wq/rundea-api:${RUNDEA_IMAGE_TAG:?RUNDEA_IMAGE_TAG is required}
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      PORT: "4000"
+      DATABASE_URL: postgres://rundea:${POSTGRES_PASSWORD}@postgres:5432/rundea
+      RUNDEA_ENVIRONMENT: staging
+      RUNDEA_PUBLIC_ORIGIN: https://rundea-staging.buxopus.com
+      RUNDEA_WEB_ORIGIN: https://rundea-staging.buxopus.com
+      RUNDEA_PUBLIC_CONTROL_PLANE_URL: https://rundea-staging.buxopus.com
+      RUNDEA_PUBLIC_WEB_MODE: disabled
+      RUNDEA_CONTROL_TOKEN: ${RUNDEA_CONTROL_TOKEN:?RUNDEA_CONTROL_TOKEN is required}
+      RUNDEA_MASTER_KEY: ${RUNDEA_MASTER_KEY:?RUNDEA_MASTER_KEY is required}
+      RUNDEA_MCP_TOKEN: ${RUNDEA_MCP_TOKEN:-}
+      RUNDEA_MCP_ALLOWED_HOSTS: rundea-staging.buxopus.com
+      RUNDEA_MCP_ALLOWED_ORIGINS: https://rundea-staging.buxopus.com
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:4000/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"
+        ]
+      interval: 15s
+      timeout: 5s
+      start_period: 30s
+      retries: 5
+    networks: [internal]
+
+  edge:
+    image: caddy:2.10-alpine
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile.staging:/etc/caddy/Caddyfile:ro
+      - rundea_staging_caddy_data:/data
+      - rundea_staging_caddy_config:/config
+    networks: [internal]
+
+networks:
+  internal:
+    driver: bridge
+
+volumes:
+  rundea_staging_postgres:
+  rundea_staging_caddy_data:
+  rundea_staging_caddy_config:
