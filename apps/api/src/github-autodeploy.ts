@@ -2,6 +2,7 @@ import { createHash, createHmac, randomUUID, timingSafeEqual } from "node:crypto
 import { readFile } from "node:fs/promises";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { Pool } from "pg";
+import { normalizeBuildArgs } from "./build-args";
 import { captureDeploymentEnvironment } from "./service-variables";
 
 type RequireControl = (request: FastifyRequest, reply: FastifyReply) => Promise<void>;
@@ -12,6 +13,7 @@ type AutodeployInput = {
   repository?: string;
   branch?: string;
   dockerfile?: string;
+  buildArgs?: unknown;
   containerPort?: number;
   hostPort?: number;
   healthcheckPath?: string;
@@ -168,24 +170,26 @@ export function registerGitHubAutodeployRoutes(
         const repository = canonicalGitHubRepository(body.repository);
         const branch = validateGitHubBranch(body.branch);
         const dockerfile = validateDockerfile(body.dockerfile);
+        const buildArgs = normalizeBuildArgs(body.buildArgs);
         const healthcheckPath = validateHealthcheck(body.healthcheckPath);
         const result = await pool.query(
           `INSERT INTO service_autodeploys(
-             service_name,node_id,repository_full_name,source_repository,source_branch,dockerfile,
+             service_name,node_id,repository_full_name,source_repository,source_branch,dockerfile,build_args,
              container_port,host_port,healthcheck_path,enabled,updated_at
-           ) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,now())
+           ) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,now())
            ON CONFLICT(service_name) DO UPDATE SET
              node_id=EXCLUDED.node_id,
              repository_full_name=EXCLUDED.repository_full_name,
              source_repository=EXCLUDED.source_repository,
              source_branch=EXCLUDED.source_branch,
              dockerfile=EXCLUDED.dockerfile,
+             build_args=EXCLUDED.build_args,
              container_port=EXCLUDED.container_port,
              host_port=EXCLUDED.host_port,
              healthcheck_path=EXCLUDED.healthcheck_path,
              enabled=EXCLUDED.enabled,
              updated_at=now()
-           RETURNING service_name,node_id,repository_full_name,source_repository,source_branch,dockerfile,
+           RETURNING service_name,node_id,repository_full_name,source_repository,source_branch,dockerfile,build_args,
                      container_port,host_port,healthcheck_path,enabled,created_at,updated_at`,
           [
             serviceName,
@@ -194,6 +198,7 @@ export function registerGitHubAutodeployRoutes(
             repository.cloneUrl,
             branch,
             dockerfile,
+            buildArgs,
             body.containerPort,
             body.hostPort,
             healthcheckPath,
@@ -216,7 +221,7 @@ export function registerGitHubAutodeployRoutes(
         await schemaReady;
         const serviceName = requireServiceName(request.params.serviceName);
         const result = await pool.query(
-          `SELECT service_name,node_id,repository_full_name,source_repository,source_branch,dockerfile,
+          `SELECT service_name,node_id,repository_full_name,source_repository,source_branch,dockerfile,build_args,
                   container_port,host_port,healthcheck_path,enabled,created_at,updated_at
              FROM service_autodeploys WHERE service_name=$1`,
           [serviceName],
@@ -327,7 +332,7 @@ export function registerGitHubAutodeployRoutes(
         }
 
         const configs = await client.query(
-          `SELECT service_name,node_id,source_repository,dockerfile,container_port,host_port,healthcheck_path
+          `SELECT service_name,node_id,source_repository,dockerfile,build_args,container_port,host_port,healthcheck_path
              FROM service_autodeploys
             WHERE enabled=true AND repository_full_name=$1 AND source_branch=$2
             ORDER BY service_name ASC
@@ -338,9 +343,9 @@ export function registerGitHubAutodeployRoutes(
           const deploymentId = randomUUID();
           await client.query(
             `INSERT INTO deployments(
-               id,service_name,node_id,source_repository,source_ref,dockerfile,container_port,host_port,
+               id,service_name,node_id,source_repository,source_ref,dockerfile,build_args,container_port,host_port,
                healthcheck_path,status,operation
-             ) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,'QUEUED','DEPLOY')`,
+             ) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'QUEUED','DEPLOY')`,
             [
               deploymentId,
               config.service_name,
@@ -348,6 +353,7 @@ export function registerGitHubAutodeployRoutes(
               config.source_repository,
               afterSha,
               config.dockerfile,
+              config.build_args ?? {},
               config.container_port,
               config.host_port,
               config.healthcheck_path,

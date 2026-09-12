@@ -38,6 +38,9 @@ type deployCommand struct {
 		Ticket     string `json:"ticket"`
 		Dockerfile string `json:"dockerfile"`
 	} `json:"source"`
+	Build struct {
+		Args map[string]string `json:"args"`
+	} `json:"build"`
 	Runtime struct {
 		ContainerName string            `json:"containerName"`
 		ContainerPort int               `json:"containerPort"`
@@ -285,7 +288,12 @@ func runDeployment(cfg config, w *writer, cmd deployCommand) {
 	w.log(cmd.DeploymentID, "system", "selected build plan: "+plan)
 	w.log(cmd.DeploymentID, "system", "healthcheck path: "+healthcheckPath)
 	imageTag := "rundea/" + strings.ToLower(cmd.DeploymentID) + ":build"
-	if err := runStreamingIn(ctx, sourceDir, w, cmd.DeploymentID, "build", "docker", "build", "--pull", "-f", dockerfile, "-t", imageTag, "."); err != nil {
+	buildArgs, err := dockerBuildCommandArgs(dockerfile, imageTag, cmd.Build.Args)
+	if err != nil {
+		fail(fmt.Errorf("docker build arguments: %w", err))
+		return
+	}
+	if err := runStreamingIn(ctx, sourceDir, w, cmd.DeploymentID, "build", "docker", buildArgs...); err != nil {
 		fail(fmt.Errorf("docker build: %w", err))
 		return
 	}
@@ -382,6 +390,9 @@ func validateCommand(cmd deployCommand) error {
 		if filepath.IsAbs(cleanDockerfile) || cleanDockerfile == ".." || strings.HasPrefix(cleanDockerfile, ".."+string(filepath.Separator)) {
 			return errors.New("dockerfile path must stay inside the source repository")
 		}
+	}
+	if err := validateBuildArgs(cmd.Build.Args); err != nil {
+		return err
 	}
 	if cmd.Runtime.ContainerName == "" || cmd.Runtime.ContainerPort < 1 || cmd.Runtime.ContainerPort > 65535 || cmd.Runtime.HostPort < 1 || cmd.Runtime.HostPort > 65535 {
 		return errors.New("deployment command contains invalid runtime fields")

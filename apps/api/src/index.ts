@@ -9,6 +9,7 @@ import type { AgentCommand, AgentEvent, DeploymentStatus } from "@rundea/contrac
 import { deploymentStatuses } from "@rundea/contracts";
 import { createOpaqueToken, equalTokenHash, hashToken, parseMasterKey } from "@rundea/crypto";
 import { assertTransition } from "@rundea/deployer";
+import { normalizeBuildArgs } from "./build-args";
 import { resolveLiveEnvironment } from "./live-environment";
 import { migrationFiles } from "./migration-manifest";
 import { registerReadonlyMcpHttp, resolveReadonlyMcpHttpConfig } from "./mcp-http";
@@ -144,7 +145,7 @@ async function dispatchQueued(nodeId: string): Promise<void> {
       return;
     }
     const result = await client.query(
-      `SELECT id,service_name,source_repository,source_ref,source_delivery,dockerfile,container_port,host_port,healthcheck_path,
+      `SELECT id,service_name,source_repository,source_ref,source_delivery,dockerfile,build_args,container_port,host_port,healthcheck_path,
               operation,rollback_target_id,image_id
          FROM deployments
         WHERE node_id=$1 AND status='QUEUED' AND (dispatch_lease_until IS NULL OR dispatch_lease_until < now())
@@ -224,6 +225,7 @@ async function dispatchQueued(nodeId: string): Promise<void> {
           ticket,
           ...(row.dockerfile ? { dockerfile: row.dockerfile } : {}),
         },
+        build: { args: row.build_args ?? {} },
         runtime,
       };
     } catch (error) {
@@ -241,6 +243,7 @@ async function dispatchQueued(nodeId: string): Promise<void> {
         ref: row.source_ref,
         ...(row.dockerfile ? { dockerfile: row.dockerfile } : {}),
       },
+      build: { args: row.build_args ?? {} },
       runtime,
     };
   }
@@ -495,7 +498,7 @@ app.delete<{ Params: { serviceName: string; key: string } }>(
 
 app.get("/v0/deployments", { preHandler: requireControl }, async () => {
   const result = await pool.query(
-    `SELECT id,service_name,node_id,source_repository,source_ref,source_delivery,dockerfile,container_port,host_port,healthcheck_path,
+    `SELECT id,service_name,node_id,source_repository,source_ref,source_delivery,dockerfile,build_args,container_port,host_port,healthcheck_path,
             status,runtime_container_id,operation,rollback_target_id,environment_snapshot_at,source_commit_sha,image_id,
             created_at,updated_at
        FROM deployments ORDER BY created_at DESC LIMIT 100`,
@@ -511,7 +514,7 @@ app.get<{ Params: { id: string } }>("/v0/deployments/:id/events", { preHandler: 
   return result.rows;
 });
 
-app.post<{ Body: { serviceName?: string; nodeId?: string; sourceRepository?: string; sourceRef?: string; sourceDelivery?: string; dockerfile?: string; containerPort?: number; hostPort?: number; healthcheckPath?: string } }>(
+app.post<{ Body: { serviceName?: string; nodeId?: string; sourceRepository?: string; sourceRef?: string; sourceDelivery?: string; dockerfile?: string; buildArgs?: unknown; containerPort?: number; hostPort?: number; healthcheckPath?: string } }>(
   "/v0/deployments",
   { preHandler: requireControl },
   async (request, reply) => {
@@ -536,15 +539,21 @@ app.post<{ Body: { serviceName?: string; nodeId?: string; sourceRepository?: str
     } catch (error) {
       return reply.code(400).send({ error: error instanceof Error ? error.message : "invalid source delivery" });
     }
+    let buildArgs: Record<string, string>;
+    try {
+      buildArgs = normalizeBuildArgs(body.buildArgs);
+    } catch (error) {
+      return reply.code(400).send({ error: error instanceof Error ? error.message : "invalid build args" });
+    }
 
     const id = randomUUID();
     const client = await pool.connect();
     try {
       await client.query("BEGIN");
       await client.query(
-        `INSERT INTO deployments(id,service_name,node_id,source_repository,source_ref,source_delivery,dockerfile,container_port,host_port,healthcheck_path,status,operation)
-         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'QUEUED','DEPLOY')`,
-        [id, body.serviceName, body.nodeId, body.sourceRepository, body.sourceRef, sourceDelivery, body.dockerfile?.trim() || null, body.containerPort, body.hostPort, body.healthcheckPath?.trim() ?? ""],
+        `INSERT INTO deployments(id,service_name,node_id,source_repository,source_ref,source_delivery,dockerfile,build_args,container_port,host_port,healthcheck_path,status,operation)
+         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'QUEUED','DEPLOY')`,
+        [id, body.serviceName, body.nodeId, body.sourceRepository, body.sourceRef, sourceDelivery, body.dockerfile?.trim() || null, buildArgs, body.containerPort, body.hostPort, body.healthcheckPath?.trim() ?? ""],
       );
       await captureDeploymentEnvironment(client, id, body.serviceName);
       await client.query("COMMIT");
