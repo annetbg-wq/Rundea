@@ -47,10 +47,10 @@ export type ProviderFirewallResource = Readonly<{
 export type ProviderDiscovery = Readonly<{
   providerId: ProviderId;
   accountContext: Readonly<{
-    providerAccountId: string | null;
-    providerAccountName: string | null;
-    providerProjectId: string | null;
-    providerProjectName: string | null;
+    providerAccountId?: string | null;
+    providerAccountName?: string | null;
+    providerProjectId?: string | null;
+    providerProjectName?: string | null;
   }>;
   compute: readonly ProviderComputeResource[];
   networks: readonly ProviderNetworkResource[];
