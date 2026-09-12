@@ -148,6 +148,15 @@ test("owner selects Hetzner and receives exact guided authentication step", asyn
   assert.equal("encryptedCredential" in result, false);
 });
 
+test("available API-token providers derive AUTH_REQUIRED from the registry instead of provider-specific code", async () => {
+  const repository = new MemoryRepository();
+  repository.grant(alice, "OWNER");
+
+  const result = await selectProviderForActor(repository, alice, projectId, "digitalocean");
+  assert.equal(result.state, "AUTH_REQUIRED");
+  assert.equal(result.guidanceStepId, "digitalocean-api-token");
+});
+
 test("viewer is rejected before provider selection or discovery", async () => {
   const repository = new MemoryRepository();
   repository.grant(bob, "VIEWER");
