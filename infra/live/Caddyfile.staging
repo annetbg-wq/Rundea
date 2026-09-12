@@ -1,4 +1,4 @@
-rundea-staging.buxopus.com {
+rundea.bachopus.com {
   encode zstd gzip
 
   @health path /health
