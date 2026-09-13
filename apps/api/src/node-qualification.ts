@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { Pool, PoolClient } from "pg";
 import type { AgentCommand, AgentEvent, NodeProbeResult } from "@rundea/contracts";
+import { registerNodeBootstrapRoutes } from "./node-bootstrap";
 import { executeNodeQualificationsReadOperation, NodeQualificationOperationError } from "./node-qualification-operations";
 
 type ControlPreHandler = (request: FastifyRequest, reply: FastifyReply) => Promise<void>;
@@ -41,6 +42,8 @@ export function registerNodeQualificationRoutes(
   sockets: Map<string, NodeCommandSocket>,
   requireControl: ControlPreHandler,
 ): void {
+  registerNodeBootstrapRoutes(app, pool, requireControl);
+
   app.post<{ Params: { id: string } }>(
     "/v0/nodes/:id/qualifications",
     { preHandler: requireControl },
