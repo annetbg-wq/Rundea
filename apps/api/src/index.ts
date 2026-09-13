@@ -5,10 +5,11 @@ import type { FastifyReply, FastifyRequest } from "fastify";
 import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { Pool } from "pg";
-import type { AgentCommand, AgentEvent, DeploymentStatus } from "@rundea/contracts";
+import type { AgentCommand, AgentEvent, AgentHelloEvent, DeploymentStatus } from "@rundea/contracts";
 import { deploymentStatuses } from "@rundea/contracts";
 import { createOpaqueToken, equalTokenHash, hashToken, parseMasterKey } from "@rundea/crypto";
 import { assertTransition } from "@rundea/deployer";
+import { validateAgentHello } from "./agent-compatibility";
 import { normalizeBuildArgs } from "./build-args";
 import { resolveLiveEnvironment } from "./live-environment";
 import { migrationFiles } from "./migration-manifest";
@@ -67,7 +68,7 @@ for (const migration of migrationFiles) {
   const migrationUrl = new URL(`../migrations/${migration}`, import.meta.url);
   await pool.query(await readFile(migrationUrl, "utf8"));
 }
-await pool.query("UPDATE nodes SET status='OFFLINE'");
+await pool.query("UPDATE nodes SET status='OFFLINE',agent_connected_at=NULL");
 await pool.query("UPDATE node_qualifications SET status='FAILED', failure_reason='control plane restarted during qualification', completed_at=now() WHERE status='RUNNING'");
 await pool.query("UPDATE node_ingress_reconciliations SET status='FAILED',error='control plane restarted during ingress reconciliation',completed_at=now() WHERE status='RUNNING'");
 await pool.query("UPDATE runtime_actions SET status='FAILED',error='control plane restarted during runtime action',completed_at=now() WHERE status='RUNNING'");
@@ -86,6 +87,7 @@ const containerIdPattern = /^[0-9a-f]{64}$/;
 const agentDisconnectDeploymentMessage = "agent disconnected during deployment";
 const maxPreAuthAgentMessages = 64;
 const maxPreAuthAgentBytes = 1024 * 1024;
+const agentHelloTimeoutMs = 5000;
 
 function bearer(header: string | undefined): string | null {
   if (!header?.startsWith("Bearer ")) return null;
@@ -442,7 +444,10 @@ app.post<{ Body: { name?: string } }>("/v0/nodes", { preHandler: requireControl 
 });
 
 app.get("/v0/nodes", { preHandler: requireControl }, async () => {
-  const result = await pool.query("SELECT id,name,status,last_seen_at,created_at FROM nodes ORDER BY created_at DESC");
+  const result = await pool.query(
+    `SELECT id,name,status,last_seen_at,created_at,agent_version,agent_build_sha,agent_capabilities,compatibility_error,agent_connected_at
+       FROM nodes ORDER BY created_at DESC`,
+  );
   return result.rows;
 });
 
@@ -575,11 +580,9 @@ app.get("/v0/agent/ws", { websocket: true }, async (socket, request) => {
   const token = bearer(request.headers.authorization);
   if (!nodeId || !token) return socket.close(1008, "missing node credentials");
 
-  // The WebSocket upgrade completes before asynchronous credential lookup. An
-  // Agent may therefore send recovery state before the handler has finished
-  // authenticating. Buffer a small, bounded number of frames synchronously so
-  // recovery/heartbeat events cannot be lost in that interval. Nothing in the
-  // buffer is interpreted until the credential is accepted.
+  // The WebSocket upgrade completes before asynchronous credential lookup. The
+  // Agent sends hello immediately, so buffer a small bounded set of frames
+  // until token authentication and capability admission are both complete.
   const preAuthMessages: Buffer[] = [];
   let preAuthBytes = 0;
   let enqueueAgentMessage: ((raw: Buffer) => void) | null = null;
@@ -602,9 +605,6 @@ app.get("/v0/agent/ws", { websocket: true }, async (socket, request) => {
     closed = true;
   });
 
-  // Test-only deterministic race injection. Production defaults to zero. The
-  // acceptance suite enables this so the Agent's immediate runtimeRecovered
-  // event is guaranteed to arrive while credential lookup is still pending.
   const testAuthDelayMs = Number(process.env.RUNDEA_TEST_AGENT_AUTH_DELAY_MS ?? "0");
   if (Number.isFinite(testAuthDelayMs) && testAuthDelayMs > 0) {
     await new Promise((resolve) => setTimeout(resolve, Math.min(testAuthDelayMs, 5000)));
@@ -616,8 +616,59 @@ app.get("/v0/agent/ws", { websocket: true }, async (socket, request) => {
   }
   if (closed) return;
 
+  let helloTimedOut = false;
+  if (preAuthMessages.length === 0) {
+    await new Promise<void>((resolve) => {
+      let settled = false;
+      const settle = () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeout);
+        socket.off("message", onMessage);
+        socket.off("close", onClose);
+        resolve();
+      };
+      const onMessage = () => settle();
+      const onClose = () => settle();
+      const timeout = setTimeout(() => {
+        helloTimedOut = true;
+        settle();
+      }, agentHelloTimeoutMs);
+      socket.once("message", onMessage);
+      socket.once("close", onClose);
+    });
+  }
+  if (closed) return;
+
+  const helloRaw = preAuthMessages.shift();
+  if (helloRaw) preAuthBytes -= helloRaw.byteLength;
+  let identity;
+  try {
+    if (helloTimedOut || !helloRaw) throw new Error("Agent hello was not received within 5 seconds");
+    const hello = JSON.parse(helloRaw.toString()) as AgentHelloEvent;
+    if (hello.type !== "hello") throw new Error("first authenticated Agent event must be hello");
+    identity = validateAgentHello(hello, liveEnvironment.environment);
+  } catch (error) {
+    const message = (error instanceof Error ? error.message : "invalid Agent hello").slice(0, 500);
+    await pool.query(
+      "UPDATE nodes SET status='OFFLINE',agent_connected_at=NULL,compatibility_error=$2,last_seen_at=now() WHERE id=$1",
+      [nodeId, message],
+    );
+    request.log.warn({ nodeId, message }, "Agent rejected by compatibility gate");
+    return socket.close(1008, "incompatible Agent");
+  }
+
+  await pool.query(
+    `UPDATE nodes
+        SET status='ONLINE',last_seen_at=now(),agent_connected_at=now(),agent_version=$2,agent_build_sha=$3,
+            agent_capabilities=$4::jsonb,compatibility_error=NULL
+      WHERE id=$1`,
+    [nodeId, identity.agentVersion, identity.buildSha, JSON.stringify(identity.capabilities)],
+  );
+  if (closed) return;
+
   const previous = sockets.get(nodeId);
-  if (previous && previous !== socket) previous.close(1012, "replaced by newer agent connection");
+  if (previous && previous !== socket) previous.close(1012, "replaced by newer compatible Agent connection");
   sockets.set(nodeId, socket);
 
   let messageQueue = Promise.resolve();
@@ -632,6 +683,9 @@ app.get("/v0/agent/ws", { websocket: true }, async (socket, request) => {
         await setupDone;
         if (closed || sockets.get(nodeId) !== socket) return;
         const event = JSON.parse(raw.toString()) as AgentEvent;
+        if (event.type === "hello") {
+          throw new Error("duplicate Agent hello after compatibility admission");
+        }
         if (event.type === "heartbeat") {
           await pool.query("UPDATE nodes SET status='ONLINE',last_seen_at=now() WHERE id=$1", [nodeId]);
           await dispatchQueued(nodeId);
@@ -675,12 +729,10 @@ app.get("/v0/agent/ws", { websocket: true }, async (socket, request) => {
         }
       })
       .catch((error) => {
-        request.log.error(error, "invalid agent event");
+        request.log.error(error, "invalid Agent event");
       });
   };
 
-  // Atomically switch the single socket listener from bounded buffering to the
-  // authenticated event queue, then replay every frame received during auth.
   enqueueAgentMessage = processAgentMessage;
   for (const buffered of preAuthMessages.splice(0)) processAgentMessage(buffered);
   preAuthBytes = 0;
@@ -691,23 +743,22 @@ app.get("/v0/agent/ws", { websocket: true }, async (socket, request) => {
       await messageQueue;
       if (sockets.get(nodeId) !== socket) return;
       sockets.delete(nodeId);
-      await pool.query("UPDATE nodes SET status='OFFLINE' WHERE id=$1", [nodeId]).catch(() => undefined);
+      await pool.query("UPDATE nodes SET status='OFFLINE',agent_connected_at=NULL WHERE id=$1", [nodeId]).catch(() => undefined);
       await failActiveDeploymentsForNode(nodeId, agentDisconnectDeploymentMessage).catch((error) => request.log.error(error, "failed to reconcile disconnected deployment"));
       await failRunningRuntimeActionsForNode(pool, nodeId).catch((error) => request.log.error(error, "failed to reconcile disconnected runtime action"));
       await failRunningQualificationsForNode(pool, nodeId).catch((error) => request.log.error(error, "failed to reconcile disconnected qualification"));
       await failRunningIngressForNode(pool, nodeId).catch((error) => request.log.error(error, "failed to reconcile disconnected ingress"));
-    })().catch((error) => request.log.error(error, "failed to reconcile closed agent connection"));
+    })().catch((error) => request.log.error(error, "failed to reconcile closed Agent connection"));
   });
 
   try {
-    await pool.query("UPDATE nodes SET status='ONLINE',last_seen_at=now() WHERE id=$1", [nodeId]);
     if (closed || sockets.get(nodeId) !== socket) return;
     await dispatchQueued(nodeId);
     if (closed || sockets.get(nodeId) !== socket) return;
     await reconcileNodeIngress(pool, sockets, nodeId);
   } catch (error) {
-    request.log.error(error, "agent connection initialization failed");
-    socket.close(1011, "agent initialization failed");
+    request.log.error(error, "Agent connection initialization failed");
+    socket.close(1011, "Agent initialization failed");
   } finally {
     finishSetup();
   }
