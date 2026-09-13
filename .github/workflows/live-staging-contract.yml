@@ -3,12 +3,14 @@ name: live-staging-contract
 on:
   pull_request:
     paths:
+      - 'Dockerfile.api'
       - 'Dockerfile.web'
       - 'infra/live/**'
       - '.github/workflows/live-staging-contract.yml'
   push:
     branches: [main]
     paths:
+      - 'Dockerfile.api'
       - 'Dockerfile.web'
       - 'infra/live/**'
       - '.github/workflows/live-staging-contract.yml'
@@ -46,6 +48,7 @@ jobs:
           bash -n infra/live/DEPLOY_STAGING.sh
           bash -n infra/live/TAKEOVER_MANAGED_INGRESS.sh
           bash -n infra/live/SET_WEB_PASSWORD.sh
+          bash -n infra/live/ADOPT_THIS_NODE.sh
       - name: Validate bootstrap Caddy configuration syntax
         run: |
           docker run --rm -v "$PWD/infra/live/Caddyfile.staging:/etc/caddy/Caddyfile:ro" \
