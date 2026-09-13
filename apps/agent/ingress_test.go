@@ -2,6 +2,7 @@ package main
 
 import (
 	"net"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -24,6 +25,60 @@ func TestValidateIngressRoutesRejectsUnsafeDomainsAndDuplicates(t *testing.T) {
 		if validateIngressRoutes(routes) == nil {
 			t.Fatalf("expected routes to fail: %+v", routes)
 		}
+	}
+}
+
+func TestReservedIngressRoutesParseAndMerge(t *testing.T) {
+	reserved, err := parseReservedIngressRoutes("rundea.example.com=4000")
+	if err != nil {
+		t.Fatalf("parse reserved route: %v", err)
+	}
+	merged, err := mergeIngressRoutes(reserved, []ingressRoute{{Hostname: "app.example.com", HostPort: 18080}})
+	if err != nil {
+		t.Fatalf("merge ingress routes: %v", err)
+	}
+	if len(merged) != 2 || merged[0].Hostname != "rundea.example.com" || merged[1].Hostname != "app.example.com" {
+		t.Fatalf("unexpected merged routes: %+v", merged)
+	}
+}
+
+func TestReservedIngressRoutesRejectCollision(t *testing.T) {
+	reserved, err := parseReservedIngressRoutes("rundea.example.com=4000")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = mergeIngressRoutes(reserved, []ingressRoute{{Hostname: "rundea.example.com", HostPort: 18080}})
+	if err == nil || !strings.Contains(err.Error(), "reserved for node system ingress") {
+		t.Fatalf("expected reserved-host collision, got %v", err)
+	}
+}
+
+func TestReservedIngressRoutesRejectMalformedInput(t *testing.T) {
+	for _, raw := range []string{
+		"Rundea.example.com=4000",
+		"rundea.example.com",
+		"rundea.example.com=0",
+		"rundea.example.com=70000",
+		"rundea.example.com=4000,rundea.example.com=4001",
+	} {
+		if _, err := parseReservedIngressRoutes(raw); err == nil {
+			t.Fatalf("expected %q to fail", raw)
+		}
+	}
+}
+
+func TestReservedIngressUpstreamMustBeLoopbackReachable(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	port := listener.Addr().(*net.TCPAddr).Port
+	if err := verifyReservedIngressUpstreams([]ingressRoute{{Hostname: "rundea.example.com", HostPort: port}}); err != nil {
+		t.Fatalf("expected loopback upstream to be reachable: %v", err)
+	}
+	if port <= 0 || strconv.Itoa(port) == "" {
+		t.Fatal("invalid test port")
 	}
 }
 

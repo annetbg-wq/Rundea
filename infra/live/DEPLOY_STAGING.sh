@@ -26,8 +26,25 @@ if [[ ! "$RUNDEA_IMAGE_TAG" =~ ^[0-9a-f]{40}$ ]]; then
   exit 2
 fi
 
+INGRESS_MODE="${RUNDEA_INGRESS_MODE:-bootstrap}"
 COMPOSE_FILE="$(cd "$(dirname "$0")" && pwd)/docker-compose.staging.yml"
-docker compose -f "$COMPOSE_FILE" pull api edge postgres
-docker compose -f "$COMPOSE_FILE" up -d --remove-orphans
 
-docker compose -f "$COMPOSE_FILE" ps
+case "$INGRESS_MODE" in
+  bootstrap)
+    docker compose -f "$COMPOSE_FILE" --profile bootstrap-ingress pull api edge postgres
+    docker compose -f "$COMPOSE_FILE" --profile bootstrap-ingress up -d
+    ;;
+  managed)
+    docker compose -f "$COMPOSE_FILE" pull api postgres
+    docker compose -f "$COMPOSE_FILE" up -d api postgres
+    # A successful managed-ingress takeover owns 80/443 outside this compose
+    # project as the Agent-managed rundea-caddy container. Never respawn edge.
+    docker compose -f "$COMPOSE_FILE" --profile bootstrap-ingress rm -sf edge >/dev/null 2>&1 || true
+    ;;
+  *)
+    echo "RUNDEA_INGRESS_MODE must be bootstrap or managed" >&2
+    exit 2
+    ;;
+esac
+
+docker compose -f "$COMPOSE_FILE" --profile bootstrap-ingress ps

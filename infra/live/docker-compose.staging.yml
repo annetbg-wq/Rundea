@@ -35,6 +35,8 @@ services:
       RUNDEA_MCP_TOKEN: ${RUNDEA_MCP_TOKEN:-}
       RUNDEA_MCP_ALLOWED_HOSTS: rundea.bachopus.com
       RUNDEA_MCP_ALLOWED_ORIGINS: https://rundea.bachopus.com
+    ports:
+      - "127.0.0.1:4000:4000"
     healthcheck:
       test:
         [
@@ -49,8 +51,12 @@ services:
       retries: 5
     networks: [internal]
 
+  # Bootstrap-only public ingress. Once this Control Plane is attached to a
+  # Rundea Agent on the same node, TAKEOVER_MANAGED_INGRESS.sh hands 80/443 to
+  # the Agent-owned rundea-caddy container and this profile must stay disabled.
   edge:
-    image: caddy:2.10-alpine
+    profiles: ["bootstrap-ingress"]
+    image: caddy:2.11.4@sha256:df7f1c2fb114453b951de51a98efc010db1655a92c2e86be6706714e2417a78d
     restart: unless-stopped
     depends_on:
       api:

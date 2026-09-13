@@ -2,6 +2,20 @@
 
 SignalKit is the first non-trivial Rundea dogfood workload. It exercises a monorepo, two independent Dockerfiles, build-time public configuration, runtime secrets, external stateful dependencies, HTTP health checks, managed domains, and rollback.
 
+## Same-node topology
+
+The first SignalKit deployment intentionally shares the existing Hetzner node with the Rundea Control Plane. This is a product acceptance case, not a shortcut around Rundea.
+
+Public ports `80/443` belong only to Rundea managed ingress. Neither `signalkit-api` nor `signalkit-web` may publish those ports directly. The Control Plane itself is a reserved system route on the same managed Caddy instance:
+
+```text
+rundea.bachopus.com -> 127.0.0.1:4000
+```
+
+SignalKit deployments receive separate loopback-only host ports selected by Rundea. Their public hostnames are then added to the same Caddy desired state. Agent `0.1.2` or later is required on this self-hosted node because it preserves reserved system ingress routes while reconciling application domains.
+
+Before attaching any SignalKit domain, the live node must have completed the verified bootstrap-to-managed ingress handoff described in `infra/live/README.md`. The old bootstrap `edge` container must not remain the owner of `80/443` after that handoff.
+
 ## Source
 
 - Repository: `https://github.com/vkpro72ai-create/signalkit.git`
@@ -74,7 +88,7 @@ Do not model Redis as a normal Rundea HTTP service yet: the current deployment r
 
 ## Create the initial deployments
 
-First choose an ONLINE Rundea node and free non-reserved host ports. The examples deliberately use placeholders because host ports are node-specific and must not be invented.
+First choose the existing ONLINE Hetzner Rundea node and free non-reserved host ports. The examples deliberately use placeholders because host ports are node-specific and must not be invented. Ports `80`, `443`, and the reserved Control Plane loopback port `4000` are not eligible workload host ports on this node.
 
 API deployment request:
 
@@ -131,7 +145,7 @@ Create these domain mappings after readiness:
 { "hostname": "signalkit.sys.bachopus.com", "serviceName": "signalkit-web" }
 ```
 
-Rundea then reconciles managed Caddy ingress to the READY deployment's host port. DNS must point both hostnames at the selected Rundea node before public TLS verification can succeed.
+Rundea then reconciles the same managed Caddy instance that already owns `rundea.bachopus.com`. The reserved Control Plane route is merged with application routes and cannot be claimed by an application service. DNS must point both SignalKit hostnames at the selected Rundea node before public TLS verification can succeed.
 
 ## GitHub autodeploy follow-up
 
@@ -143,12 +157,14 @@ However, the current Control Plane entrypoint does not register the autodeploy r
 
 The initial dogfood migration is complete only when all of the following are true:
 
-1. Rundea Control Plane containing the build-args contract is deployed and the selected node runs Rundea Agent `0.1.1` or later.
-2. `signalkit-api` reaches `READY` from pinned commit `589bdd739eb2c27f1386a7a49faa36eeb3ec6a53` using the existing database and external Redis.
-3. `https://api.signalkit.sys.bachopus.com/health` succeeds through managed ingress.
-4. `signalkit-web` reaches `READY` from the same pinned commit with `NEXT_PUBLIC_API_URL` supplied through Rundea build args.
-5. `https://signalkit.sys.bachopus.com` loads and browser API requests reach the Rundea-hosted API.
-6. Rollback restores a retained previous image without rebuilding it.
-7. No secret is supplied through `buildArgs` or written to deployment logs.
+1. Rundea Control Plane containing the build-args contract is deployed and the selected node runs Rundea Agent `0.1.2` or later.
+2. `https://rundea.bachopus.com/health` remains healthy after managed-ingress takeover and after each SignalKit domain reconciliation.
+3. `signalkit-api` reaches `READY` from pinned commit `589bdd739eb2c27f1386a7a49faa36eeb3ec6a53` using the existing database and external Redis.
+4. `https://api.signalkit.sys.bachopus.com/health` succeeds through Rundea managed ingress.
+5. `signalkit-web` reaches `READY` from the same pinned commit with `NEXT_PUBLIC_API_URL` supplied through Rundea build args.
+6. `https://signalkit.sys.bachopus.com` loads and browser API requests reach the Rundea-hosted API.
+7. Rollback restores a retained previous image without rebuilding it.
+8. No secret is supplied through `buildArgs` or written to deployment logs.
+9. Neither SignalKit container owns or publishes public host ports `80/443`.
 
 Known follow-ups: durable volumes/object storage for SignalKit exports and GitHub autodeploy route wiring are separate Rundea capabilities and are not silently emulated in this migration.

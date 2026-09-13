@@ -29,11 +29,19 @@ jobs:
         run: |
           set -euo pipefail
           [[ "$RUNDEA_IMAGE_TAG" =~ ^[0-9a-f]{40}$ ]]
-          docker compose -f infra/live/docker-compose.staging.yml config > /tmp/rundea-staging-compose.yml
+          docker compose -f infra/live/docker-compose.staging.yml --profile bootstrap-ingress config > /tmp/rundea-staging-compose.yml
           grep -F "ghcr.io/annetbg-wq/rundea-api:${RUNDEA_IMAGE_TAG}" /tmp/rundea-staging-compose.yml
           grep -F "RUNDEA_ENVIRONMENT: staging" /tmp/rundea-staging-compose.yml
           grep -F "RUNDEA_PUBLIC_ORIGIN: https://rundea.bachopus.com" /tmp/rundea-staging-compose.yml
           grep -F "RUNDEA_PUBLIC_WEB_MODE: disabled" /tmp/rundea-staging-compose.yml
-      - name: Validate Caddy configuration syntax
+          grep -F "host_ip: 127.0.0.1" /tmp/rundea-staging-compose.yml
+          grep -F "published: \"4000\"" /tmp/rundea-staging-compose.yml
+      - name: Validate live shell scripts
         run: |
-          docker run --rm -v "$PWD/infra/live/Caddyfile.staging:/etc/caddy/Caddyfile:ro" caddy:2.10-alpine caddy validate --config /etc/caddy/Caddyfile
+          bash -n infra/live/DEPLOY_STAGING.sh
+          bash -n infra/live/TAKEOVER_MANAGED_INGRESS.sh
+      - name: Validate bootstrap Caddy configuration syntax
+        run: |
+          docker run --rm -v "$PWD/infra/live/Caddyfile.staging:/etc/caddy/Caddyfile:ro" \
+            caddy:2.11.4@sha256:df7f1c2fb114453b951de51a98efc010db1655a92c2e86be6706714e2417a78d \
+            caddy validate --config /etc/caddy/Caddyfile
