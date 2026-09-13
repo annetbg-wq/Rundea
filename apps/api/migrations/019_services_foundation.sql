@@ -1,6 +1,19 @@
--- RUNDEA DOGFOOD GATE v1: introduce stable Service identity without breaking
--- legacy service_name callers during the cutover. A later cutover migration will
--- make service_id authoritative/NOT NULL and remove legacy uniqueness.
+-- RUNDEA DOGFOOD GATE v1: introduce stable Project/Service lifecycle and
+-- service identity without breaking legacy service_name callers during the
+-- cutover. A later cutover migration will make service_id authoritative/NOT
+-- NULL and remove prototype-era global uniqueness.
+
+ALTER TABLE projects
+  ADD COLUMN IF NOT EXISTS status text NOT NULL DEFAULT 'ACTIVE',
+  ADD COLUMN IF NOT EXISTS archived_at timestamptz;
+ALTER TABLE projects DROP CONSTRAINT IF EXISTS projects_status_check;
+ALTER TABLE projects ADD CONSTRAINT projects_status_check
+  CHECK (status IN ('ACTIVE','ARCHIVED'));
+ALTER TABLE projects DROP CONSTRAINT IF EXISTS projects_archive_state_check;
+ALTER TABLE projects ADD CONSTRAINT projects_archive_state_check
+  CHECK ((status='ARCHIVED' AND archived_at IS NOT NULL) OR (status='ACTIVE' AND archived_at IS NULL));
+CREATE INDEX IF NOT EXISTS projects_workspace_status_idx
+  ON projects(workspace_id,status,created_at ASC,id ASC);
 
 CREATE TABLE IF NOT EXISTS services (
   id uuid PRIMARY KEY,
@@ -20,7 +33,7 @@ CREATE TABLE IF NOT EXISTS services (
 CREATE UNIQUE INDEX IF NOT EXISTS services_project_name_ci_idx
   ON services(project_id, lower(name));
 CREATE INDEX IF NOT EXISTS services_project_created_idx
-  ON services(project_id, created_at ASC, id ASC);
+  ON services(project_id, status, created_at ASC, id ASC);
 
 -- Existing prototype-era rows have no project identity. Preserve them under a
 -- hidden internal workspace/project that has no membership, instead of
