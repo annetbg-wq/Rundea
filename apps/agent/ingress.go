@@ -59,18 +59,41 @@ func runIngressReconciliation(cfg config, w *writer, cmd reconcileIngressCommand
 		}
 		_ = w.send(event)
 	}
+	fail := func(err error) {
+		for _, route := range cmd.Routes {
+			results = append(results, ingressRouteResult{
+				Hostname: route.Hostname,
+				Error:    sanitizeProbeError(err.Error()),
+			})
+		}
+		complete(false, false, err)
+	}
+
 	if !reconciliationIDPattern.MatchString(strings.ToLower(cmd.ReconciliationID)) {
 		complete(false, false, errors.New("invalid ingress reconciliation id"))
 		return
 	}
 	if err := validateIngressRoutes(cmd.Routes); err != nil {
-		for _, route := range cmd.Routes {
-			results = append(results, ingressRouteResult{Hostname: route.Hostname, Error: sanitizeProbeError(err.Error())})
-		}
-		complete(false, false, err)
+		fail(err)
 		return
 	}
-	if len(cmd.Routes) == 0 {
+
+	reserved, err := parseReservedIngressRoutes(env("RUNDEA_RESERVED_INGRESS_ROUTES", ""))
+	if err != nil {
+		fail(err)
+		return
+	}
+	routes, err := mergeIngressRoutes(reserved, cmd.Routes)
+	if err != nil {
+		fail(err)
+		return
+	}
+	if err := validateIngressRoutes(routes); err != nil {
+		fail(err)
+		return
+	}
+
+	if len(routes) == 0 {
 		out, err := exec.Command("docker", "rm", "-f", caddyContainer).CombinedOutput()
 		if err != nil && !strings.Contains(string(out), "No such container") {
 			complete(false, false, fmt.Errorf("remove empty ingress runtime: %w: %s", err, strings.TrimSpace(string(out))))
@@ -80,42 +103,39 @@ func runIngressReconciliation(cfg config, w *writer, cmd reconcileIngressCommand
 		return
 	}
 
+	if err := verifyReservedIngressUpstreams(reserved); err != nil {
+		fail(err)
+		return
+	}
+
 	caddyDir := filepath.Join(cfg.WorkDir, "caddy")
 	dataDir := filepath.Join(cfg.WorkDir, "caddy-data")
 	configDir := filepath.Join(cfg.WorkDir, "caddy-config")
 	for _, dir := range []string{caddyDir, dataDir, configDir} {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
-			for _, route := range cmd.Routes {
-				results = append(results, ingressRouteResult{Hostname: route.Hostname, Error: sanitizeProbeError(err.Error())})
-			}
-			complete(false, false, err)
+			fail(err)
 			return
 		}
 	}
 
-	config := renderCaddyfile(cmd.Routes, cmd.ReconciliationID)
+	config := renderCaddyfile(routes, cmd.ReconciliationID)
 	if err := writeAtomic(filepath.Join(caddyDir, "Caddyfile"), []byte(config), 0o600); err != nil {
-		for _, route := range cmd.Routes {
-			results = append(results, ingressRouteResult{Hostname: route.Hostname, Error: sanitizeProbeError(err.Error())})
-		}
-		complete(false, false, err)
+		fail(err)
 		return
 	}
 	if err := validateCaddyConfig(caddyDir); err != nil {
-		for _, route := range cmd.Routes {
-			results = append(results, ingressRouteResult{Hostname: route.Hostname, Error: sanitizeProbeError(err.Error())})
-		}
-		complete(false, false, err)
+		fail(err)
 		return
 	}
 	if err := ensureCaddy(caddyDir, dataDir, configDir); err != nil {
-		for _, route := range cmd.Routes {
-			results = append(results, ingressRouteResult{Hostname: route.Hostname, Error: sanitizeProbeError(err.Error())})
-			}
-			complete(false, false, err)
-			return
-		}
+		fail(err)
+		return
+	}
 
+	// Reserved routes keep node-level system services such as the self-hosted
+	// Rundea Control Plane on the same Caddy instance. They are deliberately
+	// not returned in the application-domain reconciliation result because
+	// the Control Plane owns only cmd.Routes in service_domains.
 	results = verifyIngressRoutes(cmd.Routes, cmd.ReconciliationID)
 	allOK := true
 	for _, result := range results {
@@ -125,6 +145,71 @@ func runIngressReconciliation(cfg config, w *writer, cmd reconcileIngressCommand
 		}
 	}
 	complete(true, allOK, nil)
+}
+
+func parseReservedIngressRoutes(raw string) ([]ingressRoute, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, nil
+	}
+	parts := strings.Split(raw, ",")
+	routes := make([]ingressRoute, 0, len(parts))
+	for _, part := range parts {
+		item := strings.TrimSpace(part)
+		pair := strings.SplitN(item, "=", 2)
+		if len(pair) != 2 {
+			return nil, fmt.Errorf("invalid RUNDEA_RESERVED_INGRESS_ROUTES entry %q", item)
+		}
+		hostname := strings.TrimSpace(pair[0])
+		if hostname != normalizeHostname(hostname) || !validHostname(hostname) {
+			return nil, fmt.Errorf("invalid reserved ingress hostname %q", hostname)
+		}
+		port, err := strconv.Atoi(strings.TrimSpace(pair[1]))
+		if err != nil || port < 1 || port > 65535 {
+			return nil, fmt.Errorf("invalid reserved ingress port for %s", hostname)
+		}
+		routes = append(routes, ingressRoute{Hostname: hostname, HostPort: port})
+	}
+	if err := validateIngressRoutes(routes); err != nil {
+		return nil, fmt.Errorf("invalid reserved ingress routes: %w", err)
+	}
+	return routes, nil
+}
+
+func mergeIngressRoutes(reserved, application []ingressRoute) ([]ingressRoute, error) {
+	if len(reserved)+len(application) > 100 {
+		return nil, errors.New("at most 100 total ingress routes are supported per node in v0")
+	}
+	merged := make([]ingressRoute, 0, len(reserved)+len(application))
+	seen := make(map[string]struct{}, len(reserved)+len(application))
+	for _, route := range reserved {
+		seen[route.Hostname] = struct{}{}
+		merged = append(merged, route)
+	}
+	for _, route := range application {
+		if _, exists := seen[route.Hostname]; exists {
+			return nil, fmt.Errorf("hostname %s is reserved for node system ingress", route.Hostname)
+		}
+		seen[route.Hostname] = struct{}{}
+		merged = append(merged, route)
+	}
+	return merged, nil
+}
+
+func verifyReservedIngressUpstreams(routes []ingressRoute) error {
+	dialer := net.Dialer{Timeout: 2 * time.Second}
+	for _, route := range routes {
+		conn, err := dialer.Dial("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(route.HostPort)))
+		if err != nil {
+			return fmt.Errorf(
+				"reserved ingress upstream %s is not reachable on 127.0.0.1:%d",
+				route.Hostname,
+				route.HostPort,
+			)
+		}
+		_ = conn.Close()
+	}
+	return nil
 }
 
 func validateIngressRoutes(routes []ingressRoute) error {
