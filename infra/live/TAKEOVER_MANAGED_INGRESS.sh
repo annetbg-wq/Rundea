@@ -21,13 +21,15 @@ fi
   exit 2
 }
 
-for command in docker curl systemctl install mktemp awk grep strings seq sleep mv chmod cat; do
+for command in docker curl systemctl install mktemp awk grep strings seq sleep mv chmod cat rm; do
   command -v "$command" >/dev/null || { echo "$command is required" >&2; exit 1; }
 done
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 COMPOSE_FILE="$SCRIPT_DIR/docker-compose.staging.yml"
 AGENT_ENV="/etc/rundea/agent.env"
+AGENT_DROPIN_DIR="/etc/systemd/system/rundea-agent.service.d"
+AGENT_DROPIN="$AGENT_DROPIN_DIR/10-reserved-ingress.conf"
 CADDY_IMAGE="caddy:2.11.4@sha256:df7f1c2fb114453b951de51a98efc010db1655a92c2e86be6706714e2417a78d"
 CADDY_CONTAINER="rundea-caddy"
 CADDY_DIR="/var/lib/rundea/caddy"
@@ -78,21 +80,44 @@ docker run --rm \
   "$CADDY_IMAGE" \
   caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile >/dev/null
 
-agent_tmp="$(mktemp)"
 env_tmp="$(mktemp)"
 cleanup() {
-  rm -f "$agent_tmp" "$env_tmp"
+  rm -f "$env_tmp"
 }
 trap cleanup EXIT
 
-grep -v '^RUNDEA_RESERVED_INGRESS_ROUTES=' "$AGENT_ENV" >"$agent_tmp" || true
-printf 'RUNDEA_RESERVED_INGRESS_ROUTES=%s=%s\n' "$SYSTEM_HOSTNAME" "$SYSTEM_PORT" >>"$agent_tmp"
-install -m 0600 "$agent_tmp" "$AGENT_ENV"
+old_dropin=""
+if [[ -f "$AGENT_DROPIN" ]]; then
+  old_dropin="$(cat "$AGENT_DROPIN")"
+fi
+install -d -m 0755 "$AGENT_DROPIN_DIR"
+cat >"$AGENT_DROPIN" <<EOF
+[Service]
+Environment=RUNDEA_RESERVED_INGRESS_ROUTES=${SYSTEM_HOSTNAME}=${SYSTEM_PORT}
+EOF
+chmod 0644 "$AGENT_DROPIN"
+systemctl daemon-reload
+
+restore_agent_configuration() {
+  if [[ -n "$old_dropin" ]]; then
+    printf '%s\n' "$old_dropin" >"$AGENT_DROPIN"
+    chmod 0644 "$AGENT_DROPIN"
+  else
+    rm -f "$AGENT_DROPIN"
+  fi
+  systemctl daemon-reload
+}
 
 rollback_bootstrap_edge() {
   docker rm -f "$CADDY_CONTAINER" >/dev/null 2>&1 || true
   docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" --profile bootstrap-ingress up -d edge >/dev/null 2>&1 || true
+  restore_agent_configuration
+  systemctl restart rundea-agent >/dev/null 2>&1 || true
 }
+
+# Stop the Agent before changing the public ingress owner. This prevents an
+# application-domain reconciliation from racing the bootstrap handoff.
+systemctl stop rundea-agent
 
 docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" --profile bootstrap-ingress stop edge >/dev/null
 docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" --profile bootstrap-ingress rm -f edge >/dev/null
@@ -109,7 +134,7 @@ if ! docker run -d \
   "$CADDY_IMAGE" \
   caddy run --config /etc/caddy/Caddyfile --adapter caddyfile >/dev/null; then
   rollback_bootstrap_edge
-  echo "managed Caddy failed to start; bootstrap edge was restored" >&2
+  echo "managed Caddy failed to start; bootstrap edge and Agent were restored" >&2
   exit 1
 fi
 
@@ -126,14 +151,14 @@ done
 
 if [[ "$public_ok" != true ]]; then
   rollback_bootstrap_edge
-  echo "managed ingress did not pass public HTTPS health; bootstrap edge was restored" >&2
+  echo "managed ingress did not pass public HTTPS health; bootstrap edge and Agent were restored" >&2
   exit 1
 fi
 
-systemctl restart rundea-agent
+systemctl start rundea-agent
 systemctl is-active --quiet rundea-agent || {
   rollback_bootstrap_edge
-  echo "rundea-agent did not restart after ingress takeover; bootstrap edge was restored" >&2
+  echo "rundea-agent did not start with reserved ingress; bootstrap edge and previous Agent configuration were restored" >&2
   exit 1
 }
 
