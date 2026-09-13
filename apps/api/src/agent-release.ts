@@ -1,4 +1,6 @@
 import { createHash } from "node:crypto";
+import { existsSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import { createGitHubAppJwt, loadGitHubAppConfig, type GitHubAppConfig } from "./github-app-source";
 import { readResponseBodyWithLimit } from "./source-archive";
 
@@ -23,6 +25,7 @@ export type AgentRelease = {
   sha256: string;
   binary: Buffer;
 };
+export type AgentReleaseProvider = { get(architecture: AgentArchitecture): Promise<AgentRelease> };
 
 type FetchLike = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
 type ReleaseAsset = { name: string; url: string; size: number };
@@ -116,7 +119,7 @@ function validateAssetApiUrl(input: string, owner: string, repository: string): 
   return url;
 }
 
-export class GitHubAgentReleaseProvider {
+export class GitHubAgentReleaseProvider implements AgentReleaseProvider {
   private readonly cache = new Map<AgentArchitecture, Promise<AgentRelease>>();
 
   constructor(
@@ -243,7 +246,48 @@ export class GitHubAgentReleaseProvider {
   }
 }
 
-export function createAgentReleaseProviderFromEnv(env: NodeJS.ProcessEnv = process.env, fetchImpl: FetchLike = fetch): GitHubAgentReleaseProvider | null {
+export class BundledAgentReleaseProvider implements AgentReleaseProvider {
+  private readonly cache = new Map<AgentArchitecture, Promise<AgentRelease>>();
+
+  constructor(readonly directory: string) {}
+
+  private async load(architecture: AgentArchitecture): Promise<AgentRelease> {
+    const filename = agentAssetName(architecture);
+    const [binary, versionRaw] = await Promise.all([
+      readFile(`${this.directory}/${filename}`),
+      readFile(`${this.directory}/VERSION`, "utf8"),
+    ]);
+    if (binary.byteLength === 0 || binary.byteLength > maxAgentBytes) throw new Error(`Bundled Agent ${filename} has an invalid size`);
+    const version = versionRaw.trim();
+    if (!/^\d+\.\d+\.\d+$/.test(version)) throw new Error("Bundled Agent VERSION is invalid");
+    const sha256 = createHash("sha256").update(binary).digest("hex");
+    return { architecture, filename, tag: `agent-v${version}`, sha256, binary };
+  }
+
+  get(architecture: AgentArchitecture): Promise<AgentRelease> {
+    let cached = this.cache.get(architecture);
+    if (!cached) {
+      cached = this.load(architecture).catch((error) => {
+        this.cache.delete(architecture);
+        throw error;
+      });
+      this.cache.set(architecture, cached);
+    }
+    return cached;
+  }
+}
+
+function bundledProvider(env: NodeJS.ProcessEnv): BundledAgentReleaseProvider | null {
+  if (env.RUNDEA_DISABLE_BUNDLED_AGENT_RELEASE === "1") return null;
+  const directory = env.RUNDEA_AGENT_BUNDLE_DIR?.trim() || "/app/agent-release";
+  if (!existsSync(`${directory}/VERSION`) || !existsSync(`${directory}/${agentAssetName("amd64")}`) || !existsSync(`${directory}/${agentAssetName("arm64")}`)) {
+    return null;
+  }
+  return new BundledAgentReleaseProvider(directory);
+}
+
+export function createAgentReleaseProviderFromEnv(env: NodeJS.ProcessEnv = process.env, fetchImpl: FetchLike = fetch): AgentReleaseProvider | null {
   const config = loadAgentReleaseConfig(env);
-  return config ? new GitHubAgentReleaseProvider(config, fetchImpl) : null;
+  if (config) return new GitHubAgentReleaseProvider(config, fetchImpl);
+  return bundledProvider(env);
 }
