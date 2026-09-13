@@ -1,3 +1,5 @@
+await import("./service-scope-e2e.mjs");
+
 const api = process.env.RUNDEA_ACCEPTANCE_API_URL ?? "http://127.0.0.1:4000";
 const controlToken = process.env.RUNDEA_CONTROL_TOKEN;
 if (!controlToken) throw new Error("RUNDEA_CONTROL_TOKEN is required");

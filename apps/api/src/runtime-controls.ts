@@ -9,6 +9,7 @@ import {
   RuntimeOperationError,
   validRuntimeResourceId,
 } from "./runtime-operations";
+import { registerServiceScopedRoutes } from "./service-scoped-routes";
 
 type ControlPreHandler = (request: FastifyRequest, reply: FastifyReply) => Promise<void>;
 type DispatchQueued = (nodeId: string) => Promise<void>;
@@ -27,6 +28,11 @@ export function registerRuntimeControlRoutes(
   requireControl: ControlPreHandler,
   dispatchQueued: DispatchQueued,
 ): void {
+  // This function is the existing entrypoint-owned registration seam that has
+  // both the authenticated node socket map and deployment dispatcher. Keep the
+  // new canonical service routes here until the Control Plane route registry is
+  // split into its own module; do not duplicate registration in index.ts.
+  registerServiceScopedRoutes(app, pool, sockets, requireControl, dispatchQueued);
   registerGitHubAutodeployRoutes(app, pool, requireControl, dispatchQueued, process.env.RUNDEA_GITHUB_WEBHOOK_SECRET);
 
   app.get("/v0/runtime-actions", { preHandler: requireControl }, async () => {
