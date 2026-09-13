@@ -44,10 +44,10 @@ import json, sys
 print(json.dumps({"name": sys.argv[1]}))
 PY
 )"
-printf 'data = %q\n' "$node_payload" >>"$control_config"
 
 curl --config "$control_config" \
   --request POST \
+  --data "$node_payload" \
   --connect-timeout 5 --max-time 15 \
   "http://127.0.0.1:4000/v0/nodes" \
   -o "$response_file"
