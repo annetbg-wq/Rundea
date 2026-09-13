@@ -70,7 +70,7 @@ NODE_TOKEN="${node_fields[1]}"
 curl --fail --silent --show-error \
   --proto '=https' --tlsv1.2 --max-redirs 0 \
   --connect-timeout 5 --max-time 15 \
-  "${CONTROL_PLANE_URL%/}/v0/agent/install.sh" \
+  "${CONTROL_PLANE_URL%/}/v0/install.sh" \
   -o "$installer_file"
 chmod 0700 "$installer_file"
 
