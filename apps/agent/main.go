@@ -164,6 +164,16 @@ func connectAndServe(cfg config) error {
 	w := &writer{conn: conn}
 	log.Printf("connected to %s as node %s", cfg.ControlPlane, cfg.NodeID)
 
+	identity := currentAgentIdentity()
+	if err := w.send(map[string]any{
+		"type":         "hello",
+		"agentVersion": identity.AgentVersion,
+		"buildSha":     identity.BuildSHA,
+		"capabilities": identity.Capabilities,
+	}); err != nil {
+		return fmt.Errorf("send Agent hello: %w", err)
+	}
+
 	if err := recoverRuntimeRouter(cfg, w); err != nil {
 		return fmt.Errorf("recover runtime router: %w", err)
 	}
