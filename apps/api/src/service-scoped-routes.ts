@@ -9,6 +9,7 @@ import { registerProjectServiceAdminRoutes } from "./project-service-admin";
 import { resolveActiveCanonicalService, ServiceScopeError } from "./service-scope";
 import { captureDeploymentEnvironment, validateVariables, type ServiceVariableInput } from "./service-variables";
 import { validateSourceDelivery } from "./source-broker";
+import { registerWorkspaceNodeRoutes } from "./workspace-node-routes";
 
 type ControlPreHandler = (request: FastifyRequest, reply: FastifyReply) => Promise<void>;
 type DispatchQueued = (nodeId: string) => Promise<void>;
@@ -21,10 +22,11 @@ function sendServiceError(reply: FastifyReply, error: unknown) {
   return reply.code(400).send({ error: error instanceof Error ? error.message : "service request failed" });
 }
 
-function requireNodeId(value: string | undefined): string {
-  const nodeId = value?.trim() ?? "";
+function optionalNodeId(value: string | undefined): string | null {
+  if (!value?.trim()) return null;
+  const nodeId = value.trim().toLowerCase();
   if (!uuidPattern.test(nodeId)) throw new Error("nodeId must be a UUID");
-  return nodeId.toLowerCase();
+  return nodeId;
 }
 
 function encryptedFromRow(row: Record<string, unknown>): EncryptedValue {
@@ -50,6 +52,7 @@ export function registerServiceScopedRoutes(
   dispatchQueued: DispatchQueued,
 ): void {
   registerProjectServiceAdminRoutes(app, pool, requireControl);
+  registerWorkspaceNodeRoutes(app, pool, requireControl);
   const masterKey = canonicalMasterKey();
 
   app.get<{ Params: { serviceId: string } }>(
@@ -60,7 +63,7 @@ export function registerServiceScopedRoutes(
         const service = await resolveActiveCanonicalService(pool, request.params.serviceId);
         const result = await pool.query(
           `SELECT d.id,d.service_id,d.node_id,d.source_repository,d.source_ref,d.source_delivery,d.dockerfile,d.build_args,
-                  d.container_port,d.host_port,d.healthcheck_path,d.status,d.runtime_container_id,d.operation,d.rollback_target_id,
+                  d.container_port,d.healthcheck_path,d.status,d.runtime_container_id,d.operation,d.rollback_target_id,
                   d.environment_snapshot_at,d.source_commit_sha,d.image_id,d.created_at,d.updated_at
              FROM deployments d
             WHERE d.service_id=$1
@@ -68,7 +71,16 @@ export function registerServiceScopedRoutes(
             LIMIT 100`,
           [service.id],
         );
-        return { service: { id: service.id, projectId: service.projectId, name: service.name, slug: service.slug }, deployments: result.rows };
+        return {
+          service: {
+            id: service.id,
+            projectId: service.projectId,
+            workspaceId: service.workspaceId,
+            name: service.name,
+            slug: service.slug,
+          },
+          deployments: result.rows,
+        };
       } catch (error) {
         return sendServiceError(reply, error);
       }
@@ -85,7 +97,6 @@ export function registerServiceScopedRoutes(
       dockerfile?: string;
       buildArgs?: unknown;
       containerPort?: number;
-      hostPort?: number;
       healthcheckPath?: string;
     };
   }>(
@@ -95,23 +106,45 @@ export function registerServiceScopedRoutes(
       try {
         const service = await resolveActiveCanonicalService(pool, request.params.serviceId);
         const body = request.body ?? {};
-        const nodeId = requireNodeId(body.nodeId);
+        const requestedNodeId = optionalNodeId(body.nodeId);
         if (!body.sourceRepository?.trim() || !body.sourceRef?.trim()) throw new Error("sourceRepository and sourceRef are required");
-        if (!Number.isInteger(body.containerPort) || !Number.isInteger(body.hostPort)) {
-          throw new Error("containerPort and hostPort must be integers");
+        if (!Number.isInteger(body.containerPort) || (body.containerPort as number) < 1 || (body.containerPort as number) > 65535) {
+          throw new Error("containerPort must be an integer between 1 and 65535");
         }
-        if ((body.containerPort as number) < 1 || (body.containerPort as number) > 65535 || (body.hostPort as number) < 1 || (body.hostPort as number) > 65535) {
-          throw new Error("containerPort and hostPort must be between 1 and 65535");
-        }
-        if ([80, 443, 2019, 2020].includes(body.hostPort as number)) throw new Error("hostPort is reserved by Rundea routing");
         const sourceDelivery = validateSourceDelivery(body.sourceDelivery, body.sourceRef.trim());
         const buildArgs = normalizeBuildArgs(body.buildArgs);
         const id = randomUUID();
         const client = await pool.connect();
+        let nodeId = "";
         try {
           await client.query("BEGIN");
-          const node = await client.query("SELECT id FROM nodes WHERE id=$1", [nodeId]);
-          if (node.rowCount !== 1) throw new Error("node is unavailable");
+          const node = requestedNodeId
+            ? await client.query(
+                `SELECT id
+                   FROM nodes
+                  WHERE id=$1 AND workspace_id=$2 AND lifecycle_status='ACTIVE' AND status='ONLINE'
+                  FOR SHARE`,
+                [requestedNodeId, service.workspaceId],
+              )
+            : await client.query(
+                `SELECT id
+                   FROM nodes
+                  WHERE workspace_id=$1 AND lifecycle_status='ACTIVE' AND status='ONLINE'
+                  ORDER BY last_seen_at DESC NULLS LAST,created_at ASC,id ASC
+                  LIMIT 1
+                  FOR SHARE`,
+                [service.workspaceId],
+              );
+          if (node.rowCount !== 1) {
+            throw new Error(requestedNodeId ? "selected node is not an ONLINE node in this workspace" : "workspace has no ONLINE node available for deployment");
+          }
+          nodeId = String(node.rows[0].id);
+          const allocation = await client.query(
+            "SELECT rundea_allocate_host_port($1,$2) AS host_port",
+            [service.id, nodeId],
+          );
+          const hostPort = Number(allocation.rows[0]?.host_port);
+          if (!Number.isInteger(hostPort)) throw new Error("Rundea could not allocate a host port");
           await client.query(
             `INSERT INTO deployments(
                id,service_id,service_name,node_id,source_repository,source_ref,source_delivery,dockerfile,build_args,
@@ -128,7 +161,7 @@ export function registerServiceScopedRoutes(
               body.dockerfile?.trim() || null,
               buildArgs,
               body.containerPort,
-              body.hostPort,
+              hostPort,
               body.healthcheckPath?.trim() ?? "",
             ],
           );
@@ -145,6 +178,7 @@ export function registerServiceScopedRoutes(
           id,
           serviceId: service.id,
           serviceName: service.name,
+          nodeId,
           status: "QUEUED",
           operation: "DEPLOY",
           sourceDelivery,

@@ -9,6 +9,7 @@ const serviceNamePattern = /^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/;
 export type ServiceScope = Readonly<{
   id: string;
   projectId: string;
+  workspaceId: string;
   name: string;
   slug: string;
   runtimeKey: string;
@@ -49,7 +50,7 @@ export async function resolveActiveCanonicalService(pool: Pool, rawServiceId: st
   if (!isServiceId(serviceId)) throw new ServiceScopeError(400, "serviceId must be a UUID");
 
   const result = await pool.query(
-    `SELECT s.id,s.project_id,s.slug,s.name
+    `SELECT s.id,s.project_id,p.workspace_id,s.slug,s.name
        FROM services s
        JOIN projects p ON p.id=s.project_id
       WHERE s.id=$1
@@ -64,6 +65,7 @@ export async function resolveActiveCanonicalService(pool: Pool, rawServiceId: st
   return {
     id: String(row.id),
     projectId: String(row.project_id),
+    workspaceId: String(row.workspace_id),
     slug: String(row.slug),
     name: String(row.name),
     runtimeKey: runtimeServiceKey(String(row.name), String(row.id)),

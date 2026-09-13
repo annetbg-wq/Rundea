@@ -19,4 +19,5 @@ export const migrationFiles = [
   "018_agent_identity.sql",
   "019_services_foundation.sql",
   "020_service_id_cutover.sql",
+  "021_node_ownership_and_ports.sql",
 ] as const;

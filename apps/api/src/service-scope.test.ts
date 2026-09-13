@@ -4,6 +4,8 @@ import type { Pool } from "pg";
 import { resolveActiveCanonicalService, runtimeServiceKey } from "./service-scope";
 
 const serviceId = "11111111-1111-4111-8111-111111111111";
+const projectId = "33333333-3333-4333-8333-333333333333";
+const workspaceId = "44444444-4444-4444-8444-444444444444";
 
 test("runtime service key separates equal human names by UUID", () => {
   const first = runtimeServiceKey("api", serviceId);
@@ -19,19 +21,20 @@ test("canonical resolver rejects non-UUID before database access", async () => {
   assert.equal(queries, 0);
 });
 
-test("canonical resolver returns project-scoped active service", async () => {
+test("canonical resolver returns project and workspace scoped active service", async () => {
   const pool = {
     query: async (text: string, params?: unknown[]) => {
       assert.match(text, /JOIN projects/);
       assert.equal(params?.[0], serviceId);
       return {
         rowCount: 1,
-        rows: [{ id: serviceId, project_id: "33333333-3333-4333-8333-333333333333", slug: "api", name: "api" }],
+        rows: [{ id: serviceId, project_id: projectId, workspace_id: workspaceId, slug: "api", name: "api" }],
       };
     },
   } as unknown as Pool;
   const scope = await resolveActiveCanonicalService(pool, serviceId);
   assert.equal(scope.id, serviceId);
-  assert.equal(scope.projectId, "33333333-3333-4333-8333-333333333333");
+  assert.equal(scope.projectId, projectId);
+  assert.equal(scope.workspaceId, workspaceId);
   assert.equal(scope.runtimeKey, "api-1111111111");
 });
