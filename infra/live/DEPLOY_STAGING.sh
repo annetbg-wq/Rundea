@@ -20,6 +20,7 @@ set +a
 : "${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}"
 : "${RUNDEA_CONTROL_TOKEN:?RUNDEA_CONTROL_TOKEN is required}"
 : "${RUNDEA_MASTER_KEY:?RUNDEA_MASTER_KEY is required}"
+: "${RUNDEA_WEB_PASSWORD_HASH:?RUNDEA_WEB_PASSWORD_HASH is required}"
 
 if [[ ! "$RUNDEA_IMAGE_TAG" =~ ^[0-9a-f]{40}$ ]]; then
   echo "RUNDEA_IMAGE_TAG must be an exact 40-character Git commit SHA" >&2
@@ -31,12 +32,12 @@ COMPOSE_FILE="$(cd "$(dirname "$0")" && pwd)/docker-compose.staging.yml"
 
 case "$INGRESS_MODE" in
   bootstrap)
-    docker compose -f "$COMPOSE_FILE" --profile bootstrap-ingress pull api edge postgres
+    docker compose -f "$COMPOSE_FILE" --profile bootstrap-ingress pull api web edge postgres
     docker compose -f "$COMPOSE_FILE" --profile bootstrap-ingress up -d
     ;;
   managed)
-    docker compose -f "$COMPOSE_FILE" pull api postgres
-    docker compose -f "$COMPOSE_FILE" up -d api postgres
+    docker compose -f "$COMPOSE_FILE" pull api web postgres
+    docker compose -f "$COMPOSE_FILE" up -d api web postgres
     # A successful managed-ingress takeover owns 80/443 outside this compose
     # project as the Agent-managed rundea-caddy container. Never respawn edge.
     docker compose -f "$COMPOSE_FILE" --profile bootstrap-ingress rm -sf edge >/dev/null 2>&1 || true
