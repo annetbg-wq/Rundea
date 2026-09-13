@@ -3,10 +3,10 @@ set -euo pipefail
 
 ENV_FILE="${1:-}"
 SYSTEM_HOSTNAME="${2:-}"
-SYSTEM_PORT="${3:-4000}"
+SYSTEM_PORT="${3:-4100}"
 
 if [[ -z "$ENV_FILE" || -z "$SYSTEM_HOSTNAME" ]]; then
-  echo "usage: $0 /absolute/path/to/staging.env rundea.example.com [loopback-port]" >&2
+  echo "usage: $0 /absolute/path/to/staging.env rundea.example.com [web-gateway-loopback-port]" >&2
   exit 2
 fi
 [[ ${EUID} -eq 0 ]] || { echo "run as root" >&2; exit 1; }
@@ -52,7 +52,7 @@ strings /usr/local/bin/rundea-agent | grep -q 'RUNDEA_RESERVED_INGRESS_ROUTES' |
 curl --fail --silent --show-error \
   --connect-timeout 3 --max-time 5 \
   "http://127.0.0.1:${SYSTEM_PORT}/health" >/dev/null || {
-    echo "Control Plane is not healthy on loopback port ${SYSTEM_PORT}; refusing ingress takeover" >&2
+    echo "Rundea web gateway is not healthy on loopback port ${SYSTEM_PORT}; refusing ingress takeover" >&2
     exit 1
   }
 

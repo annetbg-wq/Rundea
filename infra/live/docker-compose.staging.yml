@@ -29,7 +29,7 @@ services:
       RUNDEA_PUBLIC_ORIGIN: https://rundea.bachopus.com
       RUNDEA_WEB_ORIGIN: https://rundea.bachopus.com
       RUNDEA_PUBLIC_CONTROL_PLANE_URL: https://rundea.bachopus.com
-      RUNDEA_PUBLIC_WEB_MODE: disabled
+      RUNDEA_PUBLIC_WEB_MODE: external-auth
       RUNDEA_CONTROL_TOKEN: ${RUNDEA_CONTROL_TOKEN:?RUNDEA_CONTROL_TOKEN is required}
       RUNDEA_MASTER_KEY: ${RUNDEA_MASTER_KEY:?RUNDEA_MASTER_KEY is required}
       RUNDEA_MCP_TOKEN: ${RUNDEA_MCP_TOKEN:-}
@@ -51,6 +51,25 @@ services:
       retries: 5
     networks: [internal]
 
+  web:
+    image: ghcr.io/annetbg-wq/rundea-web:${RUNDEA_IMAGE_TAG:?RUNDEA_IMAGE_TAG is required}
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+    environment:
+      RUNDEA_CONTROL_TOKEN: ${RUNDEA_CONTROL_TOKEN:?RUNDEA_CONTROL_TOKEN is required}
+      RUNDEA_WEB_PASSWORD_HASH: ${RUNDEA_WEB_PASSWORD_HASH:?RUNDEA_WEB_PASSWORD_HASH is required}
+    ports:
+      - "127.0.0.1:4100:8080"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/health"]
+      interval: 15s
+      timeout: 5s
+      start_period: 10s
+      retries: 5
+    networks: [internal]
+
   # Bootstrap-only public ingress. Once this Control Plane is attached to a
   # Rundea Agent on the same node, TAKEOVER_MANAGED_INGRESS.sh hands 80/443 to
   # the Agent-owned rundea-caddy container and this profile must stay disabled.
@@ -59,7 +78,7 @@ services:
     image: caddy:2.11.4@sha256:df7f1c2fb114453b951de51a98efc010db1655a92c2e86be6706714e2417a78d
     restart: unless-stopped
     depends_on:
-      api:
+      web:
         condition: service_healthy
     ports:
       - "80:80"

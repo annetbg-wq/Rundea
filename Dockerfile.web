@@ -1,4 +1,4 @@
-FROM node:24-bookworm-slim
+FROM node:24-bookworm-slim AS build
 
 WORKDIR /app
 
@@ -12,17 +12,14 @@ COPY packages/deployer/package.json packages/deployer/package.json
 RUN npm ci --ignore-scripts
 
 COPY tsconfig.base.json ./
-COPY apps/api apps/api
-COPY packages packages
-COPY infra/agent infra/agent
-COPY infra/live infra/live
+COPY apps/web apps/web
 
-RUN test -s infra/agent/install.sh \
-  && test -s infra/live/DEPLOY_STAGING.sh \
-  && test -s infra/live/docker-compose.staging.yml
+RUN npm run build -w @rundea/web \
+  && test -s apps/web/dist/index.html
 
-ENV NODE_ENV=production
-ENV PORT=4000
-EXPOSE 4000
+FROM caddy:2.11.4@sha256:df7f1c2fb114453b951de51a98efc010db1655a92c2e86be6706714e2417a78d
 
-CMD ["npm", "run", "start", "-w", "@rundea/api"]
+COPY infra/live/Caddyfile.web /etc/caddy/Caddyfile
+COPY --from=build /app/apps/web/dist /srv
+
+EXPOSE 8080

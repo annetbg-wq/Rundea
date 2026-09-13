@@ -1,0 +1,32 @@
+:8080 {
+  encode zstd gzip
+
+  @health path /health
+  handle @health {
+    header Cache-Control "no-store"
+    reverse_proxy api:4000
+  }
+
+  @machine path /v0/* /mcp /mcp/* /.well-known/*
+  handle @machine {
+    reverse_proxy api:4000
+  }
+
+  handle_path /api/* {
+    basic_auth {
+      rundea {$RUNDEA_WEB_PASSWORD_HASH}
+    }
+    reverse_proxy api:4000 {
+      header_up Authorization "Bearer {$RUNDEA_CONTROL_TOKEN}"
+    }
+  }
+
+  handle {
+    basic_auth {
+      rundea {$RUNDEA_WEB_PASSWORD_HASH}
+    }
+    root * /srv
+    try_files {path} /index.html
+    file_server
+  }
+}

@@ -4,7 +4,7 @@ rundea.bachopus.com {
   @health path /health
   header @health Cache-Control "no-store"
 
-  reverse_proxy api:4000 {
+  reverse_proxy web:8080 {
     health_uri /health
     health_interval 15s
     health_timeout 5s
