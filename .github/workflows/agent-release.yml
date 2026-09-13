@@ -96,11 +96,22 @@ jobs:
         if: steps.candidate.outputs.should_release == 'true' && steps.gates.outputs.ready == 'true'
         working-directory: apps/agent
         shell: bash
+        env:
+          RELEASE_SHA: ${{ github.event.workflow_run.head_sha }}
         run: |
           set -euo pipefail
           mkdir -p ../../dist/agent
-          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags='-s -w' -o ../../dist/agent/rundea-agent-linux-amd64 .
-          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags='-s -w' -o ../../dist/agent/rundea-agent-linux-arm64 .
+          ldflags="-s -w -X main.agentBuildSHA=${RELEASE_SHA}"
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="${ldflags}" -o ../../dist/agent/rundea-agent-linux-amd64 .
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags="${ldflags}" -o ../../dist/agent/rundea-agent-linux-arm64 .
+          identity="$(../../dist/agent/rundea-agent-linux-amd64 --identity)"
+          [[ "${identity}" == *"\"buildSha\":\"${RELEASE_SHA}\""* ]] || {
+            echo "Built Agent does not report the immutable release SHA" >&2
+            exit 1
+          }
+          for capability in buildArgs managedIngress runtimeMetrics; do
+            ../../dist/agent/rundea-agent-linux-amd64 "--require-capability=${capability}"
+          done
       - name: Generate and verify SHA256SUMS
         if: steps.candidate.outputs.should_release == 'true' && steps.gates.outputs.ready == 'true'
         working-directory: dist/agent
@@ -161,6 +172,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ steps.candidate.outputs.tag }}
+          RELEASE_SHA: ${{ github.event.workflow_run.head_sha }}
         run: |
           set -euo pipefail
           rm -rf dist/published-agent
@@ -175,3 +187,8 @@ jobs:
           test -f rundea-agent-linux-arm64
           test -f SHA256SUMS
           sha256sum --check SHA256SUMS
+          identity="$(./rundea-agent-linux-amd64 --identity)"
+          [[ "${identity}" == *"\"buildSha\":\"${RELEASE_SHA}\""* ]] || {
+            echo "Published Agent identity does not match release SHA" >&2
+            exit 1
+          }

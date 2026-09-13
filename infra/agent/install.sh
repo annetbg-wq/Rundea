@@ -99,10 +99,28 @@ printf '%s  %s\n' "$expected_sha" "$tmp_agent" | sha256sum --check --status || {
   exit 1
 }
 
+# Capability preflight is executed against the verified binary before the
+# bootstrap credential is consumed. This prevents installing a valid but
+# protocol-incompatible Agent and makes feature support explicit rather than
+# inferring it by inspecting strings inside the executable.
+chmod 0700 "$tmp_agent"
+agent_identity="$("$tmp_agent" --identity 2>/dev/null || true)"
+[[ -n "$agent_identity" ]] || {
+  echo "Downloaded Rundea Agent does not expose a valid self-identity" >&2
+  exit 1
+}
+for capability in buildArgs managedIngress runtimeMetrics; do
+  if ! "$tmp_agent" "--require-capability=${capability}" >/dev/null 2>&1; then
+    echo "Downloaded Rundea Agent is missing required capability: ${capability}" >&2
+    exit 1
+  fi
+done
+printf 'Verified Rundea Agent identity before install: %s\n' "$agent_identity"
+
 # Prepare every durable local artifact before consuming the one-time bootstrap
-# credential. If release download, checksum verification, file installation or
-# unit creation fails, the bootstrap token remains valid and the command can be
-# safely retried.
+# credential. If release download, checksum/capability verification, file
+# installation or unit creation fails, the bootstrap token remains valid and
+# the command can be safely retried.
 install -m 0755 "$tmp_agent" /usr/local/bin/rundea-agent
 agent_token="$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')"
 [[ "$agent_token" =~ ^[a-f0-9]{64}$ ]] || { echo "failed to generate Agent credential" >&2; exit 1; }
