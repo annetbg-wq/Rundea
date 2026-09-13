@@ -15,8 +15,11 @@ COPY tsconfig.base.json ./
 COPY apps/api apps/api
 COPY packages packages
 COPY infra/agent infra/agent
+COPY infra/live infra/live
 
-RUN test -s infra/agent/install.sh
+RUN test -s infra/agent/install.sh \
+  && test -s infra/live/DEPLOY_STAGING.sh \
+  && test -s infra/live/docker-compose.staging.yml
 
 ENV NODE_ENV=production
 ENV PORT=4000
