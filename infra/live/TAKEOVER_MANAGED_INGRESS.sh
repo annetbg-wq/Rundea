@@ -21,7 +21,7 @@ fi
   exit 2
 }
 
-for command in docker curl systemctl install mktemp awk grep strings seq sleep mv chmod cat rm; do
+for command in docker curl systemctl install mktemp awk seq sleep mv chmod cat rm; do
   command -v "$command" >/dev/null || { echo "$command is required" >&2; exit 1; }
 done
 
@@ -44,10 +44,16 @@ systemctl is-active --quiet rundea-agent || {
   echo "rundea-agent must be active before managed-ingress takeover" >&2
   exit 1
 }
-strings /usr/local/bin/rundea-agent | grep -q 'RUNDEA_RESERVED_INGRESS_ROUTES' || {
-  echo "installed Rundea Agent does not support reserved system ingress; install Agent 0.1.2 or later first" >&2
+[[ -x /usr/local/bin/rundea-agent ]] || {
+  echo "installed Rundea Agent binary is missing or not executable" >&2
   exit 1
 }
+agent_identity="$(/usr/local/bin/rundea-agent --identity 2>/dev/null || true)"
+if [[ -z "$agent_identity" ]] || ! /usr/local/bin/rundea-agent --require-capability=managedIngress >/dev/null 2>&1; then
+  echo "installed Rundea Agent does not declare managedIngress capability; install a current capability-aware Agent release first" >&2
+  exit 1
+fi
+printf 'Verified Rundea Agent for managed ingress: %s\n' "$agent_identity"
 
 curl --fail --silent --show-error \
   --connect-timeout 3 --max-time 5 \
