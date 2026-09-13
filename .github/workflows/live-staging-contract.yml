@@ -3,11 +3,13 @@ name: live-staging-contract
 on:
   pull_request:
     paths:
+      - 'Dockerfile.web'
       - 'infra/live/**'
       - '.github/workflows/live-staging-contract.yml'
   push:
     branches: [main]
     paths:
+      - 'Dockerfile.web'
       - 'infra/live/**'
       - '.github/workflows/live-staging-contract.yml'
 
@@ -26,22 +28,37 @@ jobs:
           RUNDEA_CONTROL_TOKEN: test
           RUNDEA_MASTER_KEY: test
           RUNDEA_MCP_TOKEN: test
+          RUNDEA_WEB_PASSWORD_HASH: '$2y$10$92IXUNpkjO0rOQ5byMi.Ye4oKoEa3Ro9llC/.og/at2uheWG/igi.'
         run: |
           set -euo pipefail
           [[ "$RUNDEA_IMAGE_TAG" =~ ^[0-9a-f]{40}$ ]]
           docker compose -f infra/live/docker-compose.staging.yml --profile bootstrap-ingress config > /tmp/rundea-staging-compose.yml
           grep -F "ghcr.io/annetbg-wq/rundea-api:${RUNDEA_IMAGE_TAG}" /tmp/rundea-staging-compose.yml
+          grep -F "ghcr.io/annetbg-wq/rundea-web:${RUNDEA_IMAGE_TAG}" /tmp/rundea-staging-compose.yml
           grep -F "RUNDEA_ENVIRONMENT: staging" /tmp/rundea-staging-compose.yml
           grep -F "RUNDEA_PUBLIC_ORIGIN: https://rundea.bachopus.com" /tmp/rundea-staging-compose.yml
-          grep -F "RUNDEA_PUBLIC_WEB_MODE: disabled" /tmp/rundea-staging-compose.yml
+          grep -F "RUNDEA_PUBLIC_WEB_MODE: external-auth" /tmp/rundea-staging-compose.yml
           grep -F "host_ip: 127.0.0.1" /tmp/rundea-staging-compose.yml
           grep -F "published: \"4000\"" /tmp/rundea-staging-compose.yml
+          grep -F "published: \"4100\"" /tmp/rundea-staging-compose.yml
       - name: Validate live shell scripts
         run: |
           bash -n infra/live/DEPLOY_STAGING.sh
           bash -n infra/live/TAKEOVER_MANAGED_INGRESS.sh
+          bash -n infra/live/SET_WEB_PASSWORD.sh
       - name: Validate bootstrap Caddy configuration syntax
         run: |
           docker run --rm -v "$PWD/infra/live/Caddyfile.staging:/etc/caddy/Caddyfile:ro" \
+            caddy:2.11.4@sha256:df7f1c2fb114453b951de51a98efc010db1655a92c2e86be6706714e2417a78d \
+            caddy validate --config /etc/caddy/Caddyfile
+      - name: Validate authenticated web gateway configuration syntax
+        env:
+          RUNDEA_CONTROL_TOKEN: test-control-token
+          RUNDEA_WEB_PASSWORD_HASH: '$2y$10$92IXUNpkjO0rOQ5byMi.Ye4oKoEa3Ro9llC/.og/at2uheWG/igi.'
+        run: |
+          docker run --rm \
+            -e RUNDEA_CONTROL_TOKEN \
+            -e RUNDEA_WEB_PASSWORD_HASH \
+            -v "$PWD/infra/live/Caddyfile.web:/etc/caddy/Caddyfile:ro" \
             caddy:2.11.4@sha256:df7f1c2fb114453b951de51a98efc010db1655a92c2e86be6706714e2417a78d \
             caddy validate --config /etc/caddy/Caddyfile
