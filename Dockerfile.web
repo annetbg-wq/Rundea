@@ -17,7 +17,7 @@ COPY apps/web apps/web
 RUN npm run build -w @rundea/web \
   && test -s apps/web/dist/index.html
 
-FROM caddy:2.11.4-alpine@sha256:df7f1c2fb114453b951de51a98efc010db1655a92c2e86be6706714e2417a78d
+FROM caddy:2.11.4@sha256:df7f1c2fb114453b951de51a98efc010db1655a92c2e86be6706714e2417a78d
 
 COPY infra/live/Caddyfile.web /etc/caddy/Caddyfile
 COPY --from=build /app/apps/web/dist /srv
