@@ -17,4 +17,5 @@ export const migrationFiles = [
   "016_build_args.sql",
   "017_project_provider_connections.sql",
   "018_agent_identity.sql",
+  "019_services_foundation.sql",
 ] as const;
