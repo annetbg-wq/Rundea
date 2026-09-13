@@ -7,8 +7,10 @@ COPY apps/agent .
 RUN mkdir -p /out \
   && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o /out/rundea-agent-linux-amd64 . \
   && CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags="-s -w" -o /out/rundea-agent-linux-arm64 . \
+  && cp VERSION /out/VERSION \
   && test -s /out/rundea-agent-linux-amd64 \
-  && test -s /out/rundea-agent-linux-arm64
+  && test -s /out/rundea-agent-linux-arm64 \
+  && test -s /out/VERSION
 
 FROM node:24-bookworm-slim
 
@@ -34,7 +36,8 @@ RUN test -s infra/agent/install.sh \
   && test -s infra/live/DEPLOY_STAGING.sh \
   && test -s infra/live/docker-compose.staging.yml \
   && test -s /app/agent-release/rundea-agent-linux-amd64 \
-  && test -s /app/agent-release/rundea-agent-linux-arm64
+  && test -s /app/agent-release/rundea-agent-linux-arm64 \
+  && test -s /app/agent-release/VERSION
 
 ENV NODE_ENV=production
 ENV PORT=4000
