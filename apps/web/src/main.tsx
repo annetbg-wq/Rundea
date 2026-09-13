@@ -1,14 +1,10 @@
 import React from "react";
 import { createRoot } from "react-dom/client";
-import App from "./App";
-import { RuntimeMetricsMount } from "./runtime-metrics";
-import "./styles.css";
-import "./interaction-fixes.css";
-import "./runtime-metrics.css";
+import CanonicalApp from "./CanonicalApp";
+import "./canonical.css";
 
 createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
-    <App/>
-    <RuntimeMetricsMount/>
+    <CanonicalApp/>
   </React.StrictMode>,
 );
