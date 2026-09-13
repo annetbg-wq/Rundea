@@ -120,15 +120,17 @@ ALTER TABLE service_autodeploys ALTER COLUMN service_id SET NOT NULL;
 ALTER TABLE github_webhook_deployments ALTER COLUMN service_id SET NOT NULL;
 ALTER TABLE runtime_metrics ALTER COLUMN service_id SET NOT NULL;
 
--- Variables become genuinely service-scoped. The old global
--- (service_name,key) primary key is removed completely.
+-- service_id is now the variable identity. The compatibility unique index only
+-- exists so the old hidden/prototype route can finish its ON CONFLICT clause.
+-- Canonical services write a UUID-derived runtime key into service_name, so two
+-- user projects can both own a human service named `api` without sharing state.
 ALTER TABLE service_variables DROP CONSTRAINT IF EXISTS service_variables_pkey;
 ALTER TABLE service_variables ADD CONSTRAINT service_variables_pkey PRIMARY KEY(service_id,key);
+CREATE UNIQUE INDEX IF NOT EXISTS service_variables_runtime_key_compat_idx
+  ON service_variables(service_name,key);
 
 -- Autodeploy identity is the service UUID. Keep service_name unique only as a
--- temporary compatibility index for the prototype route's ON CONFLICT clause;
--- canonical services use a UUID-derived runtime key in service_name, so equal
--- human names in separate projects do not collide.
+-- temporary compatibility index for the prototype route's ON CONFLICT clause.
 ALTER TABLE service_autodeploys DROP CONSTRAINT IF EXISTS service_autodeploys_pkey;
 ALTER TABLE service_autodeploys ADD CONSTRAINT service_autodeploys_pkey PRIMARY KEY(service_id);
 CREATE UNIQUE INDEX IF NOT EXISTS service_autodeploys_runtime_key_compat_idx
