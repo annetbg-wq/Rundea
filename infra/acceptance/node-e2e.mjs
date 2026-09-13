@@ -29,6 +29,7 @@ const containerBase = `rundea-${serviceName}`;
 const workDir = await mkdtemp(join(tmpdir(), "rundea-acceptance-"));
 let agent;
 const deploymentIds = [];
+const canonicalContainers = [];
 
 class FatalPollError extends Error {}
 
@@ -36,11 +37,16 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function request(path, init = {}) {
+async function rawRequest(path, init = {}) {
   const response = await fetch(`${api}${path}`, init);
   const text = await response.text();
   let body;
   try { body = text ? JSON.parse(text) : null; } catch { body = text; }
+  return { response, body, text };
+}
+
+async function request(path, init = {}) {
+  const { response, body } = await rawRequest(path, init);
   if (!response.ok) throw new Error(`${init.method ?? "GET"} ${path} -> ${response.status}: ${typeof body === "string" ? body : JSON.stringify(body)}`);
   return body;
 }
@@ -207,10 +213,14 @@ function assertArtifact(row, label) {
   if (row.healthcheck_path !== "/") throw new Error(`${label} resolved unexpected healthcheck ${row.healthcheck_path}`);
 }
 
-async function readStableService() {
-  const response = await fetch(`http://127.0.0.1:${hostPort}/`);
+async function readService(port) {
+  const response = await fetch(`http://127.0.0.1:${port}/`);
   const body = await response.text();
   return { status: response.status, ok: response.ok, body, marker: response.headers.get(markerHeader) };
+}
+
+async function readStableService() {
+  return readService(hostPort);
 }
 
 async function assertService(label, expectedDeploymentId) {
@@ -289,12 +299,94 @@ function revisionName(deploymentId) {
   return `${containerBase}-rev-${deploymentId.replaceAll("-", "").toLowerCase().slice(0, 12)}`;
 }
 
+function canonicalRevisionName(serviceId, deploymentId) {
+  const suffix = serviceId.replaceAll("-", "").toLowerCase().slice(0, 10);
+  return `rundea-api-${suffix}-rev-${deploymentId.replaceAll("-", "").toLowerCase().slice(0, 12)}`;
+}
+
+async function createCanonicalFixture(workspaceId) {
+  const suffix = Date.now().toString(36);
+  const project = await request(`/v0/workspaces/${workspaceId}/projects`, {
+    method: "POST",
+    headers: jsonHeaders,
+    body: JSON.stringify({ slug: `runtime-${suffix}`, name: "Runtime acceptance" }),
+  });
+  const service = await request(`/v0/projects/${project.id}/services`, {
+    method: "POST",
+    headers: jsonHeaders,
+    body: JSON.stringify({ slug: "api", name: "api" }),
+  });
+  return { project, service };
+}
+
+async function proveCanonicalManagedDeployment(workspaceId, service, ownedNodeId) {
+  const foreignWorkspace = await request("/v0/workspaces", {
+    method: "POST",
+    headers: jsonHeaders,
+    body: JSON.stringify({ slug: `foreign-${Date.now().toString(36)}`, name: "Foreign acceptance" }),
+  });
+  const foreignNode = await request(`/v0/workspaces/${foreignWorkspace.id}/nodes`, {
+    method: "POST",
+    headers: jsonHeaders,
+    body: JSON.stringify({ name: "foreign-node" }),
+  });
+  const wrongNode = await rawRequest(`/v0/services/${service.id}/deployments`, {
+    method: "POST",
+    headers: jsonHeaders,
+    body: JSON.stringify({
+      nodeId: foreignNode.id,
+      sourceRepository: fixtureRepository,
+      sourceRef: expectedFixtureSha,
+      sourceDelivery: "BROKER",
+      containerPort: 3001,
+      healthcheckPath: "/",
+    }),
+  });
+  if (wrongNode.response.ok || wrongNode.response.status !== 400) {
+    throw new Error(`foreign workspace node was not rejected: ${wrongNode.response.status} ${wrongNode.text}`);
+  }
+
+  const created = await request(`/v0/services/${service.id}/deployments`, {
+    method: "POST",
+    headers: jsonHeaders,
+    body: JSON.stringify({
+      sourceRepository: fixtureRepository,
+      sourceRef: expectedFixtureSha,
+      sourceDelivery: "BROKER",
+      containerPort: 3001,
+      healthcheckPath: "/",
+    }),
+  });
+  if (created.nodeId !== ownedNodeId) throw new Error(`Rundea selected node ${created.nodeId}; expected workspace node ${ownedNodeId}`);
+  if (Object.hasOwn(created, "hostPort") || Object.hasOwn(created, "host_port")) throw new Error("canonical deployment response leaked infrastructure host port");
+
+  const ready = await waitDeployment(created.id, "canonical managed-port deployment");
+  assertArtifact(ready, "canonical managed-port deployment");
+  if (!Number.isInteger(ready.host_port) || ready.host_port < 18000 || ready.host_port > 29999) {
+    throw new Error(`Rundea did not allocate a managed host port: ${ready.host_port}`);
+  }
+  if (ready.host_port === hostPort) throw new Error("managed host port collided with legacy acceptance port");
+  const live = await readService(ready.host_port);
+  if (!live.ok || !live.body.includes("Hello from Render!") || live.marker !== created.id) {
+    throw new Error(`canonical managed port is not serving deployment: ${JSON.stringify(live)}`);
+  }
+  canonicalContainers.push(canonicalRevisionName(service.id, created.id));
+  return { deploymentId: created.id, hostPort: ready.host_port, foreignNodeId: foreignNode.id };
+}
+
 let nodeId;
 try {
   const health = await fetch(`${api}/health`);
   if (!health.ok) throw new Error(`control plane health returned ${health.status}`);
 
-  const node = await request("/v0/nodes", {
+  const suffix = Date.now().toString(36);
+  const workspace = await request("/v0/workspaces", {
+    method: "POST",
+    headers: jsonHeaders,
+    body: JSON.stringify({ slug: `runtime-${suffix}`, name: "Runtime node workspace" }),
+  });
+  const canonical = await createCanonicalFixture(workspace.id);
+  const node = await request(`/v0/workspaces/${workspace.id}/nodes`, {
     method: "POST",
     headers: jsonHeaders,
     body: JSON.stringify({ name: `acceptance-${process.pid}` }),
@@ -313,12 +405,14 @@ try {
     },
   });
 
-  await poll("agent online", async () => {
+  await poll("workspace Agent online", async () => {
     if (agent.exitCode !== null) throw new FatalPollError(`Agent exited before becoming ONLINE with code ${agent.exitCode}`);
-    const nodes = await request("/v0/nodes", { headers });
-    const row = nodes.find((item) => item.id === node.id);
+    const body = await request(`/v0/workspaces/${workspace.id}/nodes`, { headers });
+    const row = body.nodes.find((item) => item.id === node.id);
     return row?.status === "ONLINE" ? { done: true, value: row } : { last: row?.status ?? "missing" };
   }, 45_000, 500);
+
+  const managed = await proveCanonicalManagedDeployment(workspace.id, canonical.service, nodeId);
 
   const firstId = await createDeploymentFromPush();
   const first = await waitDeployment(firstId, "GitHub push deployment");
@@ -358,6 +452,9 @@ try {
   console.log(JSON.stringify({
     ok: true,
     nodeId,
+    workspaceId: workspace.id,
+    canonicalServiceId: canonical.service.id,
+    managedHostPort: managed.hostPort,
     serviceName,
     fixtureSha: expectedFixtureSha,
     deployments: deploymentIds,
@@ -368,6 +465,12 @@ try {
       rollbackMarkers: [...rollbackTrafficResult.markers],
     },
     verified: [
+      "workspace-owned-node",
+      "foreign-workspace-node-rejected",
+      "automatic-online-node-selection",
+      "atomic-managed-host-port",
+      "canonical-deploy-without-host-port",
+      "canonical-managed-port-live-http",
       "bootstrap-to-permanent-node-credential",
       "agent-online",
       "signed-github-push",
@@ -395,6 +498,9 @@ try {
   }
   for (const id of deploymentIds) {
     spawnSync("docker", ["rm", "-f", revisionName(id)], { stdio: "ignore" });
+  }
+  for (const container of canonicalContainers) {
+    spawnSync("docker", ["rm", "-f", container], { stdio: "ignore" });
   }
   spawnSync("docker", ["rm", "-f", "rundea-runtime-router"], { stdio: "ignore" });
   try {
