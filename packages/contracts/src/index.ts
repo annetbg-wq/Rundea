@@ -104,7 +104,15 @@ export type NodeProbeResult = {
   error?: string;
 };
 
+export type AgentHelloEvent = {
+  type: "hello";
+  agentVersion: string;
+  buildSha: string;
+  capabilities: string[];
+};
+
 export type AgentEvent =
+  | AgentHelloEvent
   | { type: "heartbeat"; at: string }
   | { type: "status"; deploymentId: string; status: DeploymentStatus; message?: string; containerId?: string }
   | { type: "artifact"; deploymentId: string; sourceCommitSha: string; imageId: string; healthcheckPath: string }
