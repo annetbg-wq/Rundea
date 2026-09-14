@@ -19,6 +19,7 @@ var embeddedAgentVersion string
 var agentBuildSHA = "development"
 
 var declaredAgentCapabilities = []string{
+	"artifactRetention",
 	"buildArgs",
 	"managedIngress",
 	"resourceGuardrails",
