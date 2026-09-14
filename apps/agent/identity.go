@@ -23,6 +23,7 @@ var declaredAgentCapabilities = []string{
 	"buildArgs",
 	"buildGuardrails",
 	"managedIngress",
+	"nodeCapacity",
 	"resourceGuardrails",
 	"runtimeMetrics",
 	"runtimeRecovery",
