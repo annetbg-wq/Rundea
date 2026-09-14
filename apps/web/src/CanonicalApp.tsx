@@ -86,6 +86,23 @@ function bytes(value: number) {
   return `${(value / 1024 ** 3).toFixed(2)} GB`;
 }
 
+function shellQuote(value: string) {
+  return `'${value.replaceAll("'", `'"'"'`)}'`;
+}
+
+function createNodeInstallCommand(bootstrap: Bootstrap): string | null {
+  const origin = window.location.origin.replace(/\/+$/, "");
+  let parsed: URL;
+  try {
+    parsed = new URL(origin);
+  } catch {
+    return null;
+  }
+  if (parsed.protocol !== "https:" || parsed.username || parsed.password || parsed.search || parsed.hash) return null;
+  const installerUrl = `${origin}/v0/install.sh`;
+  return `tmp="$(mktemp)" && { curl --fail --silent --show-error --proto '=https' --tlsv1.2 --max-redirs 0 ${shellQuote(installerUrl)} -o "$tmp" && sudo env RUNDEA_CONTROL_PLANE_URL=${shellQuote(origin)} RUNDEA_NODE_ID=${shellQuote(bootstrap.id)} RUNDEA_NODE_TOKEN=${shellQuote(bootstrap.token)} bash "$tmp"; status=$?; rm -f "$tmp"; exit $status; }`;
+}
+
 async function jsonRequest<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${api}${path}`, init);
   const text = await response.text();
@@ -150,6 +167,7 @@ export default function CanonicalApp() {
   const latestDeployment = deployments[0];
   const readyDeployment = deployments.find((item) => item.status === "READY");
   const secretRuntimeKeys = useMemo(() => new Set(runtimeVariables.filter((item) => item.secret).map((item) => item.key)), [runtimeVariables]);
+  const bootstrapInstallCommand = bootstrap ? createNodeInstallCommand(bootstrap) : null;
 
   async function refreshWorkspaces() {
     const body = await jsonRequest<{ workspaces: Workspace[] }>("/v0/workspaces");
@@ -267,6 +285,19 @@ export default function CanonicalApp() {
       const created = await jsonRequest<NodeRow & { token: string }>(`/v0/workspaces/${workspaceId}/nodes`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ name }) });
       setBootstrap({ id: created.id, name: created.name, token: created.token }); setNodeDraft(""); await refreshWorkspaceScope();
     });
+  }
+
+  async function copyBootstrapCommand() {
+    if (!bootstrapInstallCommand) {
+      setMessage("Open Rundea through its canonical HTTPS address to generate a safe installation command.");
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(bootstrapInstallCommand);
+      setMessage("Installation command copied.");
+    } catch {
+      setMessage("Copy failed. Select the installation command manually.");
+    }
   }
 
   async function archiveNode(node: NodeRow) {
@@ -393,7 +424,7 @@ export default function CanonicalApp() {
 
       {serviceId && section === "domains" && <section className="cPanel"><div className="cPanelTitle"><div><h2>Domains</h2><p>Rundea reconciles Caddy/TLS on the node. A domain requires a READY deployment.</p></div></div><form className="cInline" onSubmit={attachDomain}><input value={domainDraft} onChange={(e) => setDomainDraft(e.target.value)} placeholder="app.example.com"/><button disabled={busy || !readyDeployment}>Add domain</button></form>{domains.length ? <div className="cTable">{domains.map((domain) => <div className="cRow" key={domain.id}><div><strong>{domain.hostname}</strong><small>{domain.last_error ?? (domain.verified_at ? `Verified ${formatDate(domain.verified_at)}` : "Waiting for reconciliation")}</small></div><code>{shortId(domain.node_id)}</code><Status value={domain.status}/></div>)}</div> : <Empty>No domains attached.</Empty>}</section>}
 
-      {workspaceId && section === "nodes" && <section className="cPanel"><div className="cPanelTitle"><div><h2>Workspace nodes</h2><p>Only ACTIVE + ONLINE nodes in this workspace are eligible for automatic deployment.</p></div></div><form className="cInline" onSubmit={createNode}><input value={nodeDraft} onChange={(e) => setNodeDraft(e.target.value)} placeholder="Node name"/><button disabled={busy}>Create node</button></form>{bootstrap && <div className="cBootstrap"><strong>One-time bootstrap credential for {bootstrap.name}</strong><p>Save it now. Rundea will not show this credential again after activation.</p><code>{bootstrap.id}</code><code>{bootstrap.token}</code></div>}<div className="cTable">{nodes.map((node) => <div className="cRow cNode" key={node.id}><div><strong>{node.name}</strong><small>Last seen: {formatDate(node.lastSeenAt)} · Agent {node.agentVersion ?? "not connected"} {node.agentBuildSha ? `· ${shortId(node.agentBuildSha)}` : ""}</small>{node.compatibilityError && <em>{node.compatibilityError}</em>}</div><div className="cCaps">{node.agentCapabilities.slice(0, 4).map((cap) => <span key={cap}>{cap}</span>)}</div><Status value={node.lifecycleStatus === "ARCHIVED" ? "ARCHIVED" : node.status}/>{node.status === "OFFLINE" && node.lifecycleStatus === "ACTIVE" ? <button className="danger ghost" onClick={() => void archiveNode(node)}>Archive</button> : <span/>}</div>)}</div>{!nodes.length && <Empty>No nodes in this workspace yet.</Empty>}</section>}
+      {workspaceId && section === "nodes" && <section className="cPanel"><div className="cPanelTitle"><div><h2>Workspace nodes</h2><p>Only ACTIVE + ONLINE nodes in this workspace are eligible for automatic deployment.</p></div></div><form className="cInline" onSubmit={createNode}><input value={nodeDraft} onChange={(e) => setNodeDraft(e.target.value)} placeholder="Node name"/><button disabled={busy}>Create node</button></form>{bootstrap && <div className="cBootstrap"><strong>Install {bootstrap.name}</strong><p>Run this command once on the target Linux host with sudo access. It contains only the one-time node bootstrap credential; Rundea rotates it before the node becomes ONLINE.</p>{bootstrapInstallCommand ? <><code>{bootstrapInstallCommand}</code><button type="button" className="ghost" onClick={() => void copyBootstrapCommand()}>Copy install command</button></> : <p>Open Rundea through its canonical HTTPS address to generate the installer command.</p>}</div>}<div className="cTable">{nodes.map((node) => <div className="cRow cNode" key={node.id}><div><strong>{node.name}</strong><small>Last seen: {formatDate(node.lastSeenAt)} · Agent {node.agentVersion ?? "not connected"} {node.agentBuildSha ? `· ${shortId(node.agentBuildSha)}` : ""}</small>{node.compatibilityError && <em>{node.compatibilityError}</em>}</div><div className="cCaps">{node.agentCapabilities.slice(0, 4).map((cap) => <span key={cap}>{cap}</span>)}</div><Status value={node.lifecycleStatus === "ARCHIVED" ? "ARCHIVED" : node.status}/>{node.status === "OFFLINE" && node.lifecycleStatus === "ACTIVE" ? <button className="danger ghost" onClick={() => void archiveNode(node)}>Archive</button> : <span/>}</div>)}</div>{!nodes.length && <Empty>No nodes in this workspace yet.</Empty>}</section>}
 
       {serviceId && section === "observability" && <section className="cPanel"><div className="cPanelTitle"><div><h2>Observability</h2><p>Current runtime sample and the exact event/log stream for the latest revision.</p></div></div>{latestDeployment ? <><div className="cMetricGrid"><div><small>CPU</small><strong>{metrics?.latest ? `${metrics.latest.cpuPercent.toFixed(1)}%` : "No sample"}</strong></div><div><small>Memory</small><strong>{metrics?.latest ? bytes(metrics.latest.memoryUsageBytes) : "No sample"}</strong></div><div><small>RX / TX</small><strong>{metrics?.latest ? `${bytes(metrics.latest.networkRxBytes)} / ${bytes(metrics.latest.networkTxBytes)}` : "No sample"}</strong></div><div><small>Latest sample</small><strong>{metrics?.latest ? formatDate(metrics.latest.at) : "—"}</strong></div></div><div className="cLogs">{events.map((event, index) => <div key={event.id ?? index}><time>{formatDate(event.created_at)}</time><b>{event.stream ?? event.status ?? event.kind ?? "event"}</b><pre>{event.message ?? event.status ?? ""}</pre></div>)}</div>{!events.length && <Empty>No events yet for the latest revision.</Empty>}</> : <Empty>Deploy a revision to start runtime observability.</Empty>}</section>}
 
