@@ -1,6 +1,7 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { Pool } from "pg";
 import type { AgentEvent } from "@rundea/contracts";
+import { registerCanonicalAutodeployRoutes } from "./canonical-autodeploy";
 import { registerGitHubAutodeployRoutes } from "./github-autodeploy";
 import { registerGitHubProjectRoutes } from "./github-project-routes";
 import type { NodeCommandSocket } from "./node-qualification";
@@ -35,6 +36,7 @@ export function registerRuntimeControlRoutes(
   // its own module; do not duplicate registration in index.ts.
   registerServiceScopedRoutes(app, pool, sockets, requireControl, dispatchQueued);
   registerGitHubProjectRoutes(app, pool, requireControl);
+  registerCanonicalAutodeployRoutes(app, pool, requireControl);
   registerGitHubAutodeployRoutes(app, pool, requireControl, dispatchQueued, process.env.RUNDEA_GITHUB_WEBHOOK_SECRET);
 
   app.get("/v0/runtime-actions", { preHandler: requireControl }, async () => {
