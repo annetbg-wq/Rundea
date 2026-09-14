@@ -10,6 +10,8 @@ export const deploymentStatuses = [
 ] as const;
 
 export type DeploymentStatus = (typeof deploymentStatuses)[number];
+export const runtimeHealthStatuses = ["HEALTHY", "DEGRADED", "DOWN"] as const;
+export type RuntimeHealthStatus = (typeof runtimeHealthStatuses)[number];
 
 export const nodeQualificationProfiles = ["sendina-egress-v1"] as const;
 export type NodeQualificationProfile = (typeof nodeQualificationProfiles)[number];
@@ -126,6 +128,10 @@ export type AgentEvent =
       memoryLimitBytes: number;
       networkRxBytes: number;
       networkTxBytes: number;
+      runtimeHealth?: RuntimeHealthStatus;
+      restartDelta?: number;
+      uptimeSeconds?: number;
+      healthError?: string;
       at: string;
     }
   | {
