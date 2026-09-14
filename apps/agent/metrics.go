@@ -191,7 +191,8 @@ func collectRuntimeMetrics(ctx context.Context, w *writer) error {
 			return err
 		}
 	}
-	return firstErr
+	healthErr := collectRuntimeHealth(ctx, w, config{WorkDir: env("RUNDEA_WORK_DIR", "/var/lib/rundea")})
+	return errors.Join(firstErr, healthErr)
 }
 
 func runMetricsLoop(ctx context.Context, w *writer, interval time.Duration) {
@@ -216,7 +217,7 @@ func runMetricsLoop(ctx context.Context, w *writer, interval time.Duration) {
 		}
 		message := err.Error()
 		if message != lastError {
-			log.Printf("runtime metrics sampling degraded: %s", message)
+			log.Printf("runtime metrics/health sampling degraded: %s", message)
 			lastError = message
 		}
 	}
