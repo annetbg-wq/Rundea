@@ -1,7 +1,7 @@
 import type { AgentHelloEvent } from "@rundea/contracts";
 import type { RundeaEnvironment } from "./live-environment";
 
-export const requiredAgentCapabilities = ["artifactRetention", "buildArgs", "managedIngress", "resourceGuardrails", "runtimeMetrics"] as const;
+export const requiredAgentCapabilities = ["artifactRetention", "buildArgs", "continuousHealth", "managedIngress", "resourceGuardrails", "runtimeMetrics"] as const;
 
 const agentVersionPattern = /^\d+\.\d+\.\d+$/;
 const immutableBuildShaPattern = /^[0-9a-f]{40}$/;
