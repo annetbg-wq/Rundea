@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"syscall"
+	"time"
 )
 
 const (
@@ -12,6 +13,10 @@ const (
 	runtimePidsLimit            = "256"
 	runtimeLogMaxSize           = "10m"
 	runtimeLogMaxFiles          = "3"
+	buildMemoryLimit            = "1024m"
+	buildCPUPeriod              = "100000"
+	buildCPUQuota               = "100000"
+	buildTimeout                = 15 * time.Minute
 	minimumFreeDiskBytes uint64 = 2 * 1024 * 1024 * 1024
 	minimumFreeDiskPercent      = 10
 )
@@ -25,6 +30,15 @@ func runtimeResourceArgs() []string {
 		"--log-driver", "json-file",
 		"--log-opt", "max-size=" + runtimeLogMaxSize,
 		"--log-opt", "max-file=" + runtimeLogMaxFiles,
+	}
+}
+
+func buildResourceArgs() []string {
+	return []string{
+		"--memory", buildMemoryLimit,
+		"--memory-swap", buildMemoryLimit,
+		"--cpu-period", buildCPUPeriod,
+		"--cpu-quota", buildCPUQuota,
 	}
 }
 

@@ -3,6 +3,7 @@ package main
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestRuntimeResourceArgs(t *testing.T) {
@@ -19,6 +20,23 @@ func TestRuntimeResourceArgs(t *testing.T) {
 		if !strings.Contains(joined, required) {
 			t.Fatalf("resource args missing %q: %s", required, joined)
 		}
+	}
+}
+
+func TestBuildResourceArgs(t *testing.T) {
+	joined := strings.Join(buildResourceArgs(), " ")
+	for _, required := range []string{
+		"--memory 1024m",
+		"--memory-swap 1024m",
+		"--cpu-period 100000",
+		"--cpu-quota 100000",
+	} {
+		if !strings.Contains(joined, required) {
+			t.Fatalf("build resource args missing %q: %s", required, joined)
+		}
+	}
+	if buildTimeout != 15*time.Minute {
+		t.Fatalf("unexpected build timeout %s", buildTimeout)
 	}
 }
 

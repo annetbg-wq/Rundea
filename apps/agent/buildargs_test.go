@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-func TestDockerBuildCommandArgsSortsAndPassesValues(t *testing.T) {
+func TestDockerBuildCommandArgsSortsPassesValuesAndAppliesGuardrails(t *testing.T) {
 	args, err := dockerBuildCommandArgs("apps/web/Dockerfile", "rundea/test:build", map[string]string{
 		"ZETA":                "2",
 		"NEXT_PUBLIC_API_URL": "https://api.example.com",
@@ -14,7 +14,12 @@ func TestDockerBuildCommandArgsSortsAndPassesValues(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := []string{
-		"build", "--pull", "-f", "apps/web/Dockerfile", "-t", "rundea/test:build",
+		"build",
+		"--memory", "1024m",
+		"--memory-swap", "1024m",
+		"--cpu-period", "100000",
+		"--cpu-quota", "100000",
+		"--pull", "-f", "apps/web/Dockerfile", "-t", "rundea/test:build",
 		"--build-arg", "NEXT_PUBLIC_API_URL=https://api.example.com",
 		"--build-arg", "ZETA=2",
 		".",
