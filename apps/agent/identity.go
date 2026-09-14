@@ -21,6 +21,7 @@ var agentBuildSHA = "development"
 var declaredAgentCapabilities = []string{
 	"artifactRetention",
 	"buildArgs",
+	"continuousHealth",
 	"managedIngress",
 	"resourceGuardrails",
 	"runtimeMetrics",
