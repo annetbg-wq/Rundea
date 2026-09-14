@@ -15,6 +15,9 @@ type packageManifest struct {
 }
 
 func prepareDockerfile(sourceDir, requested string) (path string, plan string, err error) {
+	if err := requireDiskHeadroom(sourceDir); err != nil {
+		return "", "", fmt.Errorf("build admission: %w", err)
+	}
 	if requested != "" {
 		candidate := filepath.Join(sourceDir, requested)
 		if info, statErr := os.Stat(candidate); statErr != nil || info.IsDir() {

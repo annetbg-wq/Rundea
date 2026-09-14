@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"regexp"
 	"strings"
 )
@@ -25,6 +26,9 @@ func validateNamedGitRef(ref string) error {
 }
 
 func cloneSource(ctx context.Context, w *writer, deploymentID, repository, ref, destination string) error {
+	if err := requireDiskHeadroom(filepath.Dir(destination)); err != nil {
+		return fmt.Errorf("source checkout admission: %w", err)
+	}
 	if isFullGitCommit(ref) {
 		expected := strings.ToLower(ref)
 		steps := []struct {

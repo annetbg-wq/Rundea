@@ -21,6 +21,7 @@ var agentBuildSHA = "development"
 var declaredAgentCapabilities = []string{
 	"buildArgs",
 	"managedIngress",
+	"resourceGuardrails",
 	"runtimeMetrics",
 	"runtimeRecovery",
 	"safePromotion",

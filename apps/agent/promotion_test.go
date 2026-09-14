@@ -26,6 +26,13 @@ func TestBackendRunArgsNeverBindStablePort(t *testing.T) {
 	joined := strings.Join(args, " ")
 	for _, required := range []string{
 		"--restart unless-stopped",
+		"--cpus 1.0",
+		"--memory 768m",
+		"--memory-swap 768m",
+		"--pids-limit 256",
+		"--log-driver json-file",
+		"--log-opt max-size=10m",
+		"--log-opt max-file=3",
 		"rundea.backend=true",
 		"rundea.deployment=12345678-1234-1234-9234-123456789abc",
 		"rundea.managed=true",
