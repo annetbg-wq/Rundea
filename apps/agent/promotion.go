@@ -99,6 +99,7 @@ func backendRunArgs(spec safeRuntimeSpec, name string) []string {
 		labels[key] = value
 	}
 	args := []string{"run", "-d", "--restart", "unless-stopped"}
+	args = append(args, runtimeResourceArgs()...)
 	keys := make([]string, 0, len(labels))
 	for key := range labels {
 		keys = append(keys, key)
@@ -191,6 +192,9 @@ func runSafeRuntime(ctx context.Context, cfg config, w *writer, spec safeRuntime
 			return "", fmt.Errorf("committed runtime route is not healthy: %w", err)
 		}
 		return inspectContainerID(ctx, committed.BackendContainer)
+	}
+	if err := requireDiskHeadroom(spec.WorkDir); err != nil {
+		return "", fmt.Errorf("runtime admission: %w", err)
 	}
 
 	backendName := revisionContainerName(spec.ContainerName, spec.DeploymentID)
