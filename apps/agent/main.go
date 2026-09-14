@@ -303,7 +303,7 @@ func runDeployment(cfg config, w *writer, cmd deployCommand) {
 		fail(fmt.Errorf("docker build arguments: %w", err))
 		return
 	}
-	if err := runStreamingIn(ctx, sourceDir, w, cmd.DeploymentID, "build", "docker", buildArgs...); err != nil {
+	if err := runGuardedDockerBuild(ctx, sourceDir, w, cmd.DeploymentID, buildArgs); err != nil {
 		fail(fmt.Errorf("docker build: %w", err))
 		return
 	}
