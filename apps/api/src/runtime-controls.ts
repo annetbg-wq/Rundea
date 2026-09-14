@@ -2,6 +2,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { Pool } from "pg";
 import type { AgentEvent } from "@rundea/contracts";
 import { registerGitHubAutodeployRoutes } from "./github-autodeploy";
+import { registerGitHubProjectRoutes } from "./github-project-routes";
 import type { NodeCommandSocket } from "./node-qualification";
 import {
   executeRestartOperation,
@@ -30,9 +31,10 @@ export function registerRuntimeControlRoutes(
 ): void {
   // This function is the existing entrypoint-owned registration seam that has
   // both the authenticated node socket map and deployment dispatcher. Keep the
-  // new canonical service routes here until the Control Plane route registry is
-  // split into its own module; do not duplicate registration in index.ts.
+  // canonical routes here until the Control Plane route registry is split into
+  // its own module; do not duplicate registration in index.ts.
   registerServiceScopedRoutes(app, pool, sockets, requireControl, dispatchQueued);
+  registerGitHubProjectRoutes(app, pool, requireControl);
   registerGitHubAutodeployRoutes(app, pool, requireControl, dispatchQueued, process.env.RUNDEA_GITHUB_WEBHOOK_SECRET);
 
   app.get("/v0/runtime-actions", { preHandler: requireControl }, async () => {
