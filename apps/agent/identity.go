@@ -76,6 +76,7 @@ func handleIdentityCLI(args []string, stdout io.Writer) (bool, int) {
 		if err := json.NewEncoder(stdout).Encode(currentAgentIdentity()); err != nil {
 			return true, 1
 		}
+		return true, 0
 	}
 
 	const prefix = "--require-capability="

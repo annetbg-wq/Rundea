@@ -10,8 +10,9 @@ func TestSystemReserveUsesFloorAndPercentage(t *testing.T) {
 	if got := systemReserveBytes(2 * 1024 * mib); got != 768*mib {
 		t.Fatalf("2 GiB node reserve = %d MiB, want 768", got/mib)
 	}
-	if got := systemReserveBytes(8 * 1024 * mib); got != (8*1024/100*20)*mib {
-		t.Fatalf("8 GiB node reserve = %d MiB, want 20%%", got/mib)
+	total := uint64(8 * 1024 * 1024 * 1024)
+	if got := systemReserveBytes(total); got != total/5 {
+		t.Fatalf("8 GiB node reserve = %d bytes, want exact 20%% = %d", got, total/5)
 	}
 }
 

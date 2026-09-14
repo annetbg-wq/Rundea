@@ -14,13 +14,12 @@ import (
 
 const (
 	minimumSystemReserveBytes uint64 = 768 * 1024 * 1024
-	systemReservePercent      uint64 = 20
 	runtimeMemoryLimitBytes   uint64 = 768 * 1024 * 1024
 	buildMemoryLimitBytes     uint64 = 1024 * 1024 * 1024
 )
 
 func systemReserveBytes(totalBytes uint64) uint64 {
-	percentage := totalBytes / 100 * systemReservePercent
+	percentage := totalBytes / 5
 	if percentage < minimumSystemReserveBytes {
 		return minimumSystemReserveBytes
 	}
