@@ -1,5 +1,9 @@
 import { createGitHubAppJwt, GitHubArchiveProvider, loadGitHubAppConfig, type GitHubAppConfig } from "./github-app-source";
-import { inferGitHubProjectDiscovery, type GitHubProjectDiscovery } from "./github-project-discovery";
+import {
+  inferGitHubProjectDiscovery,
+  type DiscoveryConfidence,
+  type GitHubProjectDiscovery,
+} from "./github-project-discovery";
 
 const githubApiBase = "https://api.github.com";
 const githubApiVersion = "2022-11-28";
@@ -10,7 +14,6 @@ const maxDiscoveryFiles = 96;
 const maxDiscoveryFileBytes = 256 * 1024;
 
 type FetchLike = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
-
 type TreeEntry = { path?: unknown; type?: unknown; size?: unknown };
 
 export type GitHubRepositoryChoice = Readonly<{
@@ -138,7 +141,9 @@ function dockerPorts(raw: string | undefined): number[] {
 function dockerNames(raw: string | undefined, instruction: "ARG" | "ENV"): string[] {
   if (!raw) return [];
   const values: string[] = [];
-  const regex = instruction === "ARG" ? /^ARG\s+([A-Za-z_][A-Za-z0-9_]*)\b/i : /^ENV\s+([A-Za-z_][A-Za-z0-9_]*)\b/i;
+  const regex = instruction === "ARG"
+    ? /^ARG\s+([A-Za-z_][A-Za-z0-9_]*)\b/i
+    : /^ENV\s+([A-Za-z_][A-Za-z0-9_]*)\b/i;
   for (const line of raw.split(/\r?\n/)) {
     const match = line.trim().match(regex)?.[1];
     if (match) values.push(match);
@@ -188,15 +193,17 @@ function workspacePatterns(raw: string | undefined): string[] {
 function patternMatchesDirectory(pattern: string, directory: string): boolean {
   if (pattern === directory) return true;
   if (!pattern.includes("*")) return false;
-  const escaped = pattern.split("*").map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("[^/]+?");
+  const escaped = pattern
+    .split("*")
+    .map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+    .join("[^/]+?");
   return new RegExp(`^${escaped}$`).test(directory);
 }
 
 function relevantDiscoveryPath(path: string): boolean {
   const name = basename(path);
   if (name === "package.json" || name === ".env.example" || name === ".env.sample" || name === "example.env") return true;
-  if (name === "Dockerfile" || name.startsWith("Dockerfile.")) return true;
-  return false;
+  return name === "Dockerfile" || name.startsWith("Dockerfile.");
 }
 
 export class GitHubProjectConnector {
@@ -237,7 +244,9 @@ export class GitHubProjectConnector {
     });
     const installations = await json(installationResponse, "GitHub App installations");
     if (!Array.isArray(installations)) throw new Error("GitHub App installations response is invalid");
-    if (installations.length > maxInstallations) throw new Error(`GitHub App has more than ${maxInstallations} installations; narrow the installation scope`);
+    if (installations.length > maxInstallations) {
+      throw new Error(`GitHub App has more than ${maxInstallations} installations; narrow the installation scope`);
+    }
 
     const repositories = new Map<number, GitHubRepositoryChoice>();
     for (const installation of installations) {
@@ -270,7 +279,11 @@ export class GitHubProjectConnector {
     return [...repositories.values()].sort((left, right) => left.fullName.localeCompare(right.fullName));
   }
 
-  private async recursiveFiles(repositoryFullName: string, revisionSha: string, installationId: number): Promise<Record<string, string>> {
+  private async recursiveFiles(
+    repositoryFullName: string,
+    revisionSha: string,
+    installationId: number,
+  ): Promise<Record<string, string>> {
     const [owner, repository] = repositoryFullName.split("/");
     if (!owner || !repository) throw new Error("GitHub repository identity is invalid");
     const token = await this.installationToken(installationId);
@@ -311,7 +324,11 @@ export class GitHubProjectConnector {
   async inspect(repositoryFullName: string, selectedBranch?: string): Promise<EnrichedGitHubProjectDiscovery> {
     const inspection = await this.archiveProvider.inspectRepository(repositoryFullName, selectedBranch);
     const base = inferGitHubProjectDiscovery(inspection);
-    const nestedFiles = await this.recursiveFiles(inspection.repositoryFullName, inspection.revisionSha, inspection.installationId);
+    const nestedFiles = await this.recursiveFiles(
+      inspection.repositoryFullName,
+      inspection.revisionSha,
+      inspection.installationId,
+    );
     const allFiles = { ...inspection.files, ...nestedFiles };
     const rootWorkspaces = workspacePatterns(allFiles["package.json"]);
     const packageDirectories = Object.keys(allFiles)
@@ -330,9 +347,11 @@ export class GitHubProjectConnector {
 
     const services: DiscoveredServiceCandidate[] = [...candidateDirectories]
       .sort((left, right) => left.localeCompare(right))
-      .map((directory) => {
+      .map((directory): DiscoveredServiceCandidate => {
         const prefix = directory === "." ? "" : `${directory}/`;
-        const dockerfile = Object.keys(allFiles).find((path) => dirname(path) === directory && (basename(path) === "Dockerfile" || basename(path).startsWith("Dockerfile."))) ?? null;
+        const dockerfile = Object.keys(allFiles).find(
+          (path) => dirname(path) === directory && (basename(path) === "Dockerfile" || basename(path).startsWith("Dockerfile.")),
+        ) ?? null;
         const manifest = allFiles[`${prefix}package.json`] !== undefined ? `${prefix}package.json` : null;
         const docker = dockerfile ? allFiles[dockerfile] : undefined;
         const envExample = [".env.example", ".env.sample", "example.env"]
@@ -346,7 +365,11 @@ export class GitHubProjectConnector {
         ]);
         const healthcheckPath = dockerHealthcheck(docker);
         const evidence = [dockerfile, manifest, envExample].filter((value): value is string => Boolean(value));
-        const confidence = dockerfile && ports.length === 1 ? "CONFIRMED" : dockerfile || manifest ? "HIGH_CONFIDENCE" : "NEEDS_CONFIRMATION";
+        const confidence: DiscoveredServiceCandidate["confidence"] = dockerfile && ports.length === 1
+          ? "CONFIRMED"
+          : dockerfile || manifest
+            ? "HIGH_CONFIDENCE"
+            : "NEEDS_CONFIRMATION";
         return Object.freeze({
           name: directory === "." ? repositoryFullName.split("/")[1]! : basename(directory),
           path: directory,
@@ -363,36 +386,55 @@ export class GitHubProjectConnector {
 
     const servicePaths = services.map((service) => service.path);
     const allPorts = numericUnique(services.flatMap((service) => [...service.containerPorts]));
-    const allEnvironmentNames = uniqueSorted(services.flatMap((service) => [...service.environmentVariableNames, ...service.buildArgumentNames]));
-    const needsConfirmation = services.some((service) => service.confidence !== "CONFIRMED" || service.containerPorts.length !== 1);
+    const allEnvironmentNames = uniqueSorted(
+      services.flatMap((service) => [...service.environmentVariableNames, ...service.buildArgumentNames]),
+    );
+    const needsConfirmation = services.some(
+      (service) => service.confidence !== "CONFIRMED" || service.containerPorts.length !== 1,
+    );
+
+    const monorepoConfidence: DiscoveryConfidence = services.length > 1
+      ? "CONFIRMED"
+      : base.discovery.monorepo.confidence;
+    const serviceCandidatesConfidence: DiscoveryConfidence = services.length > 0 ? "CONFIRMED" : "MISSING";
+    const containerPortsConfidence: DiscoveryConfidence = allPorts.length > 0
+      ? services.every((service) => service.containerPorts.length === 1)
+        ? "HIGH_CONFIDENCE"
+        : "NEEDS_CONFIRMATION"
+      : "MISSING";
+    const environmentNamesConfidence: DiscoveryConfidence = allEnvironmentNames.length > 0 ? "CONFIRMED" : "MISSING";
+
+    const discovery: EnrichedGitHubProjectDiscovery["discovery"] = Object.freeze({
+      ...base.discovery,
+      monorepo: {
+        value: services.length > 1 || base.discovery.monorepo.value,
+        confidence: monorepoConfidence,
+        evidence: services.length > 1 ? Object.freeze(servicePaths) : base.discovery.monorepo.evidence,
+      },
+      serviceCandidates: {
+        value: Object.freeze(servicePaths),
+        confidence: serviceCandidatesConfidence,
+        evidence: Object.freeze(services.flatMap((service) => [...service.evidence])),
+      },
+      containerPorts: {
+        value: Object.freeze(allPorts),
+        confidence: containerPortsConfidence,
+        evidence: Object.freeze(
+          services.flatMap((service) => service.dockerfile ? [`${service.dockerfile}#EXPOSE`] : []),
+        ),
+      },
+      environmentVariableNames: {
+        value: Object.freeze(allEnvironmentNames),
+        confidence: environmentNamesConfidence,
+        evidence: Object.freeze(services.flatMap((service) => [...service.evidence])),
+      },
+      services: Object.freeze(services),
+    });
 
     return Object.freeze({
       ...base,
       reviewState: needsConfirmation ? "NEEDS_CONFIRMATION" : base.reviewState,
-      discovery: Object.freeze({
-        ...base.discovery,
-        monorepo: {
-          value: services.length > 1 || base.discovery.monorepo.value,
-          confidence: services.length > 1 ? "CONFIRMED" : base.discovery.monorepo.confidence,
-          evidence: services.length > 1 ? Object.freeze(servicePaths) : base.discovery.monorepo.evidence,
-        },
-        serviceCandidates: {
-          value: Object.freeze(servicePaths),
-          confidence: services.length > 0 ? "CONFIRMED" : "MISSING",
-          evidence: Object.freeze(services.flatMap((service) => [...service.evidence])),
-        },
-        containerPorts: {
-          value: Object.freeze(allPorts),
-          confidence: allPorts.length > 0 ? (services.every((service) => service.containerPorts.length === 1) ? "HIGH_CONFIDENCE" : "NEEDS_CONFIRMATION") : "MISSING",
-          evidence: Object.freeze(services.flatMap((service) => service.dockerfile ? [`${service.dockerfile}#EXPOSE`] : [])),
-        },
-        environmentVariableNames: {
-          value: Object.freeze(allEnvironmentNames),
-          confidence: allEnvironmentNames.length > 0 ? "CONFIRMED" : "MISSING",
-          evidence: Object.freeze(services.flatMap((service) => [...service.evidence])),
-        },
-        services: Object.freeze(services),
-      }),
+      discovery,
     });
   }
 }
