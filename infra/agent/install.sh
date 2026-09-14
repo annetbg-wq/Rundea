@@ -33,9 +33,6 @@ free_mb="$(df -Pm / | awk 'NR==2 {print $4}')"
   exit 1
 }
 
-# Prove outbound HTTPS/TLS connectivity to the exact Control Plane before the
-# one-time credential is ever consumed. This catches DNS, firewall, proxy and
-# certificate problems while the installation is still safely retryable.
 curl --fail --silent --show-error \
   --proto '=https' --tlsv1.2 --max-redirs 0 \
   --connect-timeout 10 --max-time 15 \
@@ -70,9 +67,6 @@ cleanup() { rm -f "$tmp_agent" "$tmp_bootstrap_config" "$tmp_exchange_config" "$
 trap cleanup EXIT
 chmod 0600 "$tmp_bootstrap_config" "$tmp_exchange_config" "$tmp_self_config"
 
-# A fresh node token is bootstrap-only. It may fetch the pinned Agent release,
-# but it cannot authenticate the Agent WebSocket. Keep it in a private curl
-# config so the credential never appears in the curl process command line.
 cat >"$tmp_bootstrap_config" <<EOF
 silent
 show-error
@@ -99,17 +93,13 @@ printf '%s  %s\n' "$expected_sha" "$tmp_agent" | sha256sum --check --status || {
   exit 1
 }
 
-# Capability preflight is executed against the verified binary before the
-# bootstrap credential is consumed. This prevents installing a valid but
-# protocol-incompatible Agent and makes feature support explicit rather than
-# inferring it by inspecting strings inside the executable.
 chmod 0700 "$tmp_agent"
 agent_identity="$("$tmp_agent" --identity 2>/dev/null || true)"
 [[ -n "$agent_identity" ]] || {
   echo "Downloaded Rundea Agent does not expose a valid self-identity" >&2
   exit 1
 }
-for capability in buildArgs buildGuardrails managedIngress runtimeMetrics; do
+for capability in artifactRetention buildArgs buildGuardrails managedIngress nodeCapacity resourceGuardrails runtimeMetrics; do
   if ! "$tmp_agent" "--require-capability=${capability}" >/dev/null 2>&1; then
     echo "Downloaded Rundea Agent is missing required capability: ${capability}" >&2
     exit 1
@@ -117,10 +107,6 @@ for capability in buildArgs buildGuardrails managedIngress runtimeMetrics; do
 done
 printf 'Verified Rundea Agent identity before install: %s\n' "$agent_identity"
 
-# Prepare every durable local artifact before consuming the one-time bootstrap
-# credential. If release download, checksum/capability verification, file
-# installation or unit creation fails, the bootstrap token remains valid and
-# the command can be safely retried.
 install -m 0755 "$tmp_agent" /usr/local/bin/rundea-agent
 agent_token="$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')"
 [[ "$agent_token" =~ ^[a-f0-9]{64}$ ]] || { echo "failed to generate Agent credential" >&2; exit 1; }
@@ -162,10 +148,6 @@ header = "Content-Type: application/json"
 data = "{\"agentToken\":\"${agent_token}\"}"
 EOF
 
-# Commit point: rotate the server-side node credential only after the verified
-# binary, durable Agent credential and systemd unit already exist locally. If a
-# later systemd operation fails, /etc/rundea/agent.env still contains the valid
-# permanent credential and recovery does not require the consumed bootstrap.
 curl --config "$tmp_exchange_config" \
   --proto '=https' --tlsv1.2 --max-redirs 0 \
   "${RUNDEA_CONTROL_PLANE_URL}/v0/nodes/${RUNDEA_NODE_ID}/bootstrap/exchange" \
@@ -184,9 +166,6 @@ EOF
 systemctl daemon-reload
 systemctl enable --now rundea-agent
 
-# Success is server-authoritative. Do not tell the user the node is installed
-# merely because systemd started a process; wait until the authenticated Agent
-# WebSocket has made this exact node ONLINE in the Control Plane.
 self_status=""
 for _attempt in $(seq 1 30); do
   self_status="$(curl --config "$tmp_self_config" \

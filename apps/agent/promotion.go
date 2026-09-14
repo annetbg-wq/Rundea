@@ -122,6 +122,9 @@ func backendRunArgs(spec safeRuntimeSpec, name string) []string {
 }
 
 func startBackendContainer(ctx context.Context, spec safeRuntimeSpec, name string) (string, error) {
+	if err := requireNodeMemoryCapacity(ctx, runtimeMemoryLimitBytes, "runtime admission"); err != nil {
+		return "", err
+	}
 	out, err := exec.CommandContext(ctx, "docker", backendRunArgs(spec, name)...).CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("start runtime backend %s: %w: %s", name, err, strings.TrimSpace(string(out)))
