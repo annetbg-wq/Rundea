@@ -491,6 +491,14 @@ try {
     ],
   }, null, 2));
 } finally {
+  try {
+    const cleanup = await rawRequest(`/v0/services/${serviceName}/autodeploy`, { method: "DELETE", headers });
+    if (!cleanup.response.ok && cleanup.response.status !== 404) {
+      console.warn(`legacy autodeploy cleanup returned ${cleanup.response.status}: ${cleanup.text}`);
+    }
+  } catch (error) {
+    console.warn(`legacy autodeploy cleanup deferred: ${error instanceof Error ? error.message : String(error)}`);
+  }
   if (agent && agent.exitCode === null) {
     agent.kill("SIGTERM");
     await Promise.race([new Promise((resolve) => agent.once("exit", resolve)), sleep(3000)]);

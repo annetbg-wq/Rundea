@@ -187,15 +187,6 @@ export async function runCanonicalAutodeployAcceptance(options = {}) {
       throw new Error("canonical autodeploy response leaked infrastructure host port");
     }
 
-    await db.query(
-      `DELETE FROM service_autodeploys
-        WHERE service_id IS NULL
-          AND service_name LIKE 'acceptance-%'
-          AND repository_full_name=$1
-          AND source_branch='main'`,
-      [fixtureRepositoryFullName],
-    );
-
     const deliveryId = `canonical-${suffix}`;
     const push = await signedPush(deliveryId);
     if (push.status !== "TRIGGERED" || push.deployments?.length !== 1) {
