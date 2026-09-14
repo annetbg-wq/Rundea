@@ -203,10 +203,11 @@ func collectRuntimeHealth(ctx context.Context, w *writer, cfg config) (map[strin
 		restartDelta := uint64(0)
 
 		if changed {
-			w.log(route.DeploymentID, "system", fmt.Sprintf("runtime-health %s failures=%d%s", next.State, next.Failures, func() string {
-				if errorText == "" { return "" }
-				return " error=" + errorText
-			}()))
+			message := fmt.Sprintf("runtime-health %s failures=%d", next.State, next.Failures)
+			if errorText != "" {
+				message += " error=" + errorText
+			}
+			w.log(route.DeploymentID, "system", message)
 		}
 
 		shouldRestart := next.State == "DOWN" && (next.RestartAfter.IsZero() || !now.Before(next.RestartAfter))
@@ -225,19 +226,18 @@ func collectRuntimeHealth(ctx context.Context, w *writer, cfg config) (map[strin
 				errorText = sanitizeRuntimeHealthError(restartErr.Error())
 				w.log(route.DeploymentID, "system", "runtime-health DOWN automatic-restart=FAILED error="+errorText)
 			} else {
-				next.State = "HEALTHY"
-				next.Failures = 0
-				errorText = ""
-				w.log(route.DeploymentID, "system", "runtime-health HEALTHY failures=0 automatic-restart=SUCCEEDED")
+				// Keep this sample DOWN so the Control Plane records the outage and
+				// restart attempt. The next independent successful probe promotes the
+				// runtime back to HEALTHY while preserving the persisted cooldown.
+				errorText = "automatic restart succeeded; awaiting independent health confirmation"
+				w.log(route.DeploymentID, "system", "runtime-health DOWN automatic-restart=SUCCEEDED awaiting-next-probe")
 			}
 		}
 
 		state.Trackers[route.DeploymentID] = next
 		uptime, uptimeErr := runtimeContainerUptimeSeconds(ctx, route.BackendContainer, time.Now().UTC())
-		if uptimeErr != nil {
-			if errorText == "" {
-				errorText = sanitizeRuntimeHealthError(uptimeErr.Error())
-			}
+		if uptimeErr != nil && errorText == "" {
+			errorText = sanitizeRuntimeHealthError(uptimeErr.Error())
 		}
 		samples[route.DeploymentID] = runtimeHealthSample{
 			State: next.State, RestartDelta: restartDelta, UptimeSeconds: uptime, Error: errorText,
