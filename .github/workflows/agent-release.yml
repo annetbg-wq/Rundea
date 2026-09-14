@@ -187,6 +187,7 @@ jobs:
           test -f rundea-agent-linux-arm64
           test -f SHA256SUMS
           sha256sum --check SHA256SUMS
+          chmod +x rundea-agent-linux-amd64 rundea-agent-linux-arm64
           identity="$(./rundea-agent-linux-amd64 --identity)"
           [[ "${identity}" == *"\"buildSha\":\"${RELEASE_SHA}\""* ]] || {
             echo "Published Agent identity does not match release SHA" >&2
