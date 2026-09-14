@@ -1,5 +1,11 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { Pool } from "pg";
+import {
+  confirmDiscoveredServices,
+  DiscoveryConfirmationError,
+  getConfirmedServiceSource,
+  type DiscoverySelection,
+} from "./discovery-confirmation";
 import { GitHubProjectConnector } from "./github-project-connector";
 import { PostgresProjectSourceRepository } from "./project-sources";
 import { internalLegacyProjectId, internalLegacyWorkspaceId } from "./service-scope";
@@ -12,6 +18,12 @@ function requireProjectId(value: string): string {
   const projectId = value.trim().toLowerCase();
   if (!uuidPattern.test(projectId)) throw new Error("projectId must be a UUID");
   return projectId;
+}
+
+function requireServiceId(value: string): string {
+  const serviceId = value.trim().toLowerCase();
+  if (!uuidPattern.test(serviceId)) throw new Error("serviceId must be a UUID");
+  return serviceId;
 }
 
 async function requireActiveProject(pool: Pool, projectId: string): Promise<void> {
@@ -35,6 +47,11 @@ function optionalBranch(value: string | undefined): string | undefined {
   const branch = value.trim();
   if (!branch || branch.length > 255 || /[\r\n\u0000]/.test(branch)) throw new Error("selectedBranch is invalid");
   return branch;
+}
+
+function sendConfirmationError(reply: FastifyReply, error: unknown) {
+  if (error instanceof DiscoveryConfirmationError) return reply.code(error.statusCode).send({ error: error.message });
+  return reply.code(400).send({ error: error instanceof Error ? error.message : "discovery confirmation failed" });
 }
 
 export function registerGitHubProjectRoutes(
@@ -94,6 +111,36 @@ export function registerGitHubProjectRoutes(
         request.log.error(error, "GitHub project source discovery failed");
         const message = error instanceof Error ? error.message : "GitHub repository discovery failed";
         return reply.code(message.includes("not configured") ? 503 : message.includes("unavailable") ? 404 : 400).send({ error: message });
+      }
+    },
+  );
+
+  app.post<{ Params: { projectId: string }; Body: { services?: DiscoverySelection[] } }>(
+    "/v0/projects/:projectId/source/github/confirm",
+    { preHandler: requireControl },
+    async (request, reply) => {
+      try {
+        const projectId = requireProjectId(request.params.projectId);
+        await requireActiveProject(pool, projectId);
+        const services = await confirmDiscoveredServices(pool, projectId, request.body?.services);
+        return reply.code(201).send({ projectId, services });
+      } catch (error) {
+        request.log.error(error, "GitHub discovery confirmation failed");
+        return sendConfirmationError(reply, error);
+      }
+    },
+  );
+
+  app.get<{ Params: { serviceId: string } }>(
+    "/v0/services/:serviceId/source-config",
+    { preHandler: requireControl },
+    async (request, reply) => {
+      try {
+        const serviceId = requireServiceId(request.params.serviceId);
+        const source = await getConfirmedServiceSource(pool, serviceId);
+        return source ? reply.send({ source }) : reply.code(404).send({ error: "confirmed service source is unavailable" });
+      } catch (error) {
+        return reply.code(400).send({ error: error instanceof Error ? error.message : "service source config could not be read" });
       }
     },
   );
