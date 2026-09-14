@@ -191,6 +191,9 @@ func runSafeRuntime(ctx context.Context, cfg config, w *writer, spec safeRuntime
 		if err := waitForRoutedHealth(ctx, *committed, spec.HealthTimeout); err != nil {
 			return "", fmt.Errorf("committed runtime route is not healthy: %w", err)
 		}
+		if _, retentionErr := recordRetainedArtifacts(cfg, spec.ServiceName, spec.DeploymentID, ""); retentionErr != nil {
+			w.log(spec.DeploymentID, "system", "artifact retention state recovery deferred: "+retentionErr.Error())
+		}
 		return inspectContainerID(ctx, committed.BackendContainer)
 	}
 	if err := requireDiskHeadroom(spec.WorkDir); err != nil {
@@ -245,6 +248,15 @@ func runSafeRuntime(ctx context.Context, cfg config, w *writer, spec safeRuntime
 		return "", err
 	}
 	w.log(spec.DeploymentID, "system", "stable runtime route switched without rebinding the service port")
+	previousDeploymentID := ""
+	if previous != nil {
+		previousDeploymentID = previous.DeploymentID
+	}
+	if evicted, retentionErr := recordRetainedArtifacts(cfg, spec.ServiceName, spec.DeploymentID, previousDeploymentID); retentionErr != nil {
+		w.log(spec.DeploymentID, "system", "artifact retention update deferred: "+retentionErr.Error())
+	} else {
+		scheduleRetiredArtifactCleanup(cfg, w, spec.DeploymentID, evicted)
+	}
 	if previous != nil && previous.DeploymentID != spec.DeploymentID && previous.BackendContainer != backendName {
 		scheduleBackendDrain(w, *previous)
 	}

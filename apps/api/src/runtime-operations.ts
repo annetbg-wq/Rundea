@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
 import type { AgentCommand } from "@rundea/contracts";
 import type { NodeCommandSocket } from "./node-qualification";
+import { rollbackTargetIsRetained } from "./runtime-retention";
 import { copyDeploymentEnvironment } from "./service-variables";
 
 export class RuntimeOperationError extends Error {
@@ -195,6 +196,9 @@ export async function executeRollbackOperation(
     if (current.id === target.id) return rollbackAndThrow(client, 409, "target deployment is already the current revision");
     if (current.node_id !== nodeId) {
       return rollbackAndThrow(client, 409, "v0 rollback requires target and current revision on the same node");
+    }
+    if (!(await rollbackTargetIsRetained(client, target.service_name, nodeId, target.id))) {
+      return rollbackAndThrow(client, 409, "rollback target is outside the retained artifact window");
     }
     if (await nodeHasActiveDeployment(client, nodeId)) {
       return rollbackAndThrow(client, 409, "node already has an active deployment operation");

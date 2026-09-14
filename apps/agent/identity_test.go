@@ -16,7 +16,7 @@ func TestCurrentAgentIdentity(t *testing.T) {
 	if strings.TrimSpace(identity.BuildSHA) == "" {
 		t.Fatal("build SHA must never be empty")
 	}
-	for _, required := range []string{"buildArgs", "managedIngress", "resourceGuardrails", "runtimeMetrics"} {
+	for _, required := range []string{"artifactRetention", "buildArgs", "managedIngress", "resourceGuardrails", "runtimeMetrics"} {
 		if !hasAgentCapability(required) {
 			t.Fatalf("required capability %q is missing", required)
 		}
@@ -49,6 +49,9 @@ func TestRequireCapabilityCLI(t *testing.T) {
 	}
 	if handled, code := handleIdentityCLI([]string{"--require-capability=resourceGuardrails"}, &bytes.Buffer{}); !handled || code != 0 {
 		t.Fatalf("resource guardrail capability handled=%v code=%d", handled, code)
+	}
+	if handled, code := handleIdentityCLI([]string{"--require-capability=artifactRetention"}, &bytes.Buffer{}); !handled || code != 0 {
+		t.Fatalf("artifact retention capability handled=%v code=%d", handled, code)
 	}
 	if handled, code := handleIdentityCLI([]string{"--require-capability=not-real"}, &bytes.Buffer{}); !handled || code != 3 {
 		t.Fatalf("unknown capability handled=%v code=%d", handled, code)
