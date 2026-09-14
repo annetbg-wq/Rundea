@@ -39,7 +39,9 @@ func dockerBuildCommandArgs(dockerfile, imageTag string, values map[string]strin
 	}
 	sort.Strings(keys)
 
-	args := []string{"build", "--pull", "-f", dockerfile, "-t", imageTag}
+	args := []string{"build"}
+	args = append(args, buildResourceArgs()...)
+	args = append(args, "--pull", "-f", dockerfile, "-t", imageTag)
 	for _, key := range keys {
 		args = append(args, "--build-arg", key+"="+values[key])
 	}
