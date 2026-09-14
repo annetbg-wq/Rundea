@@ -201,15 +201,24 @@ export async function runCanonicalAutodeployAcceptance(options = {}) {
       if (row.service_id !== service.id) throw new FatalPollError(`push deployment service_id ${row.service_id} != ${service.id}`);
       if (row.source_ref !== fixtureSha) throw new FatalPollError(`push deployment source_ref ${row.source_ref} != ${fixtureSha}`);
       if (row.source_delivery !== "BROKER") throw new FatalPollError(`push deployment source_delivery is ${row.source_delivery}, expected BROKER`);
-      if (!Number.isInteger(row.host_port) || row.host_port < 18000 || row.host_port > 29999) {
-        throw new FatalPollError(`push deployment did not retain a Rundea managed port: ${row.host_port}`);
+      if (Object.hasOwn(row, "host_port") || Object.hasOwn(row, "hostPort")) {
+        throw new FatalPollError("service-scoped deployment response leaked infrastructure host port");
       }
       if (row.status === "READY") return { done: true, value: row };
       if (["FAILED", "CANCELLED", "ROLLED_BACK"].includes(row.status)) throw new FatalPollError(`push deployment reached ${row.status}`);
       return { last: row.status };
     }, 240_000, 1500);
 
-    const live = await fetch(`http://127.0.0.1:${ready.host_port}/`);
+    const storedDeployment = await db.query(
+      "SELECT host_port FROM deployments WHERE id=$1 AND service_id=$2",
+      [deploymentId, service.id],
+    );
+    const managedHostPort = Number(storedDeployment.rows[0]?.host_port);
+    if (!Number.isInteger(managedHostPort) || managedHostPort < 18000 || managedHostPort > 29999) {
+      throw new Error(`push deployment did not retain a Rundea managed port internally: ${storedDeployment.rows[0]?.host_port}`);
+    }
+
+    const live = await fetch(`http://127.0.0.1:${managedHostPort}/`);
     const body = await live.text();
     if (!live.ok || !body.includes("Hello from Render!") || live.headers.get(markerHeader) !== deploymentId) {
       throw new Error(`canonical push managed port is not live: status=${live.status} marker=${live.headers.get(markerHeader)} body=${body.slice(0, 160)}`);
@@ -231,7 +240,7 @@ export async function runCanonicalAutodeployAcceptance(options = {}) {
       serviceId: service.id,
       nodeId: node.id,
       deploymentId,
-      hostPort: ready.host_port,
+      hostPort: managedHostPort,
       verified: [
         "discovery-confirmation-api",
         "confirmed-source-config",
