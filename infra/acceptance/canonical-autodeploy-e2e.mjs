@@ -82,6 +82,7 @@ export async function runCanonicalAutodeployAcceptance(options = {}) {
       after: fixtureSha,
       deleted: false,
       repository: { full_name: fixtureRepositoryFullName },
+      pusher: { name: `rundea-canonical-${suffix}` },
     });
     const signature = `sha256=${createHmac("sha256", webhookSecret).update(rawBody).digest("hex")}`;
     const response = await fetch(`${api}/v0/github/webhook`, {
