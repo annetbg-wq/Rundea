@@ -1,10 +1,16 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { Pool } from "pg";
 import type { AgentEvent, RuntimeHealthStatus } from "@rundea/contracts";
+import { equalTokenHash, hashToken } from "@rundea/crypto";
 import { executeRuntimeMetricsReadOperation, RuntimeMetricOperationError } from "./runtime-metric-operations";
 
 type RequireControl = (request: FastifyRequest, reply: FastifyReply) => Promise<void>;
 export type RuntimeMetricEvent = Extract<AgentEvent, { type: "metric" }>;
+export type NodeDiskMetricInput = Readonly<{
+  diskTotalBytes: number;
+  diskAvailableBytes: number;
+  at: string;
+}>;
 
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const runtimeHealthStatuses = new Set<RuntimeHealthStatus>(["HEALTHY", "DEGRADED", "DOWN"]);
@@ -23,6 +29,21 @@ function safeCounter(value: unknown, name: string): number {
     throw new Error(`${name} must be a safe integer`);
   }
   return parsed;
+}
+
+function bearer(header: string | undefined): string | null {
+  if (!header?.startsWith("Bearer ")) return null;
+  return header.slice(7).trim() || null;
+}
+
+export function validateNodeDiskMetric(input: NodeDiskMetricInput): NodeDiskMetricInput {
+  const diskTotalBytes = safeCounter(input.diskTotalBytes, "diskTotalBytes");
+  const diskAvailableBytes = safeCounter(input.diskAvailableBytes, "diskAvailableBytes");
+  if (diskTotalBytes <= 0) throw new Error("diskTotalBytes must be positive");
+  if (diskAvailableBytes > diskTotalBytes) throw new Error("diskAvailableBytes cannot exceed diskTotalBytes");
+  const at = new Date(input.at);
+  if (!Number.isFinite(at.getTime())) throw new Error("node disk metric timestamp is invalid");
+  return { diskTotalBytes, diskAvailableBytes, at: at.toISOString() };
 }
 
 export function validateRuntimeMetricEvent(event: RuntimeMetricEvent): RuntimeMetricEvent {
@@ -82,6 +103,16 @@ async function maybeCleanup(pool: Pool): Promise<void> {
   await pool.query("DELETE FROM runtime_metrics WHERE sampled_at < now() - interval '48 hours'");
 }
 
+export async function recordNodeDiskMetric(pool: Pool, nodeId: string, rawInput: NodeDiskMetricInput): Promise<void> {
+  const input = validateNodeDiskMetric(rawInput);
+  await pool.query(
+    `UPDATE nodes
+        SET disk_total_bytes=$2,disk_available_bytes=$3,disk_sampled_at=$4
+      WHERE id=$1 AND (disk_sampled_at IS NULL OR disk_sampled_at < $4)`,
+    [nodeId, input.diskTotalBytes, input.diskAvailableBytes, input.at],
+  );
+}
+
 export async function recordRuntimeMetric(pool: Pool, nodeId: string, rawEvent: RuntimeMetricEvent): Promise<void> {
   const event = validateRuntimeMetricEvent(rawEvent);
   const eligible = await pool.query(
@@ -128,6 +159,25 @@ export async function recordRuntimeMetric(pool: Pool, nodeId: string, rawEvent: 
 }
 
 export function registerRuntimeMetricRoutes(app: FastifyInstance, pool: Pool, requireControl: RequireControl): void {
+  app.post<{ Body: NodeDiskMetricInput }>("/v0/agent/node-metrics", async (request, reply) => {
+    const nodeIdHeader = request.headers["x-rundea-node-id"];
+    const nodeId = Array.isArray(nodeIdHeader) ? nodeIdHeader[0] : nodeIdHeader;
+    const token = bearer(request.headers.authorization);
+    if (!nodeId || !uuidPattern.test(nodeId) || !token) {
+      return reply.code(401).send({ error: "invalid node credentials" });
+    }
+    const auth = await pool.query("SELECT token_hash FROM nodes WHERE id=$1", [nodeId]);
+    if (auth.rowCount !== 1 || !equalTokenHash(hashToken(token), String(auth.rows[0].token_hash))) {
+      return reply.code(401).send({ error: "invalid node credentials" });
+    }
+    try {
+      await recordNodeDiskMetric(pool, nodeId, request.body);
+      return reply.code(204).send();
+    } catch (error) {
+      return reply.code(400).send({ error: error instanceof Error ? error.message : "invalid node disk metric" });
+    }
+  });
+
   app.get<{ Params: { id: string }; Querystring: { minutes?: string } }>(
     "/v0/deployments/:id/metrics",
     { preHandler: requireControl },

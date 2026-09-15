@@ -13,6 +13,12 @@ type Deployment = {
 
 type RuntimeHealth = "HEALTHY" | "DEGRADED" | "DOWN";
 
+type NodeDisk = {
+  totalBytes: number;
+  availableBytes: number;
+  sampledAt: string;
+};
+
 type MetricsResponse = {
   deploymentId: string;
   deploymentStatus: string;
@@ -21,6 +27,7 @@ type MetricsResponse = {
   restartCount: number;
   uptimeSeconds: number;
   healthError: string | null;
+  nodeDisk: NodeDisk | null;
   minutes: number;
   bucketSeconds: number;
   retentionHours: number;
@@ -73,6 +80,9 @@ function RuntimeMetricsPanel() {
     cpu: "CPU",
     memory: "Память",
     network: "Сеть",
+    nodeDisk: "Диск узла",
+    free: "свободно",
+    of: "из",
     health: "Здоровье",
     restarts: "Рестарты",
     uptime: "Время работы",
@@ -91,6 +101,9 @@ function RuntimeMetricsPanel() {
     cpu: "CPU",
     memory: "Memory",
     network: "Network",
+    nodeDisk: "Node disk",
+    free: "free",
+    of: "of",
     health: "Health",
     restarts: "Restarts",
     uptime: "Uptime",
@@ -169,6 +182,8 @@ function RuntimeMetricsPanel() {
   const cpuSeries = useMemo(() => points.map(point => point.cpuPercent), [points]);
   const memorySeries = useMemo(() => points.map(point => memoryPercent(point) ?? 0), [points]);
   const sampleCount = points.reduce((sum, point) => sum + point.sampleCount, 0);
+  const disk = metrics?.nodeDisk ?? null;
+  const diskFreePercent = disk && disk.totalBytes > 0 ? Math.max(0, Math.min(100, (disk.availableBytes / disk.totalBytes) * 100)) : null;
 
   return <div className="runtimeMetricsLive">
     <div className="runtimeMetricsHeader">
@@ -186,6 +201,7 @@ function RuntimeMetricsPanel() {
         <div><span>{copy.cpu}</span><strong>{latest.cpuPercent.toFixed(1)}%</strong><small>{sampleCount} {copy.samples}</small></div>
         <div><span>{copy.memory}</span><strong>{formatMetricBytes(latest.memoryUsageBytes)}</strong><small>{memPercent === null ? "—" : `${memPercent.toFixed(1)}%`} · {formatMetricBytes(latest.memoryLimitBytes)}</small></div>
         <div><span>{copy.network}</span><strong>{formatRate(networkRate)}</strong><small>↓ {formatMetricBytes(latest.networkRxBytes)} · ↑ {formatMetricBytes(latest.networkTxBytes)} {copy.total}</small></div>
+        <div className="runtimeNodeDiskCard"><span>{copy.nodeDisk}</span><strong>{disk ? `${formatMetricBytes(disk.availableBytes)} ${copy.free}` : "—"}</strong><small>{disk ? `${copy.of} ${formatMetricBytes(disk.totalBytes)} · ${diskFreePercent?.toFixed(1) ?? "—"}% ${copy.free} · ${new Date(disk.sampledAt).toLocaleTimeString()}` : "—"}</small></div>
         <div><span>{copy.health}</span><strong>{metrics?.runtimeHealth ?? "—"}</strong><small>{metrics?.healthError ?? (metrics?.runtimeHealthCheckedAt ? new Date(metrics.runtimeHealthCheckedAt).toLocaleTimeString() : "—")}</small></div>
         <div><span>{copy.restarts}</span><strong>{metrics?.restartCount ?? 0}</strong><small>{copy.health}</small></div>
         <div><span>{copy.uptime}</span><strong>{formatUptime(metrics?.uptimeSeconds ?? 0)}</strong><small>{metrics?.runtimeHealth ?? "—"}</small></div>
@@ -219,6 +235,7 @@ export function RuntimeMetricsMount() {
     return () => {
       observer.disconnect();
       current?.classList.remove("metricsLiveMounted");
+      setTarget(null);
     };
   }, []);
 

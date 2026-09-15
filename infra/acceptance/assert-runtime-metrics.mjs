@@ -18,13 +18,13 @@ const deployments = await request("/v0/deployments");
 let proof = null;
 for (const deployment of deployments) {
   const metrics = await request(`/v0/deployments/${encodeURIComponent(deployment.id)}/metrics?minutes=5`);
-  if (Array.isArray(metrics.points) && metrics.points.length > 0) {
+  if (Array.isArray(metrics.points) && metrics.points.length > 0 && metrics.nodeDisk) {
     proof = { deployment, metrics };
     break;
   }
 }
 
-if (!proof) throw new Error("no deployment produced a persisted runtime metric sample");
+if (!proof) throw new Error("no deployment produced persisted runtime metrics plus node disk telemetry");
 if (proof.metrics.retentionHours !== 48) throw new Error(`unexpected metric retention ${proof.metrics.retentionHours}`);
 const latest = proof.metrics.latest;
 if (!latest) throw new Error("metrics response has points but no latest sample");
@@ -36,11 +36,22 @@ if (!Number.isInteger(latest.sampleCount) || latest.sampleCount < 1) throw new E
 const ageMs = Date.now() - new Date(latest.at).getTime();
 if (!Number.isFinite(ageMs) || ageMs < -5_000 || ageMs > 10 * 60_000) throw new Error(`runtime metric timestamp is implausible: ${latest.at}`);
 
+const disk = proof.metrics.nodeDisk;
+if (!Number.isSafeInteger(disk.totalBytes) || disk.totalBytes <= 0) throw new Error(`invalid node disk total ${disk.totalBytes}`);
+if (!Number.isSafeInteger(disk.availableBytes) || disk.availableBytes < 0 || disk.availableBytes > disk.totalBytes) {
+  throw new Error(`invalid node disk available ${disk.availableBytes} / ${disk.totalBytes}`);
+}
+const diskAgeMs = Date.now() - new Date(disk.sampledAt).getTime();
+if (!Number.isFinite(diskAgeMs) || diskAgeMs < -5_000 || diskAgeMs > 10 * 60_000) {
+  throw new Error(`node disk metric timestamp is implausible: ${disk.sampledAt}`);
+}
+
 console.log(JSON.stringify({
   ok: true,
-  verified: "runtime-metrics",
+  verified: ["runtime-metrics", "node-disk-metrics"],
   deploymentId: proof.deployment.id,
   deploymentStatus: proof.deployment.status,
   pointCount: proof.metrics.points.length,
+  nodeDisk: disk,
   latest,
 }, null, 2));

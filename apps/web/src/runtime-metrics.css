@@ -17,6 +17,7 @@
 .runtimeWindows button.active { background: rgba(255,255,255,.09); color: #fff; }
 .runtimeMetricCards { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 8px; }
 .runtimeMetricCards > div { display: grid; gap: 5px; min-width: 0; border: 1px solid rgba(255,255,255,.08); border-radius: 10px; padding: 12px; background: rgba(255,255,255,.025); }
+.runtimeMetricCards > .runtimeNodeDiskCard { grid-column: 1 / -1; grid-template-columns: minmax(100px,.45fr) minmax(140px,.8fr) minmax(220px,1.5fr); align-items: baseline; column-gap: 16px; }
 .runtimeMetricCards span { color: #8c93a0; font-size: 11px; }
 .runtimeMetricCards strong { font-size: 21px; line-height: 1.05; overflow: hidden; text-overflow: ellipsis; }
 .runtimeMetricCards small { color: #717887; font-size: 10px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -32,4 +33,4 @@
 .runtimeNoData.error { color: #e58b8b; }
 .runtimeMetricsFooter { margin-top: auto; display: flex; justify-content: space-between; gap: 14px; border-top: 1px solid rgba(255,255,255,.07); padding-top: 12px; color: #6f7684; font-size: 10px; }
 .runtimeMetricsFooter span:last-child { text-align: right; max-width: 65%; }
-@media (max-width: 1050px) { .runtimeMetricCards { grid-template-columns: 1fr; } .runtimeCharts { grid-template-columns: 1fr; } .runtimeControls { align-items: stretch; flex-direction: column; } .runtimeWindows { align-self: flex-start; } }
+@media (max-width: 1050px) { .runtimeMetricCards { grid-template-columns: 1fr; } .runtimeMetricCards > .runtimeNodeDiskCard { grid-column: auto; grid-template-columns: 1fr; } .runtimeCharts { grid-template-columns: 1fr; } .runtimeControls { align-items: stretch; flex-direction: column; } .runtimeWindows { align-self: flex-start; } }

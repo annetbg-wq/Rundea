@@ -8,6 +8,7 @@ export const requiredAgentCapabilities = [
   "continuousHealth",
   "managedIngress",
   "nodeCapacity",
+  "nodeDiskMetrics",
   "resourceGuardrails",
   "runtimeMetrics",
 ] as const;

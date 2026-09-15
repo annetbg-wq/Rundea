@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { validateRuntimeMetricEvent } from "./runtime-metrics";
+import { validateNodeDiskMetric, validateRuntimeMetricEvent } from "./runtime-metrics";
 
 const deploymentId = "123e4567-e89b-42d3-a456-426614174000";
 
@@ -52,4 +52,24 @@ test("runtime health detail fails closed when malformed", () => {
   assert.throws(() => validateRuntimeMetricEvent(metric({ restartDelta: 1 })));
   assert.throws(() => validateRuntimeMetricEvent(metric({ runtimeHealth: "DOWN", restartDelta: 2 })));
   assert.throws(() => validateRuntimeMetricEvent(metric({ runtimeHealth: "DOWN", healthError: "x".repeat(1001) })));
+});
+
+test("node disk metric validation accepts bounded filesystem telemetry", () => {
+  const value = validateNodeDiskMetric({
+    diskTotalBytes: 200 * 1024 * 1024 * 1024,
+    diskAvailableBytes: 120 * 1024 * 1024 * 1024,
+    at: "2026-09-15T19:00:00.000Z",
+  });
+  assert.equal(value.diskTotalBytes, 200 * 1024 * 1024 * 1024);
+  assert.equal(value.diskAvailableBytes, 120 * 1024 * 1024 * 1024);
+  assert.equal(value.at, "2026-09-15T19:00:00.000Z");
+});
+
+test("node disk metric validation rejects impossible or unsafe values", () => {
+  const valid = { diskTotalBytes: 1000, diskAvailableBytes: 500, at: new Date().toISOString() };
+  assert.throws(() => validateNodeDiskMetric({ ...valid, diskTotalBytes: 0 }));
+  assert.throws(() => validateNodeDiskMetric({ ...valid, diskAvailableBytes: 1001 }));
+  assert.throws(() => validateNodeDiskMetric({ ...valid, diskAvailableBytes: -1 }));
+  assert.throws(() => validateNodeDiskMetric({ ...valid, diskTotalBytes: Number.MAX_SAFE_INTEGER + 1 }));
+  assert.throws(() => validateNodeDiskMetric({ ...valid, at: "not-a-date" }));
 });

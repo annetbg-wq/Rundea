@@ -1,16 +1,21 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"math"
+	"net/http"
 	"os"
 	"os/exec"
 	"regexp"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -19,6 +24,12 @@ var dockerSizePattern = regexp.MustCompile(`^([0-9]+(?:\.[0-9]+)?)\s*([kmgtpe]?i
 
 const defaultMetricsInterval = 15 * time.Second
 const maxSafeMetricCounter uint64 = 9007199254740991
+
+type nodeDiskMetricSample struct {
+	DiskTotalBytes     uint64 `json:"diskTotalBytes"`
+	DiskAvailableBytes uint64 `json:"diskAvailableBytes"`
+	At                 string `json:"at"`
+}
 
 func durationEnv(key string, fallback time.Duration) time.Duration {
 	value := strings.TrimSpace(os.Getenv(key))
@@ -110,6 +121,62 @@ func (sample dockerMetricSample) validateTransportRange() error {
 	return nil
 }
 
+func sampleNodeDisk(path string, now time.Time) (nodeDiskMetricSample, error) {
+	var stat syscall.Statfs_t
+	if err := syscall.Statfs(path, &stat); err != nil {
+		return nodeDiskMetricSample{}, fmt.Errorf("read node disk telemetry: %w", err)
+	}
+	if stat.Bsize <= 0 {
+		return nodeDiskMetricSample{}, errors.New("node disk telemetry returned invalid block size")
+	}
+	blockSize := uint64(stat.Bsize)
+	if stat.Blocks == 0 || stat.Blocks > maxSafeMetricCounter/blockSize || stat.Bavail > maxSafeMetricCounter/blockSize {
+		return nodeDiskMetricSample{}, errors.New("node disk telemetry exceeds JSON-safe range")
+	}
+	total := stat.Blocks * blockSize
+	available := stat.Bavail * blockSize
+	if available > total {
+		return nodeDiskMetricSample{}, errors.New("node disk telemetry reports available bytes above total bytes")
+	}
+	return nodeDiskMetricSample{
+		DiskTotalBytes: total, DiskAvailableBytes: available, At: now.UTC().Format(time.RFC3339Nano),
+	}, nil
+}
+
+func sendNodeDiskMetric(ctx context.Context, cfg config) error {
+	if strings.TrimSpace(cfg.ControlPlane) == "" || strings.TrimSpace(cfg.NodeID) == "" || strings.TrimSpace(cfg.Token) == "" {
+		return errors.New("node disk telemetry requires Control Plane URL and node credentials")
+	}
+	sample, err := sampleNodeDisk(cfg.WorkDir, time.Now())
+	if err != nil {
+		return err
+	}
+	payload, err := json.Marshal(sample)
+	if err != nil {
+		return fmt.Errorf("encode node disk telemetry: %w", err)
+	}
+	requestCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	endpoint := strings.TrimRight(cfg.ControlPlane, "/") + "/v0/agent/node-metrics"
+	req, err := http.NewRequestWithContext(requestCtx, http.MethodPost, endpoint, bytes.NewReader(payload))
+	if err != nil {
+		return fmt.Errorf("create node disk telemetry request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+cfg.Token)
+	req.Header.Set("X-Rundea-Node-Id", cfg.NodeID)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := (&http.Client{Timeout: 5 * time.Second}).Do(req)
+	if err != nil {
+		return fmt.Errorf("send node disk telemetry: %w", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("node disk telemetry rejected with HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	return nil
+}
+
 func listManagedContainers(ctx context.Context) ([]managedContainer, error) {
 	out, err := exec.CommandContext(ctx, "docker", "ps", "--filter", "label=rundea.managed=true", "--format", `{{.ID}}\t{{.Label "rundea.deployment"}}`).CombinedOutput()
 	if err != nil {
@@ -183,11 +250,17 @@ func sendRuntimeMetric(w *writer, deploymentID string, sample dockerMetricSample
 }
 
 func collectRuntimeMetrics(ctx context.Context, w *writer) error {
-	cfg := config{WorkDir: env("RUNDEA_WORK_DIR", "/var/lib/rundea")}
+	cfg := config{
+		ControlPlane: env("RUNDEA_CONTROL_PLANE_URL", ""),
+		NodeID:       env("RUNDEA_NODE_ID", ""),
+		Token:        env("RUNDEA_NODE_TOKEN", ""),
+		WorkDir:      env("RUNDEA_WORK_DIR", "/var/lib/rundea"),
+	}
+	nodeDiskErr := sendNodeDiskMetric(ctx, cfg)
 	healthSamples, healthErr := collectRuntimeHealth(ctx, w, cfg)
 	containers, listErr := listManagedContainers(ctx)
 	if listErr != nil {
-		return errors.Join(healthErr, listErr)
+		return errors.Join(nodeDiskErr, healthErr, listErr)
 	}
 
 	var firstErr error
@@ -219,7 +292,7 @@ func collectRuntimeMetrics(ctx context.Context, w *writer) error {
 			return err
 		}
 	}
-	return errors.Join(firstErr, healthErr)
+	return errors.Join(firstErr, healthErr, nodeDiskErr)
 }
 
 func runMetricsLoop(ctx context.Context, w *writer, interval time.Duration) {
