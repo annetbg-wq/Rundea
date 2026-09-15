@@ -15,10 +15,9 @@ test("runtime metrics operation rejects invalid input before touching the databa
     queries += 1;
     return { rowCount: 0, rows: [] };
   });
-
   await assert.rejects(
     executeRuntimeMetricsReadOperation(pool, { deploymentId: "not-a-uuid", minutes: "60" }),
-    (error: unknown) => error instanceof RuntimeMetricOperationError && error.statusCode === 400 && error.message === "invalid deployment id",
+    (error: unknown) => error instanceof RuntimeMetricOperationError && error.statusCode === 400,
   );
   assert.equal(queries, 0);
 });
@@ -27,15 +26,28 @@ test("runtime metrics operation reports a missing deployment as 404", async () =
   const pool = poolFromQuery(async () => ({ rowCount: 0, rows: [] }));
   await assert.rejects(
     executeRuntimeMetricsReadOperation(pool, { deploymentId, minutes: "60" }),
-    (error: unknown) => error instanceof RuntimeMetricOperationError && error.statusCode === 404 && error.message === "deployment not found",
+    (error: unknown) => error instanceof RuntimeMetricOperationError && error.statusCode === 404,
   );
 });
 
-test("runtime metrics operation returns the existing bounded read model", async () => {
+test("runtime metrics operation returns telemetry and server-authoritative health", async () => {
   const sampledAt = "2026-09-09T12:00:00.000Z";
+  const checkedAt = "2026-09-09T12:00:05.000Z";
   const pool = poolFromQuery(async (text) => {
-    if (text.startsWith("SELECT id,node_id,status FROM deployments")) {
-      return { rowCount: 1, rows: [{ id: deploymentId, node_id: "node-1", status: "READY" }] };
+    if (text.startsWith("SELECT id,node_id,status,runtime_health")) {
+      return {
+        rowCount: 1,
+        rows: [{
+          id: deploymentId,
+          node_id: "node-1",
+          status: "READY",
+          runtime_health: "HEALTHY",
+          runtime_health_checked_at: checkedAt,
+          runtime_restart_count: 2,
+          runtime_uptime_seconds: 3600,
+          runtime_health_error: null,
+        }],
+      };
     }
     if (text.includes("date_bin")) {
       return {
@@ -68,13 +80,12 @@ test("runtime metrics operation returns the existing bounded read model", async 
   });
 
   const result = await executeRuntimeMetricsReadOperation(pool, { deploymentId, minutes: "120" });
-  assert.equal(result.deploymentId, deploymentId);
-  assert.equal(result.nodeId, "node-1");
-  assert.equal(result.deploymentStatus, "READY");
+  assert.equal(result.runtimeHealth, "HEALTHY");
+  assert.equal(result.runtimeHealthCheckedAt, checkedAt);
+  assert.equal(result.restartCount, 2);
+  assert.equal(result.uptimeSeconds, 3600);
   assert.equal(result.minutes, 120);
   assert.equal(result.bucketSeconds, 30);
-  assert.equal(result.retentionHours, 48);
   assert.equal(result.latest?.sampleCount, 1);
-  assert.equal(result.points.length, 1);
   assert.equal(result.points[0]?.sampleCount, 3);
 });

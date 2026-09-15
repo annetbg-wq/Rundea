@@ -41,7 +41,7 @@ jobs:
 
   node-e2e:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 30
     services:
       postgres:
         image: postgres:17-alpine
@@ -134,6 +134,14 @@ jobs:
           RUNDEA_ACCEPTANCE_API_URL: http://127.0.0.1:4000
           RUNDEA_CONTROL_TOKEN: acceptance-control-token
         run: node infra/acceptance/assert-runtime-metrics.mjs
+      - name: Prove READY → DOWN → bounded auto-restart → HEALTHY
+        env:
+          RUNDEA_ACCEPTANCE_API_URL: http://127.0.0.1:4000
+          RUNDEA_CONTROL_TOKEN: acceptance-control-token
+          RUNDEA_AGENT_BINARY: /tmp/rundea-agent
+          RUNDEA_ACCEPTANCE_FIXTURE_SHA: 039c34770852fb07cef7f9f0f8534c5de408b207
+          RUNDEA_HEALTH_HOST_PORT: '18084'
+        run: node infra/acceptance/continuous-health-e2e.mjs
       - name: Control Plane log
         if: always()
         run: cat /tmp/rundea-api.log || true

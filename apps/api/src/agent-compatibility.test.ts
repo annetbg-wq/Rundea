@@ -4,16 +4,36 @@ import { validateAgentHello } from "./agent-compatibility";
 
 const compatible = {
   type: "hello" as const,
-  agentVersion: "0.1.7",
+  agentVersion: "0.1.8",
   buildSha: "a".repeat(40),
-  capabilities: ["runtimeMetrics", "managedIngress", "nodeCapacity", "buildArgs", "buildGuardrails", "resourceGuardrails", "artifactRetention", "safePromotion"],
+  capabilities: [
+    "runtimeMetrics",
+    "managedIngress",
+    "nodeCapacity",
+    "continuousHealth",
+    "buildArgs",
+    "buildGuardrails",
+    "resourceGuardrails",
+    "artifactRetention",
+    "safePromotion",
+  ],
 };
 
 test("accepts immutable compatible Agent and sorts capabilities", () => {
   const identity = validateAgentHello(compatible, "staging");
-  assert.equal(identity.agentVersion, "0.1.7");
+  assert.equal(identity.agentVersion, "0.1.8");
   assert.equal(identity.buildSha, "a".repeat(40));
-  assert.deepEqual(identity.capabilities, ["artifactRetention", "buildArgs", "buildGuardrails", "managedIngress", "nodeCapacity", "resourceGuardrails", "runtimeMetrics", "safePromotion"]);
+  assert.deepEqual(identity.capabilities, [
+    "artifactRetention",
+    "buildArgs",
+    "buildGuardrails",
+    "continuousHealth",
+    "managedIngress",
+    "nodeCapacity",
+    "resourceGuardrails",
+    "runtimeMetrics",
+    "safePromotion",
+  ]);
 });
 
 test("allows explicit development build only in development", () => {
@@ -25,20 +45,20 @@ test("allows explicit development build only in development", () => {
   );
 });
 
-test("rejects an Agent missing a required capability", () => {
+test("rejects an Agent missing continuous health capability", () => {
   assert.throws(
-    () => validateAgentHello({ ...compatible, capabilities: ["artifactRetention", "buildArgs", "buildGuardrails", "managedIngress", "resourceGuardrails", "runtimeMetrics"] }, "production"),
-    /nodeCapacity/,
+    () => validateAgentHello({ ...compatible, capabilities: compatible.capabilities.filter((value) => value !== "continuousHealth") }, "production"),
+    /continuousHealth/,
   );
 });
 
 test("rejects malformed or duplicate capabilities", () => {
   assert.throws(
-    () => validateAgentHello({ ...compatible, capabilities: ["artifactRetention", "buildArgs", "buildGuardrails", "managedIngress", "nodeCapacity", "resourceGuardrails", "runtimeMetrics", "bad value"] }, "staging"),
+    () => validateAgentHello({ ...compatible, capabilities: [...compatible.capabilities, "bad value"] }, "staging"),
     /invalid capability/,
   );
   assert.throws(
-    () => validateAgentHello({ ...compatible, capabilities: ["artifactRetention", "buildArgs", "buildGuardrails", "managedIngress", "nodeCapacity", "resourceGuardrails", "runtimeMetrics", "runtimeMetrics"] }, "staging"),
+    () => validateAgentHello({ ...compatible, capabilities: [...compatible.capabilities, "runtimeMetrics"] }, "staging"),
     /duplicate capabilities/,
   );
 });

@@ -11,9 +11,16 @@ type Deployment = {
   created_at: string;
 };
 
+type RuntimeHealth = "HEALTHY" | "DEGRADED" | "DOWN";
+
 type MetricsResponse = {
   deploymentId: string;
   deploymentStatus: string;
+  runtimeHealth: RuntimeHealth | null;
+  runtimeHealthCheckedAt: string | null;
+  restartCount: number;
+  uptimeSeconds: number;
+  healthError: string | null;
   minutes: number;
   bucketSeconds: number;
   retentionHours: number;
@@ -33,6 +40,14 @@ function shortSha(deployment: Deployment): string {
 
 function formatRate(value: number | null): string {
   return value === null ? "—" : `${formatMetricBytes(value)}/s`;
+}
+
+function formatUptime(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds < 0) return "—";
+  const value = Math.floor(seconds);
+  if (value >= 86400) return `${Math.floor(value / 86400)}d ${Math.floor((value % 86400) / 3600)}h`;
+  if (value >= 3600) return `${Math.floor(value / 3600)}h ${Math.floor((value % 3600) / 60)}m`;
+  return `${Math.floor(value / 60)}m`;
 }
 
 function MetricSparkline({ values, label }: { values: number[]; label: string }) {
@@ -58,6 +73,9 @@ function RuntimeMetricsPanel() {
     cpu: "CPU",
     memory: "Память",
     network: "Сеть",
+    health: "Здоровье",
+    restarts: "Рестарты",
+    uptime: "Время работы",
     total: "всего",
     waiting: "Ждём первый реальный sample от Agent…",
     unavailable: "Метрики пока недоступны",
@@ -73,6 +91,9 @@ function RuntimeMetricsPanel() {
     cpu: "CPU",
     memory: "Memory",
     network: "Network",
+    health: "Health",
+    restarts: "Restarts",
+    uptime: "Uptime",
     total: "total",
     waiting: "Waiting for the first real Agent sample…",
     unavailable: "Metrics are currently unavailable",
@@ -165,6 +186,9 @@ function RuntimeMetricsPanel() {
         <div><span>{copy.cpu}</span><strong>{latest.cpuPercent.toFixed(1)}%</strong><small>{sampleCount} {copy.samples}</small></div>
         <div><span>{copy.memory}</span><strong>{formatMetricBytes(latest.memoryUsageBytes)}</strong><small>{memPercent === null ? "—" : `${memPercent.toFixed(1)}%`} · {formatMetricBytes(latest.memoryLimitBytes)}</small></div>
         <div><span>{copy.network}</span><strong>{formatRate(networkRate)}</strong><small>↓ {formatMetricBytes(latest.networkRxBytes)} · ↑ {formatMetricBytes(latest.networkTxBytes)} {copy.total}</small></div>
+        <div><span>{copy.health}</span><strong>{metrics?.runtimeHealth ?? "—"}</strong><small>{metrics?.healthError ?? (metrics?.runtimeHealthCheckedAt ? new Date(metrics.runtimeHealthCheckedAt).toLocaleTimeString() : "—")}</small></div>
+        <div><span>{copy.restarts}</span><strong>{metrics?.restartCount ?? 0}</strong><small>{copy.health}</small></div>
+        <div><span>{copy.uptime}</span><strong>{formatUptime(metrics?.uptimeSeconds ?? 0)}</strong><small>{metrics?.runtimeHealth ?? "—"}</small></div>
       </div>
       <div className="runtimeCharts">
         <div><div className="runtimeChartLabel"><span>CPU</span><strong>{latest.cpuPercent.toFixed(1)}%</strong></div><MetricSparkline values={cpuSeries} label={`CPU ${minutes} minute history`}/></div>

@@ -152,11 +152,8 @@ func sampleDockerContainer(ctx context.Context, containerID string) (dockerMetri
 		return dockerMetricSample{}, fmt.Errorf("network stats: %w", err)
 	}
 	sample := dockerMetricSample{
-		CPUPercent:       cpu,
-		MemoryUsageBytes: memoryUsage,
-		MemoryLimitBytes: memoryLimit,
-		NetworkRxBytes:   rx,
-		NetworkTxBytes:   tx,
+		CPUPercent: cpu, MemoryUsageBytes: memoryUsage, MemoryLimitBytes: memoryLimit,
+		NetworkRxBytes: rx, NetworkTxBytes: tx,
 	}
 	if err := sample.validateTransportRange(); err != nil {
 		return dockerMetricSample{}, err
@@ -164,12 +161,37 @@ func sampleDockerContainer(ctx context.Context, containerID string) (dockerMetri
 	return sample, nil
 }
 
-func collectRuntimeMetrics(ctx context.Context, w *writer) error {
-	containers, err := listManagedContainers(ctx)
-	if err != nil {
-		return err
+func sendRuntimeMetric(w *writer, deploymentID string, sample dockerMetricSample, health *runtimeHealthSample) error {
+	payload := map[string]any{
+		"type": "metric", "deploymentId": deploymentID,
+		"cpuPercent": sample.CPUPercent,
+		"memoryUsageBytes": sample.MemoryUsageBytes,
+		"memoryLimitBytes": sample.MemoryLimitBytes,
+		"networkRxBytes": sample.NetworkRxBytes,
+		"networkTxBytes": sample.NetworkTxBytes,
+		"at": time.Now().UTC().Format(time.RFC3339Nano),
 	}
+	if health != nil {
+		payload["runtimeHealth"] = health.State
+		payload["restartDelta"] = health.RestartDelta
+		payload["uptimeSeconds"] = health.UptimeSeconds
+		if health.Error != "" {
+			payload["healthError"] = health.Error
+		}
+	}
+	return w.send(payload)
+}
+
+func collectRuntimeMetrics(ctx context.Context, w *writer) error {
+	cfg := config{WorkDir: env("RUNDEA_WORK_DIR", "/var/lib/rundea")}
+	healthSamples, healthErr := collectRuntimeHealth(ctx, w, cfg)
+	containers, listErr := listManagedContainers(ctx)
+	if listErr != nil {
+		return errors.Join(healthErr, listErr)
+	}
+
 	var firstErr error
+	sent := map[string]struct{}{}
 	for _, container := range containers {
 		sample, err := sampleDockerContainer(ctx, container.ID)
 		if err != nil {
@@ -178,20 +200,26 @@ func collectRuntimeMetrics(ctx context.Context, w *writer) error {
 			}
 			continue
 		}
-		if err := w.send(map[string]any{
-			"type":             "metric",
-			"deploymentId":     container.DeploymentID,
-			"cpuPercent":       sample.CPUPercent,
-			"memoryUsageBytes": sample.MemoryUsageBytes,
-			"memoryLimitBytes": sample.MemoryLimitBytes,
-			"networkRxBytes":   sample.NetworkRxBytes,
-			"networkTxBytes":   sample.NetworkTxBytes,
-			"at":               time.Now().UTC().Format(time.RFC3339Nano),
-		}); err != nil {
+		var health *runtimeHealthSample
+		if value, ok := healthSamples[container.DeploymentID]; ok {
+			copy := value
+			health = &copy
+		}
+		if err := sendRuntimeMetric(w, container.DeploymentID, sample, health); err != nil {
+			return err
+		}
+		sent[container.DeploymentID] = struct{}{}
+	}
+	for deploymentID, health := range healthSamples {
+		if _, ok := sent[deploymentID]; ok {
+			continue
+		}
+		sample := dockerMetricSample{MemoryLimitBytes: runtimeMemoryLimitBytes}
+		if err := sendRuntimeMetric(w, deploymentID, sample, &health); err != nil {
 			return err
 		}
 	}
-	return firstErr
+	return errors.Join(firstErr, healthErr)
 }
 
 func runMetricsLoop(ctx context.Context, w *writer, interval time.Duration) {
@@ -216,7 +244,7 @@ func runMetricsLoop(ctx context.Context, w *writer, interval time.Duration) {
 		}
 		message := err.Error()
 		if message != lastError {
-			log.Printf("runtime metrics sampling degraded: %s", message)
+			log.Printf("runtime metrics/health sampling degraded: %s", message)
 			lastError = message
 		}
 	}

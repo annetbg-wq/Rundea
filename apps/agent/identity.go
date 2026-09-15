@@ -22,6 +22,7 @@ var declaredAgentCapabilities = []string{
 	"artifactRetention",
 	"buildArgs",
 	"buildGuardrails",
+	"continuousHealth",
 	"managedIngress",
 	"nodeCapacity",
 	"resourceGuardrails",
