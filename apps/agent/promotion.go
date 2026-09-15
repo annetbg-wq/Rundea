@@ -33,6 +33,7 @@ type safeRuntimeSpec struct {
 	HealthPath    string
 	HealthTimeout time.Duration
 	Labels        map[string]string
+	Volumes       []runtimeVolumeSpec
 }
 
 func inspectContainerState(ctx context.Context, name string) (containerRuntimeState, error) {
@@ -116,14 +117,18 @@ func backendRunArgs(spec safeRuntimeSpec, name string) []string {
 		"--name", name,
 		"-p", fmt.Sprintf("127.0.0.1::%d", spec.ContainerPort),
 		"--env-file", spec.EnvFile,
-		spec.ImageTag,
 	)
+	args = append(args, runtimeVolumeMountArgs(spec.Volumes)...)
+	args = append(args, spec.ImageTag)
 	return args
 }
 
 func startBackendContainer(ctx context.Context, spec safeRuntimeSpec, name string) (string, error) {
 	if err := requireNodeMemoryCapacity(ctx, runtimeMemoryLimitBytes, "runtime admission"); err != nil {
 		return "", err
+	}
+	if err := ensureRuntimeVolumes(ctx, spec.ServiceName, spec.Volumes); err != nil {
+		return "", fmt.Errorf("persistent volume admission: %w", err)
 	}
 	out, err := exec.CommandContext(ctx, "docker", backendRunArgs(spec, name)...).CombinedOutput()
 	if err != nil {
@@ -186,6 +191,9 @@ func runSafeRuntime(ctx context.Context, cfg config, w *writer, spec safeRuntime
 	}
 	if !strings.HasPrefix(spec.HealthPath, "/") {
 		return "", errors.New("runtime specification contains invalid healthcheck path")
+	}
+	if err := validateRuntimeVolumes(spec.Volumes); err != nil {
+		return "", err
 	}
 
 	if committed, err := runtimeRouteForDeployment(cfg, spec.DeploymentID); err != nil {
