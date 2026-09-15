@@ -4,12 +4,13 @@ import { validateAgentHello } from "./agent-compatibility";
 
 const compatible = {
   type: "hello" as const,
-  agentVersion: "0.1.8",
+  agentVersion: "0.1.9",
   buildSha: "a".repeat(40),
   capabilities: [
     "runtimeMetrics",
     "managedIngress",
     "nodeCapacity",
+    "nodeDiskMetrics",
     "continuousHealth",
     "buildArgs",
     "buildGuardrails",
@@ -21,7 +22,7 @@ const compatible = {
 
 test("accepts immutable compatible Agent and sorts capabilities", () => {
   const identity = validateAgentHello(compatible, "staging");
-  assert.equal(identity.agentVersion, "0.1.8");
+  assert.equal(identity.agentVersion, "0.1.9");
   assert.equal(identity.buildSha, "a".repeat(40));
   assert.deepEqual(identity.capabilities, [
     "artifactRetention",
@@ -30,6 +31,7 @@ test("accepts immutable compatible Agent and sorts capabilities", () => {
     "continuousHealth",
     "managedIngress",
     "nodeCapacity",
+    "nodeDiskMetrics",
     "resourceGuardrails",
     "runtimeMetrics",
     "safePromotion",
@@ -49,6 +51,13 @@ test("rejects an Agent missing continuous health capability", () => {
   assert.throws(
     () => validateAgentHello({ ...compatible, capabilities: compatible.capabilities.filter((value) => value !== "continuousHealth") }, "production"),
     /continuousHealth/,
+  );
+});
+
+test("rejects an Agent missing node disk metrics capability", () => {
+  assert.throws(
+    () => validateAgentHello({ ...compatible, capabilities: compatible.capabilities.filter((value) => value !== "nodeDiskMetrics") }, "production"),
+    /nodeDiskMetrics/,
   );
 });
 

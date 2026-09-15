@@ -2,6 +2,7 @@ package main
 
 import (
 	"testing"
+	"time"
 )
 
 func TestParseDockerPercent(t *testing.T) {
@@ -21,12 +22,12 @@ func TestParseDockerPercent(t *testing.T) {
 
 func TestParseDockerBytesSupportsDockerUnits(t *testing.T) {
 	cases := map[string]uint64{
-		"0B":      0,
-		"1kB":     1000,
-		"1.5MB":   1500000,
-		"1KiB":    1024,
-		"8.5MiB":  8912896,
-		"1GiB":    1073741824,
+		"0B":       0,
+		"1kB":      1000,
+		"1.5MB":    1500000,
+		"1KiB":     1024,
+		"8.5MiB":   8912896,
+		"1GiB":     1073741824,
 		"2.25 GiB": 2415919104,
 	}
 	for input, want := range cases {
@@ -68,5 +69,22 @@ func TestMetricDeploymentIDPattern(t *testing.T) {
 	}
 	if metricDeploymentIDPattern.MatchString("../../escape") {
 		t.Fatal("invalid deployment label should not match")
+	}
+}
+
+func TestSampleNodeDiskReportsFilesystemContainingWorkDir(t *testing.T) {
+	now := time.Date(2026, 9, 15, 19, 0, 0, 0, time.UTC)
+	sample, err := sampleNodeDisk(t.TempDir(), now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sample.DiskTotalBytes == 0 {
+		t.Fatal("node disk total must be positive")
+	}
+	if sample.DiskAvailableBytes > sample.DiskTotalBytes {
+		t.Fatalf("node disk available %d exceeds total %d", sample.DiskAvailableBytes, sample.DiskTotalBytes)
+	}
+	if sample.At != now.Format(time.RFC3339Nano) {
+		t.Fatalf("unexpected node disk timestamp %q", sample.At)
 	}
 }

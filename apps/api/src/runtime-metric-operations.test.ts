@@ -30,11 +30,12 @@ test("runtime metrics operation reports a missing deployment as 404", async () =
   );
 });
 
-test("runtime metrics operation returns telemetry and server-authoritative health", async () => {
+test("runtime metrics operation returns telemetry, node disk and server-authoritative health", async () => {
   const sampledAt = "2026-09-09T12:00:00.000Z";
   const checkedAt = "2026-09-09T12:00:05.000Z";
+  const diskAt = "2026-09-09T12:00:06.000Z";
   const pool = poolFromQuery(async (text) => {
-    if (text.startsWith("SELECT id,node_id,status,runtime_health")) {
+    if (text.includes("FROM deployments d JOIN nodes n")) {
       return {
         rowCount: 1,
         rows: [{
@@ -46,6 +47,9 @@ test("runtime metrics operation returns telemetry and server-authoritative healt
           runtime_restart_count: 2,
           runtime_uptime_seconds: 3600,
           runtime_health_error: null,
+          disk_total_bytes: 200 * 1024 * 1024 * 1024,
+          disk_available_bytes: 120 * 1024 * 1024 * 1024,
+          disk_sampled_at: diskAt,
         }],
       };
     }
@@ -84,8 +88,37 @@ test("runtime metrics operation returns telemetry and server-authoritative healt
   assert.equal(result.runtimeHealthCheckedAt, checkedAt);
   assert.equal(result.restartCount, 2);
   assert.equal(result.uptimeSeconds, 3600);
+  assert.equal(result.nodeDisk?.totalBytes, 200 * 1024 * 1024 * 1024);
+  assert.equal(result.nodeDisk?.availableBytes, 120 * 1024 * 1024 * 1024);
+  assert.equal(result.nodeDisk?.sampledAt, diskAt);
   assert.equal(result.minutes, 120);
   assert.equal(result.bucketSeconds, 30);
   assert.equal(result.latest?.sampleCount, 1);
   assert.equal(result.points[0]?.sampleCount, 3);
+});
+
+test("runtime metrics operation reports null node disk before first node sample", async () => {
+  const pool = poolFromQuery(async (text) => {
+    if (text.includes("FROM deployments d JOIN nodes n")) {
+      return {
+        rowCount: 1,
+        rows: [{
+          id: deploymentId,
+          node_id: "node-1",
+          status: "READY",
+          runtime_health: null,
+          runtime_health_checked_at: null,
+          runtime_restart_count: 0,
+          runtime_uptime_seconds: 0,
+          runtime_health_error: null,
+          disk_total_bytes: null,
+          disk_available_bytes: null,
+          disk_sampled_at: null,
+        }],
+      };
+    }
+    return { rowCount: 0, rows: [] };
+  });
+  const result = await executeRuntimeMetricsReadOperation(pool, { deploymentId });
+  assert.equal(result.nodeDisk, null);
 });

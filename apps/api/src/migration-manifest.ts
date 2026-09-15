@@ -23,4 +23,5 @@ export const migrationFiles = [
   "022_service_source_configs.sql",
   "023_canonical_autodeploy_scope.sql",
   "024_runtime_health.sql",
+  "025_node_disk_metrics.sql",
 ] as const;

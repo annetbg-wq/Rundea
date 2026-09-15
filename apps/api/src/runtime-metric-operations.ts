@@ -41,7 +41,10 @@ export async function executeRuntimeMetricsReadOperation(pool: Pool, input: Runt
   }
   const minutes = parseMinutes(input.minutes);
   const deployment = await pool.query(
-    "SELECT id,node_id,status,runtime_health,runtime_health_checked_at,runtime_restart_count,runtime_uptime_seconds,runtime_health_error FROM deployments WHERE id=$1",
+    `SELECT d.id,d.node_id,d.status,d.runtime_health,d.runtime_health_checked_at,d.runtime_restart_count,d.runtime_uptime_seconds,d.runtime_health_error,
+            n.disk_total_bytes,n.disk_available_bytes,n.disk_sampled_at
+       FROM deployments d JOIN nodes n ON n.id=d.node_id
+      WHERE d.id=$1`,
     [input.deploymentId],
   );
   if (deployment.rowCount !== 1) {
@@ -75,6 +78,13 @@ export async function executeRuntimeMetricsReadOperation(pool: Pool, input: Runt
   const row = deployment.rows[0];
   const points = seriesResult.rows.map((item) => metricPoint(item, Number(item.sample_count)));
   const latest = latestResult.rowCount === 1 ? metricPoint(latestResult.rows[0], 1) : null;
+  const nodeDisk = row.disk_total_bytes !== null && row.disk_total_bytes !== undefined && row.disk_available_bytes !== null && row.disk_available_bytes !== undefined && row.disk_sampled_at
+    ? {
+        totalBytes: Number(row.disk_total_bytes),
+        availableBytes: Number(row.disk_available_bytes),
+        sampledAt: new Date(String(row.disk_sampled_at)).toISOString(),
+      }
+    : null;
   return {
     deploymentId: input.deploymentId,
     nodeId: row.node_id,
@@ -84,6 +94,7 @@ export async function executeRuntimeMetricsReadOperation(pool: Pool, input: Runt
     restartCount: Number(row.runtime_restart_count ?? 0),
     uptimeSeconds: Number(row.runtime_uptime_seconds ?? 0),
     healthError: row.runtime_health_error ?? null,
+    nodeDisk,
     minutes,
     bucketSeconds,
     retentionHours,
