@@ -16,11 +16,19 @@ export type RuntimeHealthStatus = (typeof runtimeHealthStatuses)[number];
 export const nodeQualificationProfiles = ["sendina-egress-v1"] as const;
 export type NodeQualificationProfile = (typeof nodeQualificationProfiles)[number];
 
+export type RuntimeVolumeSpec = {
+  volumeId: string;
+  name: string;
+  dockerVolumeName: string;
+  mountPath: string;
+};
+
 export type RuntimeSpec = {
   containerName: string;
   containerPort: number;
   hostPort: number;
   environment: Record<string, string>;
+  volumes: RuntimeVolumeSpec[];
   healthcheck: {
     path: string;
     timeoutSeconds: number;
