@@ -172,6 +172,22 @@ func restartUnhealthyRuntimeRoute(ctx context.Context, cfg config, expected runt
 	if err != nil {
 		return fmt.Errorf("automatic docker restart failed: %w: %s", err, strings.TrimSpace(string(out)))
 	}
+
+	backendPort, err := publishedSingleLoopbackPort(ctx, current.BackendContainer)
+	if err != nil {
+		return err
+	}
+	if backendPort != current.BackendPort {
+		if err := waitForHealth(ctx, backendPort, current.HealthPath, 45*time.Second); err != nil {
+			return fmt.Errorf("automatic restart backend healthcheck failed after Docker changed the published port: %w", err)
+		}
+		next := *current
+		next.BackendPort = backendPort
+		if err := commitRestartRuntimeRoute(ctx, cfg, next, 45*time.Second); err != nil {
+			return fmt.Errorf("automatic restart route reconciliation failed after Docker changed the published port: %w", err)
+		}
+		return nil
+	}
 	if err := waitForRoutedHealth(ctx, *current, 45*time.Second); err != nil {
 		return fmt.Errorf("automatic restart did not restore stable route: %w", err)
 	}
