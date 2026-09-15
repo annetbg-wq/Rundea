@@ -8,6 +8,7 @@ import type { NodeCommandSocket } from "./node-qualification";
 import { registerProjectServiceAdminRoutes } from "./project-service-admin";
 import { resolveActiveCanonicalService, ServiceScopeError } from "./service-scope";
 import { captureDeploymentEnvironment, validateVariables, type ServiceVariableInput } from "./service-variables";
+import { bindServiceVolumesToNode, registerServiceVolumeRoutes, serviceVolumeBoundNode, snapshotDeploymentVolumes, ServiceVolumeError } from "./service-volumes";
 import { validateSourceDelivery } from "./source-broker";
 import { registerWorkspaceNodeRoutes } from "./workspace-node-routes";
 
@@ -18,7 +19,7 @@ const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}
 const variableKeyPattern = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
 function sendServiceError(reply: FastifyReply, error: unknown) {
-  if (error instanceof ServiceScopeError) return reply.code(error.statusCode).send({ error: error.message });
+  if (error instanceof ServiceScopeError || error instanceof ServiceVolumeError) return reply.code(error.statusCode).send({ error: error.message });
   return reply.code(400).send({ error: error instanceof Error ? error.message : "service request failed" });
 }
 
@@ -53,6 +54,7 @@ export function registerServiceScopedRoutes(
 ): void {
   registerProjectServiceAdminRoutes(app, pool, requireControl);
   registerWorkspaceNodeRoutes(app, pool, requireControl);
+  registerServiceVolumeRoutes(app, pool, requireControl);
   const masterKey = canonicalMasterKey();
 
   app.get<{ Params: { serviceId: string } }>(
@@ -118,13 +120,18 @@ export function registerServiceScopedRoutes(
         let nodeId = "";
         try {
           await client.query("BEGIN");
-          const node = requestedNodeId
+          const volumeNodeId = await serviceVolumeBoundNode(client, service.id);
+          if (requestedNodeId && volumeNodeId && requestedNodeId !== volumeNodeId) {
+            throw new ServiceVolumeError(409, `persistent volumes pin this service to node ${volumeNodeId}`);
+          }
+          const effectiveNodeId = requestedNodeId ?? volumeNodeId;
+          const node = effectiveNodeId
             ? await client.query(
                 `SELECT id
                    FROM nodes
                   WHERE id=$1 AND workspace_id=$2 AND lifecycle_status='ACTIVE' AND status='ONLINE'
                   FOR SHARE`,
-                [requestedNodeId, service.workspaceId],
+                [effectiveNodeId, service.workspaceId],
               )
             : await client.query(
                 `SELECT id
@@ -136,9 +143,10 @@ export function registerServiceScopedRoutes(
                 [service.workspaceId],
               );
           if (node.rowCount !== 1) {
-            throw new Error(requestedNodeId ? "selected node is not an ONLINE node in this workspace" : "workspace has no ONLINE node available for deployment");
+            throw new Error(effectiveNodeId ? "selected or volume-bound node is not an ONLINE node in this workspace" : "workspace has no ONLINE node available for deployment");
           }
           nodeId = String(node.rows[0].id);
+          await bindServiceVolumesToNode(client, service.id, nodeId);
           const allocation = await client.query(
             "SELECT rundea_allocate_host_port($1,$2) AS host_port",
             [service.id, nodeId],
@@ -166,6 +174,7 @@ export function registerServiceScopedRoutes(
             ],
           );
           await captureDeploymentEnvironment(client, id, service.runtimeKey);
+          await snapshotDeploymentVolumes(client, id, service.id);
           await client.query("COMMIT");
         } catch (error) {
           await client.query("ROLLBACK");
