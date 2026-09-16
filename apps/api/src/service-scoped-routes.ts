@@ -120,23 +120,31 @@ export function registerServiceScopedRoutes(
           await client.query("BEGIN");
           const node = requestedNodeId
             ? await client.query(
-                `SELECT id
-                   FROM nodes
-                  WHERE id=$1 AND workspace_id=$2 AND lifecycle_status='ACTIVE' AND status='ONLINE'
+                `SELECT n.id
+                   FROM nodes n
+                  WHERE n.id=$1 AND n.workspace_id=$2 AND n.lifecycle_status='ACTIVE' AND n.status='ONLINE'
+                    AND (
+                      NOT EXISTS(SELECT 1 FROM service_volumes v WHERE v.service_id=$3 AND v.node_id IS NOT NULL)
+                      OR n.id IN (SELECT v.node_id FROM service_volumes v WHERE v.service_id=$3 AND v.node_id IS NOT NULL)
+                    )
                   FOR SHARE`,
-                [requestedNodeId, service.workspaceId],
+                [requestedNodeId, service.workspaceId, service.id],
               )
             : await client.query(
-                `SELECT id
-                   FROM nodes
-                  WHERE workspace_id=$1 AND lifecycle_status='ACTIVE' AND status='ONLINE'
-                  ORDER BY last_seen_at DESC NULLS LAST,created_at ASC,id ASC
+                `SELECT n.id
+                   FROM nodes n
+                  WHERE n.workspace_id=$1 AND n.lifecycle_status='ACTIVE' AND n.status='ONLINE'
+                    AND (
+                      NOT EXISTS(SELECT 1 FROM service_volumes v WHERE v.service_id=$2 AND v.node_id IS NOT NULL)
+                      OR n.id IN (SELECT v.node_id FROM service_volumes v WHERE v.service_id=$2 AND v.node_id IS NOT NULL)
+                    )
+                  ORDER BY n.last_seen_at DESC NULLS LAST,n.created_at ASC,n.id ASC
                   LIMIT 1
                   FOR SHARE`,
-                [service.workspaceId],
+                [service.workspaceId, service.id],
               );
           if (node.rowCount !== 1) {
-            throw new Error(requestedNodeId ? "selected node is not an ONLINE node in this workspace" : "workspace has no ONLINE node available for deployment");
+            throw new Error(requestedNodeId ? "selected node is not an ONLINE node compatible with this service placement" : "workspace has no ONLINE node compatible with this service placement");
           }
           nodeId = String(node.rows[0].id);
           const allocation = await client.query(
