@@ -23,6 +23,7 @@ const variableKey = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const maxVariables = 256;
 const maxValueBytes = 64 * 1024;
 export const internalVolumeMetadataKey = "RUNDEA_INTERNAL_VOLUME_MOUNTS";
+export const internalProjectNetworkMetadataKey = "RUNDEA_INTERNAL_PROJECT_NETWORK";
 
 function requireServiceName(value: string): string {
   if (!serviceNamePattern.test(value)) throw new Error("invalid service name");
@@ -175,11 +176,27 @@ export async function copyDeploymentEnvironment(client: PoolClient, sourceDeploy
   await client.query("UPDATE deployments SET environment_snapshot_at=now() WHERE id=$1", [destinationDeploymentId]);
 }
 
-async function attachDeploymentVolumeMetadata(
+async function attachDeploymentRuntimeMetadata(
   pool: Pool,
   deploymentId: string,
   environment: Record<string, string>,
 ): Promise<Record<string, string>> {
+  const identity = await pool.query(
+    `SELECT s.project_id,s.slug
+       FROM deployments d
+       JOIN services s ON s.id=d.service_id
+      WHERE d.id=$1`,
+    [deploymentId],
+  );
+  if (identity.rowCount !== 1) throw new Error("deployment is missing canonical service/project identity");
+  const enriched: Record<string, string> = {
+    ...environment,
+    [internalProjectNetworkMetadataKey]: JSON.stringify({
+      projectId: String(identity.rows[0].project_id),
+      serviceAlias: String(identity.rows[0].slug),
+    }),
+  };
+
   const mounts = await pool.query(
     `SELECT m.volume_id,v.name,m.docker_volume_name,m.mount_path
        FROM deployment_volume_mounts m
@@ -188,9 +205,9 @@ async function attachDeploymentVolumeMetadata(
       ORDER BY m.mount_path,m.volume_id`,
     [deploymentId],
   );
-  if (!mounts.rowCount) return environment;
+  if (!mounts.rowCount) return enriched;
   return {
-    ...environment,
+    ...enriched,
     [internalVolumeMetadataKey]: JSON.stringify(
       mounts.rows.map((row) => ({
         volumeId: String(row.volume_id),
@@ -220,7 +237,7 @@ export async function loadDeploymentEnvironment(
   } else {
     environment = await loadServiceEnvironment(pool, masterKey, serviceName);
   }
-  return attachDeploymentVolumeMetadata(pool, deploymentId, environment);
+  return attachDeploymentRuntimeMetadata(pool, deploymentId, environment);
 }
 
 export async function deleteServiceVariable(pool: Pool, serviceName: string, key: string): Promise<boolean> {
