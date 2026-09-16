@@ -21,8 +21,14 @@ func writeRuntimeEnvFile(workspace string, values map[string]string, containerPo
 		return "", fmt.Errorf("clean stale runtime env files: %w", err)
 	}
 
-	merged := make(map[string]string, len(values)+2)
-	for key, value := range values {
+	deploymentID := filepath.Base(workspace)
+	cleanValues, err := splitRuntimeVolumeMetadata(deploymentID, values)
+	if err != nil {
+		return "", err
+	}
+
+	merged := make(map[string]string, len(cleanValues)+2)
+	for key, value := range cleanValues {
 		if !environmentKeyPattern.MatchString(key) {
 			return "", fmt.Errorf("invalid environment variable name %q", key)
 		}
