@@ -314,7 +314,10 @@ func runSafeRuntime(ctx context.Context, cfg config, w *writer, spec safeRuntime
 	if err := waitForHealth(ctx, backendPort, spec.HealthPath, spec.HealthTimeout); err != nil {
 		logContainerTail(ctx, w, spec.DeploymentID, backendName)
 		_ = removeManagedContainer(ctx, backendName, spec.DeploymentID, false)
-		return "", restorePrevious(fmt.Errorf("runtime backend healthcheck failed while committed route was retained: %w", err))
+		if len(volumes) == 0 {
+			return "", restorePrevious(fmt.Errorf("runtime backend healthcheck failed while current stable route remained live: %w", err))
+		}
+		return "", restorePrevious(fmt.Errorf("stateful runtime backend healthcheck failed before stable route switch: %w", err))
 	}
 
 	next := runtimeRoute{
