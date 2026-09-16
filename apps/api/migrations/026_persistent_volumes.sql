@@ -119,16 +119,16 @@ AS $$
 BEGIN
   IF NEW.operation = 'ROLLBACK' THEN
     INSERT INTO deployment_volume_mounts(deployment_id,volume_id,docker_volume_name,mount_path)
-    SELECT NEW.id,volume_id,docker_volume_name,mount_path
-      FROM deployment_volume_mounts
-     WHERE deployment_id=NEW.rollback_target_id
-     ORDER BY volume_id;
+    SELECT NEW.id,m.volume_id,m.docker_volume_name,m.mount_path
+      FROM deployment_volume_mounts m
+     WHERE m.deployment_id=NEW.rollback_target_id
+     ORDER BY m.volume_id;
   ELSE
     INSERT INTO deployment_volume_mounts(deployment_id,volume_id,docker_volume_name,mount_path)
-    SELECT NEW.id,id,docker_volume_name,mount_path
-      FROM service_volumes
-     WHERE service_id=NEW.service_id
-     ORDER BY created_at,id;
+    SELECT NEW.id,v.id,v.docker_volume_name,v.mount_path
+      FROM service_volumes v
+     WHERE v.service_id=NEW.service_id
+     ORDER BY v.created_at,v.id;
   END IF;
   RETURN NULL;
 END;
