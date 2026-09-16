@@ -109,7 +109,7 @@ agent_identity="$("$tmp_agent" --identity 2>/dev/null || true)"
   echo "Downloaded Rundea Agent does not expose a valid self-identity" >&2
   exit 1
 }
-for capability in artifactRetention buildArgs buildGuardrails continuousHealth managedIngress nodeCapacity nodeDiskMetrics persistentVolumes resourceGuardrails runtimeMetrics; do
+for capability in artifactRetention buildArgs buildGuardrails continuousHealth managedIngress nodeCapacity nodeDiskMetrics persistentVolumes privateNetworking resourceGuardrails runtimeMetrics; do
   if ! "$tmp_agent" "--require-capability=${capability}" >/dev/null 2>&1; then
     echo "Downloaded Rundea Agent is missing required capability: ${capability}" >&2
     exit 1

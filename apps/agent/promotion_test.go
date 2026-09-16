@@ -13,9 +13,16 @@ func TestRevisionContainerNameIsDeploymentScoped(t *testing.T) {
 }
 
 func TestBackendRunArgsNeverBindStablePort(t *testing.T) {
+	deploymentID := "12345678-1234-4234-9234-123456789abc"
+	pendingRuntimeProjectNetworks.Store(deploymentID, runtimeProjectNetworkSpec{
+		ProjectID: "22222222-2222-4222-8222-222222222222",
+		ServiceAlias: "api",
+	})
+	defer clearRuntimeProjectNetwork(deploymentID)
+
 	spec := safeRuntimeSpec{
-		DeploymentID:  "12345678-1234-1234-9234-123456789abc",
-		ServiceName:   "api",
+		DeploymentID:  deploymentID,
+		ServiceName:   "api-1234567812",
 		ContainerPort: 8080,
 		HostPort:      18080,
 		EnvFile:       "/tmp/runtime.env",
@@ -34,10 +41,14 @@ func TestBackendRunArgsNeverBindStablePort(t *testing.T) {
 		"--log-opt max-size=10m",
 		"--log-opt max-file=3",
 		"rundea.backend=true",
-		"rundea.deployment=12345678-1234-1234-9234-123456789abc",
+		"rundea.deployment=" + deploymentID,
 		"rundea.managed=true",
-		"rundea.service=api",
+		"rundea.service=api-1234567812",
+		"rundea.project=22222222-2222-4222-8222-222222222222",
+		"rundea.service_alias=api",
 		"rundea.rollback_target=old",
+		"--network rundea-project-22222222222242228222222222222222",
+		"--network-alias api",
 		"-p 127.0.0.1::8080",
 		"--env-file /tmp/runtime.env rundea/test:build",
 	} {

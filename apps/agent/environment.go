@@ -22,8 +22,13 @@ func writeRuntimeEnvFile(workspace string, values map[string]string, containerPo
 	}
 
 	deploymentID := filepath.Base(workspace)
-	cleanValues, err := splitRuntimeVolumeMetadata(deploymentID, values)
+	withoutNetworkMetadata, err := splitRuntimeProjectNetworkMetadata(deploymentID, values)
 	if err != nil {
+		return "", err
+	}
+	cleanValues, err := splitRuntimeVolumeMetadata(deploymentID, withoutNetworkMetadata)
+	if err != nil {
+		clearRuntimeProjectNetwork(deploymentID)
 		return "", err
 	}
 

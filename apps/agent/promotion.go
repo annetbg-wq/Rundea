@@ -95,6 +95,11 @@ func backendRunArgs(spec safeRuntimeSpec, name string) []string {
 		"rundea.backend":    "true",
 		"rundea.service":    spec.ServiceName,
 	}
+	projectNetwork, hasProjectNetwork := runtimeProjectNetworkForDeployment(spec.DeploymentID)
+	if hasProjectNetwork {
+		labels["rundea.project"] = strings.ToLower(projectNetwork.ProjectID)
+		labels["rundea.service_alias"] = projectNetwork.ServiceAlias
+	}
 	for key, value := range spec.Labels {
 		labels[key] = value
 	}
@@ -111,6 +116,9 @@ func backendRunArgs(spec safeRuntimeSpec, name string) []string {
 	}
 	for _, key := range keys {
 		args = append(args, "--label", key+"="+labels[key])
+	}
+	if hasProjectNetwork {
+		args = append(args, runtimeProjectNetworkArgs(projectNetwork)...)
 	}
 	args = append(args, runtimeVolumeMountArgs(runtimeVolumesForDeployment(spec.DeploymentID))...)
 	args = append(args,
@@ -239,6 +247,14 @@ func runSafeRuntime(ctx context.Context, cfg config, w *writer, spec safeRuntime
 
 	volumes := runtimeVolumesForDeployment(spec.DeploymentID)
 	defer clearRuntimeVolumes(spec.DeploymentID)
+	projectNetwork, hasProjectNetwork := runtimeProjectNetworkForDeployment(spec.DeploymentID)
+	defer clearRuntimeProjectNetwork(spec.DeploymentID)
+	if !hasProjectNetwork {
+		return "", errors.New("runtime specification is missing canonical project network metadata")
+	}
+	if err := validateRuntimeProjectNetwork(projectNetwork); err != nil {
+		return "", err
+	}
 
 	if committed, err := runtimeRouteForDeployment(cfg, spec.DeploymentID); err != nil {
 		return "", err
@@ -253,6 +269,9 @@ func runSafeRuntime(ctx context.Context, cfg config, w *writer, spec safeRuntime
 	}
 	if err := requireDiskHeadroom(spec.WorkDir); err != nil {
 		return "", fmt.Errorf("runtime admission: %w", err)
+	}
+	if _, err := ensureOwnedRuntimeProjectNetwork(ctx, projectNetwork); err != nil {
+		return "", fmt.Errorf("private project network admission: %w", err)
 	}
 	if err := ensureRuntimeVolumes(ctx, spec.ServiceName, volumes); err != nil {
 		return "", fmt.Errorf("persistent volume admission: %w", err)

@@ -10,6 +10,7 @@ export const requiredAgentCapabilities = [
   "nodeCapacity",
   "nodeDiskMetrics",
   "persistentVolumes",
+  "privateNetworking",
   "resourceGuardrails",
   "runtimeMetrics",
 ] as const;
