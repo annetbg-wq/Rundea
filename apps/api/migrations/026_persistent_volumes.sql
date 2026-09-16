@@ -15,7 +15,7 @@ CREATE TABLE IF NOT EXISTS service_volumes (
   UNIQUE(service_id,name),
   UNIQUE(service_id,mount_path),
   CHECK (name ~ '^[a-z][a-z0-9-]{0,62}$'),
-  CHECK (mount_path ~ '^/[^\r\n\x00]+$'),
+  CHECK (mount_path ~ '^/[^,\r\n\x00]+$'),
   CHECK (mount_path <> '/'),
   CHECK (mount_path !~ '(^|/)\.\.(/|$)'),
   CHECK (docker_volume_name ~ '^rundea-vol-[a-f0-9]{32}$')
@@ -34,7 +34,7 @@ CREATE TABLE IF NOT EXISTS deployment_volume_mounts (
   mount_path text NOT NULL,
   PRIMARY KEY(deployment_id,volume_id),
   UNIQUE(deployment_id,mount_path),
-  CHECK (mount_path ~ '^/[^\r\n\x00]+$'),
+  CHECK (mount_path ~ '^/[^,\r\n\x00]+$'),
   CHECK (mount_path <> '/'),
   CHECK (mount_path !~ '(^|/)\.\.(/|$)'),
   CHECK (docker_volume_name ~ '^rundea-vol-[a-f0-9]{32}$')
