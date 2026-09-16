@@ -4,7 +4,7 @@ import { validateAgentHello } from "./agent-compatibility";
 
 const compatible = {
   type: "hello" as const,
-  agentVersion: "0.1.10",
+  agentVersion: "0.1.11",
   buildSha: "a".repeat(40),
   capabilities: [
     "runtimeMetrics",
@@ -12,6 +12,7 @@ const compatible = {
     "nodeCapacity",
     "nodeDiskMetrics",
     "persistentVolumes",
+    "privateNetworking",
     "continuousHealth",
     "buildArgs",
     "buildGuardrails",
@@ -23,7 +24,7 @@ const compatible = {
 
 test("accepts immutable compatible Agent and sorts capabilities", () => {
   const identity = validateAgentHello(compatible, "staging");
-  assert.equal(identity.agentVersion, "0.1.10");
+  assert.equal(identity.agentVersion, "0.1.11");
   assert.equal(identity.buildSha, "a".repeat(40));
   assert.deepEqual(identity.capabilities, [
     "artifactRetention",
@@ -34,6 +35,7 @@ test("accepts immutable compatible Agent and sorts capabilities", () => {
     "nodeCapacity",
     "nodeDiskMetrics",
     "persistentVolumes",
+    "privateNetworking",
     "resourceGuardrails",
     "runtimeMetrics",
     "safePromotion",
@@ -67,6 +69,13 @@ test("rejects an Agent missing persistent volume capability", () => {
   assert.throws(
     () => validateAgentHello({ ...compatible, capabilities: compatible.capabilities.filter((value) => value !== "persistentVolumes") }, "production"),
     /persistentVolumes/,
+  );
+});
+
+test("rejects an Agent missing private networking capability", () => {
+  assert.throws(
+    () => validateAgentHello({ ...compatible, capabilities: compatible.capabilities.filter((value) => value !== "privateNetworking") }, "production"),
+    /privateNetworking/,
   );
 });
 
