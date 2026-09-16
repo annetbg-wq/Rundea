@@ -149,6 +149,13 @@ jobs:
           RUNDEA_AGENT_BINARY: /tmp/rundea-agent
           RUNDEA_ACCEPTANCE_FIXTURE_SHA: 039c34770852fb07cef7f9f0f8534c5de408b207
         run: node infra/acceptance/persistent-volume-e2e.mjs
+      - name: Prove project network discovery and cross-project isolation
+        env:
+          RUNDEA_ACCEPTANCE_API_URL: http://127.0.0.1:4000
+          RUNDEA_CONTROL_TOKEN: acceptance-control-token
+          RUNDEA_AGENT_BINARY: /tmp/rundea-agent
+          RUNDEA_ACCEPTANCE_FIXTURE_SHA: 039c34770852fb07cef7f9f0f8534c5de408b207
+        run: node infra/acceptance/private-network-e2e.mjs
       - name: Control Plane log
         if: always()
         run: cat /tmp/rundea-api.log || true
