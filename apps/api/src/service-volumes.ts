@@ -34,8 +34,8 @@ export function validateVolumeName(value: unknown): string {
 export function validateMountPath(value: unknown): string {
   if (typeof value !== "string") throw new ServiceVolumeError(400, "mountPath is required");
   const path = value.trim();
-  if (!path.startsWith("/") || path === "/" || path.length > 512 || /[\r\n\0]/.test(path)) {
-    throw new ServiceVolumeError(400, "mountPath must be an absolute container path below /");
+  if (!path.startsWith("/") || path === "/" || path.length > 512 || /[,\r\n\0]/.test(path)) {
+    throw new ServiceVolumeError(400, "mountPath must be an absolute container path below / and must not contain commas or control characters");
   }
   const parts = path.split("/").filter(Boolean);
   if (!parts.length || parts.some((part) => part === ".." || part === ".")) {
