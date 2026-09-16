@@ -27,6 +27,7 @@ var declaredAgentCapabilities = []string{
 	"nodeCapacity",
 	"nodeDiskMetrics",
 	"persistentVolumes",
+	"privateNetworking",
 	"resourceGuardrails",
 	"runtimeMetrics",
 	"runtimeRecovery",
