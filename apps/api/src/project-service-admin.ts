@@ -283,7 +283,7 @@ export function registerProjectServiceAdminRoutes(
         const serviceId = requireUuid(request.params.serviceId, "serviceId");
         const result = await pool.query(
           `UPDATE services s
-              SET status='ARCHIVED',archived_at=COALESCE(archived_at,now()),updated_at=now()
+              SET status='ARCHIVED',archived_at=COALESCE(s.archived_at,now()),updated_at=now()
              FROM projects p
             WHERE s.id=$1 AND p.id=s.project_id AND p.workspace_id<>$2
           RETURNING s.id,s.project_id,s.slug,s.name,s.status,s.archived_at,s.created_at,s.updated_at`,

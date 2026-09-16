@@ -30,30 +30,39 @@ function optionalNodeId(value: string | undefined): string | null {
 
 async function selectNode(
   client: PoolClient,
+  serviceId: string,
   workspaceId: string,
   requestedNodeId: string | null,
 ): Promise<string> {
   const result = requestedNodeId
     ? await client.query(
-        `SELECT id
-           FROM nodes
-          WHERE id=$1 AND workspace_id=$2 AND lifecycle_status='ACTIVE' AND status='ONLINE'
+        `SELECT n.id
+           FROM nodes n
+          WHERE n.id=$1 AND n.workspace_id=$2 AND n.lifecycle_status='ACTIVE' AND n.status='ONLINE'
+            AND (
+              NOT EXISTS(SELECT 1 FROM service_volumes v WHERE v.service_id=$3 AND v.node_id IS NOT NULL)
+              OR n.id IN (SELECT v.node_id FROM service_volumes v WHERE v.service_id=$3 AND v.node_id IS NOT NULL)
+            )
           FOR SHARE`,
-        [requestedNodeId, workspaceId],
+        [requestedNodeId, workspaceId, serviceId],
       )
     : await client.query(
-        `SELECT id
-           FROM nodes
-          WHERE workspace_id=$1 AND lifecycle_status='ACTIVE' AND status='ONLINE'
-          ORDER BY last_seen_at DESC NULLS LAST,created_at ASC,id ASC
+        `SELECT n.id
+           FROM nodes n
+          WHERE n.workspace_id=$1 AND n.lifecycle_status='ACTIVE' AND n.status='ONLINE'
+            AND (
+              NOT EXISTS(SELECT 1 FROM service_volumes v WHERE v.service_id=$2 AND v.node_id IS NOT NULL)
+              OR n.id IN (SELECT v.node_id FROM service_volumes v WHERE v.service_id=$2 AND v.node_id IS NOT NULL)
+            )
+          ORDER BY n.last_seen_at DESC NULLS LAST,n.created_at ASC,n.id ASC
           LIMIT 1
           FOR SHARE`,
-        [workspaceId],
+        [workspaceId, serviceId],
       );
   if (result.rowCount !== 1) {
     throw new CanonicalAutodeployError(
       409,
-      requestedNodeId ? "selected node is not an ONLINE node in this workspace" : "workspace has no ONLINE node available for autodeploy",
+      requestedNodeId ? "selected node is not an ONLINE node compatible with this service placement" : "workspace has no ONLINE node compatible with this service placement",
     );
   }
   return String(result.rows[0].id);
@@ -100,7 +109,7 @@ export async function configureCanonicalAutodeploy(
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
-    const nodeId = await selectNode(client, service.workspaceId, optionalNodeId(input.nodeId));
+    const nodeId = await selectNode(client, service.id, service.workspaceId, optionalNodeId(input.nodeId));
     const allocation = await client.query("SELECT rundea_allocate_host_port($1,$2) AS host_port", [service.id, nodeId]);
     const hostPort = Number(allocation.rows[0]?.host_port);
     if (!Number.isInteger(hostPort)) throw new CanonicalAutodeployError(409, "Rundea could not allocate a managed host port");

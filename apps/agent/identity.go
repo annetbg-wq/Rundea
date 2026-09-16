@@ -26,6 +26,7 @@ var declaredAgentCapabilities = []string{
 	"managedIngress",
 	"nodeCapacity",
 	"nodeDiskMetrics",
+	"persistentVolumes",
 	"resourceGuardrails",
 	"runtimeMetrics",
 	"runtimeRecovery",
