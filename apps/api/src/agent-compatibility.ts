@@ -9,6 +9,7 @@ export const requiredAgentCapabilities = [
   "managedIngress",
   "nodeCapacity",
   "nodeDiskMetrics",
+  "persistentVolumes",
   "resourceGuardrails",
   "runtimeMetrics",
 ] as const;

@@ -112,6 +112,7 @@ func backendRunArgs(spec safeRuntimeSpec, name string) []string {
 	for _, key := range keys {
 		args = append(args, "--label", key+"="+labels[key])
 	}
+	args = append(args, runtimeVolumeMountArgs(runtimeVolumesForDeployment(spec.DeploymentID))...)
 	args = append(args,
 		"--name", name,
 		"-p", fmt.Sprintf("127.0.0.1::%d", spec.ContainerPort),
@@ -174,6 +175,54 @@ func scheduleBackendDrain(w *writer, route runtimeRoute) {
 	}()
 }
 
+func activeRuntimeRouteForService(cfg config, serviceName string) (*runtimeRoute, error) {
+	runtimeRouterMu.Lock()
+	defer runtimeRouterMu.Unlock()
+	state, err := loadRuntimeRouterState(cfg)
+	if err != nil {
+		return nil, err
+	}
+	return routeForService(state, serviceName), nil
+}
+
+func stopStatefulPreviousBackend(ctx context.Context, route runtimeRoute) error {
+	state, err := inspectContainerState(ctx, route.BackendContainer)
+	if err != nil {
+		return err
+	}
+	if !state.Exists || !state.Managed || state.DeploymentID != route.DeploymentID {
+		return errors.New("stateful previous backend ownership does not match committed route")
+	}
+	if !state.Running {
+		return errors.New("stateful previous backend is already stopped")
+	}
+	out, err := exec.CommandContext(ctx, "docker", "stop", "--time", "20", route.BackendContainer).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("stop previous stateful backend: %w: %s", err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+func restoreStatefulPreviousBackend(ctx context.Context, cfg config, route runtimeRoute, timeout time.Duration) error {
+	out, err := exec.CommandContext(ctx, "docker", "start", route.BackendContainer).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("restart previous stateful backend: %w: %s", err, strings.TrimSpace(string(out)))
+	}
+	backendPort, err := publishedSingleLoopbackPort(ctx, route.BackendContainer)
+	if err != nil {
+		return err
+	}
+	if err := waitForHealth(ctx, backendPort, route.HealthPath, timeout); err != nil {
+		return fmt.Errorf("previous stateful backend did not recover: %w", err)
+	}
+	restored := route
+	restored.BackendPort = backendPort
+	if err := commitRestartRuntimeRoute(ctx, cfg, restored, timeout); err != nil {
+		return fmt.Errorf("restore previous stateful route: %w", err)
+	}
+	return nil
+}
+
 func runSafeRuntime(ctx context.Context, cfg config, w *writer, spec safeRuntimeSpec) (string, error) {
 	if spec.HealthTimeout <= 0 {
 		spec.HealthTimeout = 60 * time.Second
@@ -188,6 +237,9 @@ func runSafeRuntime(ctx context.Context, cfg config, w *writer, spec safeRuntime
 		return "", errors.New("runtime specification contains invalid healthcheck path")
 	}
 
+	volumes := runtimeVolumesForDeployment(spec.DeploymentID)
+	defer clearRuntimeVolumes(spec.DeploymentID)
+
 	if committed, err := runtimeRouteForDeployment(cfg, spec.DeploymentID); err != nil {
 		return "", err
 	} else if committed != nil {
@@ -201,6 +253,9 @@ func runSafeRuntime(ctx context.Context, cfg config, w *writer, spec safeRuntime
 	}
 	if err := requireDiskHeadroom(spec.WorkDir); err != nil {
 		return "", fmt.Errorf("runtime admission: %w", err)
+	}
+	if err := ensureRuntimeVolumes(ctx, spec.ServiceName, volumes); err != nil {
+		return "", fmt.Errorf("persistent volume admission: %w", err)
 	}
 
 	backendName := revisionContainerName(spec.ContainerName, spec.DeploymentID)
@@ -217,23 +272,49 @@ func runSafeRuntime(ctx context.Context, cfg config, w *writer, spec safeRuntime
 		}
 	}
 
+	var stoppedPrevious *runtimeRoute
+	if len(volumes) > 0 {
+		previous, routeErr := activeRuntimeRouteForService(cfg, spec.ServiceName)
+		if routeErr != nil {
+			return "", routeErr
+		}
+		if previous != nil && previous.DeploymentID != spec.DeploymentID {
+			if err := stopStatefulPreviousBackend(ctx, *previous); err != nil {
+				return "", err
+			}
+			stoppedPrevious = previous
+			w.log(spec.DeploymentID, "system", "previous stateful backend stopped before mounting shared persistent volumes")
+		}
+	}
+
+	restorePrevious := func(reason error) error {
+		if stoppedPrevious == nil {
+			return reason
+		}
+		if restoreErr := restoreStatefulPreviousBackend(context.Background(), cfg, *stoppedPrevious, spec.HealthTimeout); restoreErr != nil {
+			return fmt.Errorf("%v; previous stateful backend restore also failed: %w", reason, restoreErr)
+		}
+		w.log(spec.DeploymentID, "system", "previous stateful backend restored after candidate failure")
+		return reason
+	}
+
 	containerID, err := startBackendContainer(ctx, spec, backendName)
 	if err != nil {
-		return "", err
+		return "", restorePrevious(err)
 	}
 	backendPort, err := publishedLoopbackPort(ctx, backendName, spec.ContainerPort)
 	if err != nil {
 		_ = removeManagedContainer(ctx, backendName, spec.DeploymentID, false)
-		return "", err
+		return "", restorePrevious(err)
 	}
-	if err := w.status(spec.DeploymentID, "HEALTHCHECK", "validating new backend before zero-downtime route switch", containerID); err != nil {
+	if err := w.status(spec.DeploymentID, "HEALTHCHECK", "validating new backend before stable route switch", containerID); err != nil {
 		_ = removeManagedContainer(ctx, backendName, spec.DeploymentID, false)
-		return "", err
+		return "", restorePrevious(err)
 	}
 	if err := waitForHealth(ctx, backendPort, spec.HealthPath, spec.HealthTimeout); err != nil {
 		logContainerTail(ctx, w, spec.DeploymentID, backendName)
 		_ = removeManagedContainer(ctx, backendName, spec.DeploymentID, false)
-		return "", fmt.Errorf("runtime backend healthcheck failed while current stable route remained live: %w", err)
+		return "", restorePrevious(fmt.Errorf("runtime backend healthcheck failed while committed route was retained: %w", err))
 	}
 
 	next := runtimeRoute{
@@ -248,7 +329,7 @@ func runSafeRuntime(ctx context.Context, cfg config, w *writer, spec safeRuntime
 	if err != nil {
 		logContainerTail(ctx, w, spec.DeploymentID, backendName)
 		_ = removeManagedContainer(ctx, backendName, spec.DeploymentID, false)
-		return "", err
+		return "", restorePrevious(err)
 	}
 	w.log(spec.DeploymentID, "system", "stable runtime route switched without rebinding the service port")
 	previousDeploymentID := ""

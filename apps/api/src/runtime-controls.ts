@@ -12,6 +12,7 @@ import {
   validRuntimeResourceId,
 } from "./runtime-operations";
 import { registerServiceScopedRoutes } from "./service-scoped-routes";
+import { registerServiceVolumeRoutes } from "./service-volumes";
 
 type ControlPreHandler = (request: FastifyRequest, reply: FastifyReply) => Promise<void>;
 type DispatchQueued = (nodeId: string) => Promise<void>;
@@ -35,6 +36,7 @@ export function registerRuntimeControlRoutes(
   // canonical routes here until the Control Plane route registry is split into
   // its own module; do not duplicate registration in index.ts.
   registerServiceScopedRoutes(app, pool, sockets, requireControl, dispatchQueued);
+  registerServiceVolumeRoutes(app, pool, requireControl);
   registerGitHubProjectRoutes(app, pool, requireControl);
   registerCanonicalAutodeployRoutes(app, pool, requireControl);
   registerGitHubAutodeployRoutes(app, pool, requireControl, dispatchQueued, process.env.RUNDEA_GITHUB_WEBHOOK_SECRET);
