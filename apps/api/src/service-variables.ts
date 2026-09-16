@@ -22,6 +22,7 @@ const serviceNamePattern = /^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/;
 const variableKey = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const maxVariables = 256;
 const maxValueBytes = 64 * 1024;
+export const internalVolumeMetadataKey = "RUNDEA_INTERNAL_VOLUME_MOUNTS";
 
 function requireServiceName(value: string): string {
   if (!serviceNamePattern.test(value)) throw new Error("invalid service name");
@@ -174,6 +175,33 @@ export async function copyDeploymentEnvironment(client: PoolClient, sourceDeploy
   await client.query("UPDATE deployments SET environment_snapshot_at=now() WHERE id=$1", [destinationDeploymentId]);
 }
 
+async function attachDeploymentVolumeMetadata(
+  pool: Pool,
+  deploymentId: string,
+  environment: Record<string, string>,
+): Promise<Record<string, string>> {
+  const mounts = await pool.query(
+    `SELECT m.volume_id,v.name,m.docker_volume_name,m.mount_path
+       FROM deployment_volume_mounts m
+       JOIN service_volumes v ON v.id=m.volume_id
+      WHERE m.deployment_id=$1
+      ORDER BY m.mount_path,m.volume_id`,
+    [deploymentId],
+  );
+  if (!mounts.rowCount) return environment;
+  return {
+    ...environment,
+    [internalVolumeMetadataKey]: JSON.stringify(
+      mounts.rows.map((row) => ({
+        volumeId: String(row.volume_id),
+        name: String(row.name),
+        dockerVolumeName: String(row.docker_volume_name),
+        mountPath: String(row.mount_path),
+      })),
+    ),
+  };
+}
+
 export async function loadDeploymentEnvironment(
   pool: Pool,
   masterKey: Buffer,
@@ -181,15 +209,18 @@ export async function loadDeploymentEnvironment(
   serviceName: string,
 ): Promise<Record<string, string>> {
   const snapshot = await pool.query("SELECT environment_snapshot_at FROM deployments WHERE id=$1", [deploymentId]);
+  let environment: Record<string, string>;
   if (snapshot.rowCount === 1 && snapshot.rows[0].environment_snapshot_at) {
     const result = await pool.query(
       `SELECT key,encrypted_version,iv,ciphertext,auth_tag
          FROM deployment_variables WHERE deployment_id=$1 ORDER BY key ASC`,
       [deploymentId],
     );
-    return Object.fromEntries(result.rows.map((row) => [row.key, decryptValue(encryptedFromRow(row), masterKey)]));
+    environment = Object.fromEntries(result.rows.map((row) => [row.key, decryptValue(encryptedFromRow(row), masterKey)]));
+  } else {
+    environment = await loadServiceEnvironment(pool, masterKey, serviceName);
   }
-  return loadServiceEnvironment(pool, masterKey, serviceName);
+  return attachDeploymentVolumeMetadata(pool, deploymentId, environment);
 }
 
 export async function deleteServiceVariable(pool: Pool, serviceName: string, key: string): Promise<boolean> {
