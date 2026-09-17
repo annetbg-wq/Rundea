@@ -27,9 +27,6 @@ CREATE INDEX IF NOT EXISTS project_redis_addons_node_idx
   ON project_redis_addons(node_id,status,project_id);
 
 -- Stateful project addons and project services must stay on the same node.
--- Canonical deploy paths already submit service_id. Legacy prototype inserts
--- without service_id are intentionally ignored here and remain outside managed
--- addon scope.
 CREATE OR REPLACE FUNCTION rundea_bind_managed_redis_node()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -74,3 +71,33 @@ DROP TRIGGER IF EXISTS deployments_managed_redis_node_scope ON deployments;
 CREATE TRIGGER deployments_managed_redis_node_scope
 BEFORE INSERT ON deployments
 FOR EACH ROW EXECUTE FUNCTION rundea_bind_managed_redis_node();
+
+-- Redis reconciliation happens before the application container is launched.
+-- Therefore a deployment cannot become READY unless the addon was created or
+-- recovered successfully on the same node. Promote addon state only at that
+-- proven application READY boundary.
+CREATE OR REPLACE FUNCTION rundea_mark_managed_redis_ready()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+DECLARE
+  deployment_project_id uuid;
+BEGIN
+  IF NEW.status <> 'READY' OR OLD.status = 'READY' OR NEW.service_id IS NULL THEN
+    RETURN NEW;
+  END IF;
+  SELECT project_id INTO deployment_project_id FROM services WHERE id=NEW.service_id;
+  IF deployment_project_id IS NULL THEN
+    RETURN NEW;
+  END IF;
+  UPDATE project_redis_addons
+     SET status='READY',last_error=NULL,ready_at=COALESCE(ready_at,now()),updated_at=now()
+   WHERE project_id=deployment_project_id AND node_id=NEW.node_id;
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS deployments_mark_managed_redis_ready ON deployments;
+CREATE TRIGGER deployments_mark_managed_redis_ready
+AFTER UPDATE OF status ON deployments
+FOR EACH ROW EXECUTE FUNCTION rundea_mark_managed_redis_ready();
