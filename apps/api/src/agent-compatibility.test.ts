@@ -4,11 +4,12 @@ import { validateAgentHello } from "./agent-compatibility";
 
 const compatible = {
   type: "hello" as const,
-  agentVersion: "0.1.11",
+  agentVersion: "0.1.12",
   buildSha: "a".repeat(40),
   capabilities: [
     "runtimeMetrics",
     "managedIngress",
+    "managedRedis",
     "nodeCapacity",
     "nodeDiskMetrics",
     "persistentVolumes",
@@ -24,7 +25,7 @@ const compatible = {
 
 test("accepts immutable compatible Agent and sorts capabilities", () => {
   const identity = validateAgentHello(compatible, "staging");
-  assert.equal(identity.agentVersion, "0.1.11");
+  assert.equal(identity.agentVersion, "0.1.12");
   assert.equal(identity.buildSha, "a".repeat(40));
   assert.deepEqual(identity.capabilities, [
     "artifactRetention",
@@ -32,6 +33,7 @@ test("accepts immutable compatible Agent and sorts capabilities", () => {
     "buildGuardrails",
     "continuousHealth",
     "managedIngress",
+    "managedRedis",
     "nodeCapacity",
     "nodeDiskMetrics",
     "persistentVolumes",
@@ -76,6 +78,13 @@ test("rejects an Agent missing private networking capability", () => {
   assert.throws(
     () => validateAgentHello({ ...compatible, capabilities: compatible.capabilities.filter((value) => value !== "privateNetworking") }, "production"),
     /privateNetworking/,
+  );
+});
+
+test("rejects an Agent missing managed Redis capability", () => {
+  assert.throws(
+    () => validateAgentHello({ ...compatible, capabilities: compatible.capabilities.filter((value) => value !== "managedRedis") }, "production"),
+    /managedRedis/,
   );
 });
 
