@@ -7,6 +7,7 @@ export const requiredAgentCapabilities = [
   "buildGuardrails",
   "continuousHealth",
   "managedIngress",
+  "managedRedis",
   "nodeCapacity",
   "nodeDiskMetrics",
   "persistentVolumes",
