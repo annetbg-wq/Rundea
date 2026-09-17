@@ -1,5 +1,6 @@
 import type { Pool, PoolClient } from "pg";
 import { decryptValue, encryptValue, type EncryptedValue } from "@rundea/crypto";
+import { loadManagedRedisRuntimeMetadata } from "./managed-redis";
 
 export type ServiceVariableInput = {
   key: string;
@@ -237,7 +238,8 @@ export async function loadDeploymentEnvironment(
   } else {
     environment = await loadServiceEnvironment(pool, masterKey, serviceName);
   }
-  return attachDeploymentRuntimeMetadata(pool, deploymentId, environment);
+  const withRuntimeMetadata = await attachDeploymentRuntimeMetadata(pool, deploymentId, environment);
+  return loadManagedRedisRuntimeMetadata(pool, masterKey, deploymentId, withRuntimeMetadata);
 }
 
 export async function deleteServiceVariable(pool: Pool, serviceName: string, key: string): Promise<boolean> {
