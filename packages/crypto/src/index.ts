@@ -9,6 +9,7 @@ export type EncryptedValue = {
 
 const serviceVariableAad = Buffer.from("rundea:service-variable:v1", "utf8");
 const providerCredentialAad = Buffer.from("rundea:provider-credential:v1", "utf8");
+const managedRedisCredentialAad = Buffer.from("rundea:managed-redis-credential:v1", "utf8");
 
 export function createOpaqueToken(): string {
   return randomBytes(32).toString("base64url");
@@ -70,4 +71,12 @@ export function encryptProviderCredential(value: string, key: Buffer): Encrypted
 
 export function decryptProviderCredential(value: EncryptedValue, key: Buffer): string {
   return decryptWithAad(value, key, providerCredentialAad);
+}
+
+export function encryptManagedRedisCredential(value: string, key: Buffer): EncryptedValue {
+  return encryptWithAad(value, key, managedRedisCredentialAad);
+}
+
+export function decryptManagedRedisCredential(value: EncryptedValue, key: Buffer): string {
+  return decryptWithAad(value, key, managedRedisCredentialAad);
 }
