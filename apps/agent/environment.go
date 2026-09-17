@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -38,22 +39,29 @@ func writeRuntimeEnvFile(workspace string, values map[string]string, containerPo
 		return "", err
 	}
 
+	if redis, ok := managedRedisForDeployment(deploymentID); ok {
+		if err := ensureManagedRedis(context.Background(), workDir, redis); err != nil {
+			clearManagedRedis(deploymentID)
+			clearRuntimeVolumes(deploymentID)
+			clearRuntimeProjectNetwork(deploymentID)
+			return "", fmt.Errorf("managed Redis admission: %w", err)
+		}
+		clearManagedRedis(deploymentID)
+	}
+
 	merged := make(map[string]string, len(cleanValues)+2)
 	for key, value := range cleanValues {
 		if !environmentKeyPattern.MatchString(key) {
-			clearManagedRedis(deploymentID)
 			clearRuntimeVolumes(deploymentID)
 			clearRuntimeProjectNetwork(deploymentID)
 			return "", fmt.Errorf("invalid environment variable name %q", key)
 		}
 		if strings.ContainsRune(value, '\x00') || strings.ContainsAny(value, "\r\n") {
-			clearManagedRedis(deploymentID)
 			clearRuntimeVolumes(deploymentID)
 			clearRuntimeProjectNetwork(deploymentID)
 			return "", fmt.Errorf("environment variable %s contains unsupported control characters", key)
 		}
 		if key == "HOST" || key == "PORT" || strings.HasPrefix(key, "RUNDEA_") {
-			clearManagedRedis(deploymentID)
 			clearRuntimeVolumes(deploymentID)
 			clearRuntimeProjectNetwork(deploymentID)
 			return "", fmt.Errorf("environment variable %s is reserved by Rundea", key)
@@ -77,7 +85,6 @@ func writeRuntimeEnvFile(workspace string, values map[string]string, containerPo
 	}
 	path := filepath.Join(workspace, "runtime.env")
 	if err := os.WriteFile(path, []byte(builder.String()), 0o600); err != nil {
-		clearManagedRedis(deploymentID)
 		clearRuntimeVolumes(deploymentID)
 		clearRuntimeProjectNetwork(deploymentID)
 		return "", err
