@@ -67,7 +67,7 @@ async function waitReady(serviceId, deploymentId) {
     if (row.status === "READY") return { done: true, value: row };
     if (["FAILED","CANCELLED"].includes(row.status)) {
       const events = await request("/v0/deployments/" + deploymentId + "/events", { headers }).catch(() => null);
-      const detail = Array.isArray(events?.events) ? events.events.map((event) => event.message).filter(Boolean).slice(-8).join(" | ") : "";
+      const detail = Array.isArray(events) ? events.map((event) => event.message).filter(Boolean).slice(-8).join(" | ") : "";
       throw new FatalPollError(deploymentId + " reached " + row.status + (detail ? ": " + detail : ""));
     }
     return { last: row.status };
