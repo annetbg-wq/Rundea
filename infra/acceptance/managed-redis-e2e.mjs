@@ -100,7 +100,7 @@ function redisExec(container, mode, key, value) {
     's.setTimeout(10000);',
     's.on("connect",()=>s.write(cmd(["AUTH",decodeURIComponent(u.password)])));',
     's.on("data",c=>{b+=c.toString();',
-    'if(stage===0&&b.includes("+OK\\r\\n")){stage=1;b="";s.write(cmd([' + JSON.stringify(mode) + '==="write"?["SET",' + JSON.stringify(key) + ',' + JSON.stringify(value) + ']:["GET",' + JSON.stringify(key) + ']));return;}',
+    'if(stage===0&&b.includes("+OK\\r\\n")){stage=1;b="";s.write(cmd(' + JSON.stringify(mode) + '==="write"?["SET",' + JSON.stringify(key) + ',' + JSON.stringify(value) + ']:["GET",' + JSON.stringify(key) + ']));return;}',
     'if(stage===1&&(' + JSON.stringify(mode) + '==="write"?b.includes("+OK\\r\\n"):b.includes(' + JSON.stringify(value) + '))){process.stdout.write("OK");s.end();}});',
     's.on("timeout",()=>process.exit(3));s.on("error",()=>process.exit(4));',
     's.on("close",()=>{if(stage!==1)process.exit(5);});'
