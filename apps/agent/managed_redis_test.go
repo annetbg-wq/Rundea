@@ -1,6 +1,8 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -47,5 +49,35 @@ func TestManagedRedisContainerNameIsDeterministic(t *testing.T) {
 	name := managedRedisContainerName("22222222-2222-4222-8222-222222222222")
 	if name != "rundea-redis-addon-22222222222242228222222222222222" {
 		t.Fatalf("unexpected container name: %s", name)
+	}
+}
+
+
+func TestWriteManagedRedisConfigKeepsHostDirectoryPrivateAndFileContainerReadable(t *testing.T) {
+	workDir := t.TempDir()
+	spec := managedRedisSpec{
+		AddonID: "22222222-2222-4222-8222-222222222222",
+		ProjectID: "33333333-3333-4333-8333-333333333333",
+		Alias: "redis",
+		DockerVolumeName: "rundea-redis-22222222222242228222222222222222",
+		Password: strings.Repeat("a", 43),
+	}
+	path, err := writeManagedRedisConfig(workDir, spec)
+	if err != nil {
+		t.Fatalf("write managed Redis config: %v", err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat managed Redis config: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0o644 {
+		t.Fatalf("managed Redis config must be readable by container redis user, got %o", got)
+	}
+	dirInfo, err := os.Stat(filepath.Dir(path))
+	if err != nil {
+		t.Fatalf("stat managed Redis config directory: %v", err)
+	}
+	if got := dirInfo.Mode().Perm(); got != 0o700 {
+		t.Fatalf("managed Redis config directory must stay host-private, got %o", got)
 	}
 }
