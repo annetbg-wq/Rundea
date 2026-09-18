@@ -223,8 +223,8 @@ func ensureManagedRedis(ctx context.Context, workDir string, spec managedRedisSp
 			if startErr != nil {
 				return fmt.Errorf("start managed Redis: %w: %s", startErr, strings.TrimSpace(string(out)))
 			}
+		}
 		return waitForManagedRedis(ctx, spec)
-	}
 	}
 	if err := requireNodeMemoryCapacity(ctx, 512*1024*1024, "managed Redis admission"); err != nil {
 		return err
