@@ -65,7 +65,11 @@ async function waitReady(serviceId, deploymentId) {
     const row = body.deployments.find((x) => x.id === deploymentId);
     if (!row) return { last: "missing" };
     if (row.status === "READY") return { done: true, value: row };
-    if (["FAILED","CANCELLED"].includes(row.status)) {\n      const events = await request("/v0/deployments/" + deploymentId + "/events", { headers }).catch(() => null);\n      const detail = Array.isArray(events?.events) ? events.events.map((event) => event.message).filter(Boolean).slice(-8).join(" | ") : "";\n      throw new FatalPollError(deploymentId + " reached " + row.status + (detail ? ": " + detail : ""));\n    }
+    if (["FAILED","CANCELLED"].includes(row.status)) {
+      const events = await request("/v0/deployments/" + deploymentId + "/events", { headers }).catch(() => null);
+      const detail = Array.isArray(events?.events) ? events.events.map((event) => event.message).filter(Boolean).slice(-8).join(" | ") : "";
+      throw new FatalPollError(deploymentId + " reached " + row.status + (detail ? ": " + detail : ""));
+    }
     return { last: row.status };
   });
 }
