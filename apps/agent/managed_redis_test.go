@@ -45,7 +45,7 @@ func TestManagedRedisRejectsPublicOrUnsafeConfiguration(t *testing.T) {
 
 func TestManagedRedisContainerNameIsDeterministic(t *testing.T) {
 	name := managedRedisContainerName("22222222-2222-4222-8222-222222222222")
-	if name != "rundea-redis-22222222222242228222222222222222" {
+	if name != "rundea-redis-addon-22222222222242228222222222222222" {
 		t.Fatalf("unexpected container name: %s", name)
 	}
 }
