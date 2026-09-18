@@ -107,7 +107,7 @@ func clearManagedRedis(deploymentID string) {
 }
 
 func managedRedisContainerName(addonID string) string {
-	return "rundea-redis-" + strings.ReplaceAll(strings.ToLower(addonID), "-", "")
+	return "rundea-redis-addon-" + strings.ReplaceAll(strings.ToLower(addonID), "-", "")
 }
 
 func managedRedisConfigPath(workDir, addonID string) string {
