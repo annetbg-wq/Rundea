@@ -120,10 +120,10 @@ func writeManagedRedisConfig(workDir string, spec managedRedisSpec) (string, err
 		return "", fmt.Errorf("create managed Redis config directory: %w", err)
 	}
 	content := "bind 0.0.0.0\nprotected-mode yes\nport 6379\nappendonly yes\nappendfsync everysec\nrequirepass " + spec.Password + "\n"
-	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		return "", fmt.Errorf("write managed Redis config: %w", err)
 	}
-	if err := os.Chmod(path, 0o600); err != nil {
+	// The parent directory remains 0700 on the host. The bind-mounted file itself\n\t// must be readable by the non-root redis user inside the container.\n\tif err := os.Chmod(path, 0o644); err != nil {
 		return "", fmt.Errorf("protect managed Redis config: %w", err)
 	}
 	return path, nil
