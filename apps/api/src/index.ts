@@ -145,9 +145,13 @@ async function dispatchQueued(nodeId: string): Promise<void> {
   let row: Record<string, any> | undefined;
   try {
     await client.query("BEGIN");
-    const nodeLock = await client.query("SELECT id FROM nodes WHERE id=$1 FOR UPDATE", [nodeId]);
+    const nodeLock = await client.query("SELECT id,lifecycle_status FROM nodes WHERE id=$1 FOR UPDATE", [nodeId]);
     if (nodeLock.rowCount !== 1) {
       await client.query("ROLLBACK");
+      return;
+    }
+    if (nodeLock.rows[0].lifecycle_status !== "ACTIVE") {
+      await client.query("COMMIT");
       return;
     }
     const result = await client.query(
