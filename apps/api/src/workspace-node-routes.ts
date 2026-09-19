@@ -299,7 +299,11 @@ export function registerWorkspaceNodeRoutes(
           [id, name, hashToken(nodeToken), workspaceId, internalLegacyWorkspaceId],
         );
         if (result.rowCount !== 1) return reply.code(404).send({ error: "workspace is unavailable" });
-        return reply.code(201).send({ ...nodeView(result.rows[0]), token: nodeToken });
+        return reply
+          .header("cache-control", "no-store")
+          .header("pragma", "no-cache")
+          .code(201)
+          .send({ ...nodeView(result.rows[0]), token: nodeToken });
       } catch (error) {
         return reply.code(400).send({ error: error instanceof Error ? error.message : "node could not be created" });
       }
