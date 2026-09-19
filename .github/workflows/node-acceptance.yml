@@ -177,6 +177,12 @@ jobs:
           RUNDEA_MASTER_KEY: MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=
           RUNDEA_GITHUB_WEBHOOK_SECRET: acceptance-github-webhook-secret
         run: node infra/acceptance/control-plane-dr-e2e.mjs
+      - name: Prove one-time credentials and persisted log redaction
+        env:
+          RUNDEA_ACCEPTANCE_API_URL: http://127.0.0.1:4000
+          RUNDEA_CONTROL_TOKEN: acceptance-control-token
+          RUNDEA_ACCEPTANCE_FIXTURE_SHA: 039c34770852fb07cef7f9f0f8534c5de408b207
+        run: node infra/acceptance/security-boundary-e2e.mjs
       - name: Prove product-level Agent update and node cleanup
         env:
           RUNDEA_ACCEPTANCE_API_URL: http://127.0.0.1:4000
