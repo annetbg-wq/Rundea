@@ -7,6 +7,7 @@ import { readFile } from "node:fs/promises";
 import { Pool } from "pg";
 import type { AgentCommand, AgentEvent, AgentHelloEvent, DeploymentStatus } from "@rundea/contracts";
 import { deploymentStatuses } from "@rundea/contracts";
+import { loadDeploymentLogSecrets, redactLogMessage } from "./log-redaction";
 import { createOpaqueToken, equalTokenHash, hashToken, parseMasterKey } from "@rundea/crypto";
 import { assertTransition } from "@rundea/deployer";
 import { validateAgentHello } from "./agent-compatibility";
@@ -395,12 +396,15 @@ async function recordRuntimeRecovery(nodeId: string, event: Extract<AgentEvent, 
 }
 
 async function recordDeploymentLog(nodeId: string, event: Extract<AgentEvent, { type: "log" }>): Promise<void> {
-  const inserted = await pool.query(
+  const ownership = await pool.query("SELECT 1 FROM deployments WHERE id=$1 AND node_id=$2", [event.deploymentId, nodeId]);
+  if (ownership.rowCount !== 1) throw new Error("deployment log rejected for authenticated node");
+  const secrets = await loadDeploymentLogSecrets(pool, masterKey, event.deploymentId);
+  const message = redactLogMessage(event.message, secrets).slice(0, 16000);
+  await pool.query(
     `INSERT INTO deployment_events(deployment_id,kind,stream,message,created_at)
-     SELECT $1,'LOG',$3,$4,$5 FROM deployments WHERE id=$1 AND node_id=$2`,
-    [event.deploymentId, nodeId, event.stream, event.message.slice(0, 16000), new Date(event.at)],
+     VALUES($1,'LOG',$2,$3,$4)`,
+    [event.deploymentId, event.stream, message, new Date(event.at)],
   );
-  if (inserted.rowCount !== 1) throw new Error("deployment log rejected for authenticated node");
 }
 
 async function failActiveDeploymentsForNode(nodeId: string, message: string): Promise<void> {
