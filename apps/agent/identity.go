@@ -28,6 +28,7 @@ var declaredAgentCapabilities = []string{
 	"managedRedis",
 	"nodeCapacity",
 	"nodeDiskMetrics",
+	"nodeMaintenance",
 	"persistentVolumes",
 	"privateNetworking",
 	"resourceGuardrails",
