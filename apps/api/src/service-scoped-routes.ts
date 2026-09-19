@@ -343,4 +343,51 @@ export function registerServiceScopedRoutes(
       }
     },
   );
+
+
+  app.post<{ Params: { serviceId: string; domainId: string } }>(
+    "/v0/services/:serviceId/domains/:domainId/reconcile",
+    { preHandler: requireControl },
+    async (request, reply) => {
+      try {
+        const service = await resolveActiveCanonicalService(pool, request.params.serviceId);
+        const domainId = requireUuid(request.params.domainId, "domainId");
+        const domain = await pool.query(
+          "SELECT id,node_id,status FROM service_domains WHERE id=$1 AND service_id=$2",
+          [domainId, service.id],
+        );
+        if (domain.rowCount !== 1) return reply.code(404).send({ error: "domain not found" });
+        const sent = await reconcileNodeIngress(pool, sockets, String(domain.rows[0].node_id));
+        return reply.code(sent ? 202 : 409).send({
+          status: sent ? (domain.rows[0].status === "DELETING" ? "DELETING" : "CONFIGURING") : domain.rows[0].status,
+          agentConnected: sent,
+        });
+      } catch (error) {
+        return sendServiceError(reply, error);
+      }
+    },
+  );
+
+  app.delete<{ Params: { serviceId: string; domainId: string } }>(
+    "/v0/services/:serviceId/domains/:domainId",
+    { preHandler: requireControl },
+    async (request, reply) => {
+      try {
+        const service = await resolveActiveCanonicalService(pool, request.params.serviceId);
+        const domainId = requireUuid(request.params.domainId, "domainId");
+        const result = await pool.query(
+          `UPDATE service_domains
+              SET status='DELETING',reconciliation_id=NULL,last_error=NULL,verified_at=NULL,updated_at=now()
+            WHERE id=$1 AND service_id=$2
+            RETURNING node_id`,
+          [domainId, service.id],
+        );
+        if (result.rowCount !== 1) return reply.code(404).send({ error: "domain not found" });
+        const sent = await reconcileNodeIngress(pool, sockets, String(result.rows[0].node_id));
+        return reply.code(202).send({ status: "DELETING", agentConnected: sent });
+      } catch (error) {
+        return sendServiceError(reply, error);
+      }
+    },
+  );
 }
