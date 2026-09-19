@@ -122,9 +122,7 @@ try {
     RUNDEA_DR_ROOT: sourceRoot,
   });
 
-  const backupDir = join(backupRoot, readFileSync(join(backupRoot, "latest"), { encoding: "utf8", flag: "r" }).trim());
-  // 'latest' is a symlink in production. readFileSync follows it and would read a
-  // directory, so resolve it with readlink through the host utility instead.
+  // 'latest' is a symlink; resolve its target without reading the directory.
   const actualBackup = join(backupRoot, sh("readlink", [join(backupRoot, "latest")]).trim());
   for (const name of ["database.dump.enc", "environment.env.enc", "host-state.tar.enc", "metadata.env", "SHA256SUMS"]) {
     assert.equal(existsSync(join(actualBackup, name)), true, name + " missing from backup");
