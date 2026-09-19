@@ -11,7 +11,7 @@ if [[ -z "$ENV_FILE" || -z "$BACKUP_ROOT" ]]; then
 fi
 [[ -f "$ENV_FILE" ]] || { echo "environment file not found: $ENV_FILE" >&2; exit 2; }
 
-for command in docker openssl sha256sum tar date mktemp chmod mkdir mv find sort head wc; do
+for command in docker openssl sha256sum tar date mktemp chmod mkdir mv find sort head wc stat tr rm ln; do
   command -v "$command" >/dev/null || { echo "$command is required" >&2; exit 1; }
 done
 
