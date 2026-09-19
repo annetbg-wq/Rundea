@@ -42,7 +42,7 @@ async function control(path: string, init: RequestInit = {}) {
 
 function createHttpsProxy() {
   const target = new URL(api);
-  return https.createServer(
+  const server = https.createServer(
     { key: readFileSync(tlsKey), cert: readFileSync(tlsCert) },
     (request, response) => {
       const upstream = http.request({
@@ -62,6 +62,34 @@ function createHttpsProxy() {
       request.pipe(upstream);
     },
   );
+
+  server.on("upgrade", (request, socket, head) => {
+    const upstream = http.request({
+      hostname: target.hostname,
+      port: Number(target.port || 80),
+      path: request.url,
+      method: request.method,
+      headers: request.headers,
+    });
+    upstream.on("upgrade", (response, upstreamSocket, upstreamHead) => {
+      const headers: string[] = [];
+      for (let i = 0; i < response.rawHeaders.length; i += 2) {
+        headers.push(`${response.rawHeaders[i]}: ${response.rawHeaders[i + 1]}`);
+      }
+      socket.write(`HTTP/1.1 ${response.statusCode ?? 101} ${response.statusMessage ?? "Switching Protocols"}\r\n${headers.join("\r\n")}\r\n\r\n`);
+      if (head.length) upstreamSocket.write(head);
+      if (upstreamHead.length) socket.write(upstreamHead);
+      upstreamSocket.pipe(socket);
+      socket.pipe(upstreamSocket);
+    });
+    upstream.on("response", (response) => {
+      socket.end(`HTTP/1.1 ${response.statusCode ?? 502} ${response.statusMessage ?? "Bad Gateway"}\r\nConnection: close\r\n\r\n`);
+    });
+    upstream.on("error", () => socket.destroy());
+    upstream.end();
+  });
+
+  return server;
 }
 
 async function waitForNode(workspaceId: string, nodeId: string, timeoutMs = 30000) {
