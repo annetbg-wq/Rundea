@@ -111,6 +111,7 @@ export type AgentHelloEvent = {
   agentVersion: string;
   buildSha: string;
   capabilities: string[];
+  publicAddresses?: string[];
 };
 
 export type AgentEvent =
