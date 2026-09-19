@@ -190,7 +190,7 @@ try {
     method: "POST",
     body: JSON.stringify({
       nodeId: logNodeCreate.body.id,
-      sourceRepository: "https://github.com/annetbg-wq/rundea-runtime-fixture.git",
+      sourceRepository: "https://github.com/render-examples/express-hello-world.git",
       sourceRef: fixtureSha,
       sourceDelivery: "DIRECT",
       containerPort: 8080,
