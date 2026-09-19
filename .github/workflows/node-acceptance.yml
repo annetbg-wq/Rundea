@@ -198,3 +198,117 @@ jobs:
           if [[ -f /tmp/rundea-api.pid ]]; then
             kill "$(cat /tmp/rundea-api.pid)" 2>/dev/null || true
           fi
+
+
+  clean-host-onboarding:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: rundea
+          POSTGRES_PASSWORD: rundea
+          POSTGRES_DB: rundea
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U rundea -d rundea"
+          --health-interval 2s
+          --health-timeout 2s
+          --health-retries 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.x'
+          cache-dependency-path: apps/agent/go.sum
+      - run: npm ci --ignore-scripts
+      - name: Assert fresh systemd host
+        run: |
+          set -euo pipefail
+          test -d /run/systemd/system
+          systemctl is-system-running --wait >/dev/null 2>&1 || systemctl is-system-running >/dev/null 2>&1 || true
+          test ! -e /etc/rundea
+          test ! -e /var/lib/rundea
+          test ! -e /etc/systemd/system/rundea-agent.service
+          test ! -e /usr/local/bin/rundea-agent
+          docker info >/dev/null
+      - name: Build pinned Agent bundle
+        working-directory: apps/agent
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/rundea-agent-release
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o /tmp/rundea-agent-release/rundea-agent-linux-amd64 .
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -o /tmp/rundea-agent-release/rundea-agent-linux-arm64 .
+          cp VERSION /tmp/rundea-agent-release/VERSION
+      - name: Create trusted local HTTPS origin
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/rundea-tls
+          openssl genrsa -out /tmp/rundea-tls/ca.key 2048
+          openssl req -x509 -new -nodes -key /tmp/rundea-tls/ca.key -sha256 -days 1 \
+            -subj '/CN=Rundea Acceptance CA' -out /tmp/rundea-tls/ca.crt
+          openssl genrsa -out /tmp/rundea-tls/server.key 2048
+          openssl req -new -key /tmp/rundea-tls/server.key -subj '/CN=rundea.local' -out /tmp/rundea-tls/server.csr
+          cat >/tmp/rundea-tls/server.ext <<'EOF'
+          subjectAltName=DNS:rundea.local
+          extendedKeyUsage=serverAuth
+          keyUsage=digitalSignature,keyEncipherment
+          EOF
+          openssl x509 -req -in /tmp/rundea-tls/server.csr \
+            -CA /tmp/rundea-tls/ca.crt -CAkey /tmp/rundea-tls/ca.key -CAcreateserial \
+            -out /tmp/rundea-tls/server.crt -days 1 -sha256 -extfile /tmp/rundea-tls/server.ext
+          sudo cp /tmp/rundea-tls/ca.crt /usr/local/share/ca-certificates/rundea-acceptance.crt
+          sudo update-ca-certificates
+          echo '127.0.0.1 rundea.local' | sudo tee -a /etc/hosts >/dev/null
+          curl --version
+      - name: Start canonical Control Plane
+        env:
+          DATABASE_URL: postgres://rundea:rundea@127.0.0.1:5432/rundea
+          RUNDEA_CONTROL_TOKEN: acceptance-control-token
+          RUNDEA_MASTER_KEY: MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=
+          RUNDEA_GITHUB_WEBHOOK_SECRET: acceptance-github-webhook-secret
+          RUNDEA_WEB_ORIGIN: https://rundea.local:4443
+          RUNDEA_PUBLIC_CONTROL_PLANE_URL: https://rundea.local:4443
+          RUNDEA_AGENT_BUNDLE_DIR: /tmp/rundea-agent-release
+          PORT: '4000'
+        run: |
+          set -euo pipefail
+          npm run start -w @rundea/api > /tmp/rundea-clean-host-api.log 2>&1 &
+          echo $! > /tmp/rundea-clean-host-api.pid
+          for attempt in $(seq 1 60); do
+            if curl --fail --silent http://127.0.0.1:4000/health >/dev/null; then
+              exit 0
+            fi
+            if ! kill -0 "$(cat /tmp/rundea-clean-host-api.pid)" 2>/dev/null; then
+              cat /tmp/rundea-clean-host-api.log
+              exit 1
+            fi
+            sleep 1
+          done
+          cat /tmp/rundea-clean-host-api.log
+          exit 1
+      - name: Run exact one-command installer on fresh systemd host
+        env:
+          RUNDEA_ACCEPTANCE_API_URL: http://127.0.0.1:4000
+          RUNDEA_ACCEPTANCE_HTTPS_ORIGIN: https://rundea.local:4443
+          RUNDEA_ACCEPTANCE_TLS_KEY: /tmp/rundea-tls/server.key
+          RUNDEA_ACCEPTANCE_TLS_CERT: /tmp/rundea-tls/server.crt
+          RUNDEA_CONTROL_TOKEN: acceptance-control-token
+        run: npx tsx infra/acceptance/clean-host-onboarding-e2e.ts
+      - name: Clean-host Control Plane log
+        if: always()
+        run: cat /tmp/rundea-clean-host-api.log || true
+      - name: Stop clean-host Control Plane
+        if: always()
+        run: |
+          if [[ -f /tmp/rundea-clean-host-api.pid ]]; then
+            kill "$(cat /tmp/rundea-clean-host-api.pid)" 2>/dev/null || true
+          fi
+          sudo rm -f /usr/local/share/ca-certificates/rundea-acceptance.crt
+          sudo update-ca-certificates >/dev/null 2>&1 || true

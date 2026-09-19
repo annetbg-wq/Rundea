@@ -1,4 +1,5 @@
 import React, { FormEvent, useEffect, useMemo, useState } from "react";
+import { createNodeInstallCommand } from "./node-install-command";
 
 const api = "/api";
 
@@ -87,23 +88,6 @@ function bytes(value: number) {
   return `${(value / 1024 ** 3).toFixed(2)} GB`;
 }
 
-function shellQuote(value: string) {
-  return `'${value.replaceAll("'", `'"'"'`)}'`;
-}
-
-function createNodeInstallCommand(bootstrap: Bootstrap): string | null {
-  const origin = window.location.origin.replace(/\/+$/, "");
-  let parsed: URL;
-  try {
-    parsed = new URL(origin);
-  } catch {
-    return null;
-  }
-  if (parsed.protocol !== "https:" || parsed.username || parsed.password || parsed.search || parsed.hash) return null;
-  const installerUrl = `${origin}/v0/install.sh`;
-  return `tmp="$(mktemp)" && { curl --fail --silent --show-error --proto '=https' --tlsv1.2 --max-redirs 0 ${shellQuote(installerUrl)} -o "$tmp" && sudo env RUNDEA_CONTROL_PLANE_URL=${shellQuote(origin)} RUNDEA_NODE_ID=${shellQuote(bootstrap.id)} RUNDEA_NODE_TOKEN=${shellQuote(bootstrap.token)} bash "$tmp"; status=$?; rm -f "$tmp"; exit $status; }`;
-}
-
 async function jsonRequest<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${api}${path}`, init);
   const text = await response.text();
@@ -175,7 +159,7 @@ export default function CanonicalApp() {
   const latestDeployment = deployments[0];
   const readyDeployment = deployments.find((item) => item.status === "READY");
   const secretRuntimeKeys = useMemo(() => new Set(runtimeVariables.filter((item) => item.secret).map((item) => item.key)), [runtimeVariables]);
-  const bootstrapInstallCommand = bootstrap ? createNodeInstallCommand(bootstrap) : null;
+  const bootstrapInstallCommand = bootstrap ? createNodeInstallCommand(window.location.origin, bootstrap) : null;
 
   async function refreshWorkspaces() {
     const body = await jsonRequest<{ workspaces: Workspace[] }>("/v0/workspaces");
