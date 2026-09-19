@@ -95,7 +95,24 @@ export type ReconcileIngressCommand = {
   routes: IngressRoute[];
 };
 
-export type AgentCommand = DeployCommand | RollbackCommand | RestartCommand | QualifyNodeCommand | ReconcileIngressCommand;
+export type UpdateAgentCommand = {
+  type: "updateAgent";
+  actionId: string;
+};
+
+export type CleanupNodeCommand = {
+  type: "cleanupNode";
+  actionId: string;
+};
+
+export type AgentCommand =
+  | DeployCommand
+  | RollbackCommand
+  | RestartCommand
+  | QualifyNodeCommand
+  | ReconcileIngressCommand
+  | UpdateAgentCommand
+  | CleanupNodeCommand;
 
 export type NodeProbeResult = {
   name: string;
@@ -168,5 +185,15 @@ export type AgentEvent =
       projectId: string;
       ok: boolean;
       error?: string;
+      completedAt: string;
+    }
+  | {
+      type: "nodeMaintenance";
+      actionId: string;
+      kind: "UPDATE_AGENT" | "CLEANUP_NODE";
+      ok: boolean;
+      error?: string;
+      agentVersion?: string;
+      buildSha?: string;
       completedAt: string;
     };
