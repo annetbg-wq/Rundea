@@ -1,3 +1,14 @@
+ALTER TABLE nodes DROP CONSTRAINT IF EXISTS nodes_lifecycle_status_check;
+ALTER TABLE nodes ADD CONSTRAINT nodes_lifecycle_status_check
+  CHECK (lifecycle_status IN ('ACTIVE','MAINTENANCE','ARCHIVED'));
+
+ALTER TABLE nodes DROP CONSTRAINT IF EXISTS nodes_archive_state_check;
+ALTER TABLE nodes ADD CONSTRAINT nodes_archive_state_check
+  CHECK (
+    (lifecycle_status IN ('ACTIVE','MAINTENANCE') AND archived_at IS NULL)
+    OR (lifecycle_status='ARCHIVED' AND archived_at IS NOT NULL)
+  );
+
 CREATE TABLE IF NOT EXISTS node_maintenance_actions (
   id uuid PRIMARY KEY,
   node_id uuid NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
