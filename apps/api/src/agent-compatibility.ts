@@ -1,3 +1,4 @@
+import { isIP } from "node:net";
 import type { AgentHelloEvent } from "@rundea/contracts";
 import type { RundeaEnvironment } from "./live-environment";
 
@@ -25,6 +26,7 @@ export type ValidatedAgentIdentity = Readonly<{
   agentVersion: string;
   buildSha: string;
   capabilities: string[];
+  publicAddresses: string[];
 }>;
 
 export function validateAgentHello(event: AgentHelloEvent, environment: RundeaEnvironment): ValidatedAgentIdentity {
@@ -60,9 +62,22 @@ export function validateAgentHello(event: AgentHelloEvent, environment: RundeaEn
     }
   }
 
+  const publicAddresses = event.publicAddresses ?? [];
+  if (!Array.isArray(publicAddresses) || publicAddresses.length > 8) {
+    throw new Error("Agent hello supports at most 8 public addresses");
+  }
+  const normalizedAddresses = publicAddresses.map((value) => value?.trim()).filter((value): value is string => Boolean(value));
+  if (normalizedAddresses.length !== publicAddresses.length || normalizedAddresses.some((value) => isIP(value) === 0)) {
+    throw new Error("Agent hello contains an invalid public address");
+  }
+  if (new Set(normalizedAddresses).size !== normalizedAddresses.length) {
+    throw new Error("Agent hello contains duplicate public addresses");
+  }
+
   return {
     agentVersion,
     buildSha,
     capabilities: [...capabilities].sort(),
+    publicAddresses: [...normalizedAddresses].sort(),
   };
 }

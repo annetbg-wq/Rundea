@@ -21,6 +21,11 @@ func TestCurrentAgentIdentity(t *testing.T) {
 			t.Fatalf("required capability %q is missing", required)
 		}
 	}
+	for i := 1; i < len(identity.PublicAddresses); i++ {
+		if identity.PublicAddresses[i-1] > identity.PublicAddresses[i] {
+			t.Fatalf("public addresses are not sorted: %#v", identity.PublicAddresses)
+		}
+	}
 	for i := 1; i < len(identity.Capabilities); i++ {
 		if identity.Capabilities[i-1] > identity.Capabilities[i] {
 			t.Fatalf("capabilities are not sorted: %#v", identity.Capabilities)

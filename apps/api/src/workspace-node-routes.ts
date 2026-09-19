@@ -31,6 +31,7 @@ function nodeView(row: Record<string, any>) {
     agentVersion: row.agent_version ?? undefined,
     agentBuildSha: row.agent_build_sha ?? undefined,
     agentCapabilities: row.agent_capabilities ?? [],
+    publicAddresses: row.public_addresses ?? [],
     compatibilityError: row.compatibility_error ?? undefined,
     agentConnectedAt: row.agent_connected_at ?? undefined,
     archivedAt: row.archived_at ?? undefined,
@@ -55,7 +56,7 @@ export function registerWorkspaceNodeRoutes(
         if (workspace.rowCount !== 1) return reply.code(404).send({ error: "workspace is unavailable" });
         const result = await pool.query(
           `SELECT id,workspace_id,name,status,lifecycle_status,last_seen_at,agent_version,agent_build_sha,
-                  agent_capabilities,compatibility_error,agent_connected_at,archived_at,created_at
+                  agent_capabilities,public_addresses,compatibility_error,agent_connected_at,archived_at,created_at
              FROM nodes
             WHERE workspace_id=$1 AND ($2::boolean OR lifecycle_status='ACTIVE')
             ORDER BY lifecycle_status ASC,status DESC,last_seen_at DESC NULLS LAST,created_at DESC`,
@@ -84,7 +85,7 @@ export function registerWorkspaceNodeRoutes(
              FROM workspaces w
             WHERE w.id=$4 AND w.id<>$5
            RETURNING id,workspace_id,name,status,lifecycle_status,last_seen_at,agent_version,agent_build_sha,
-                     agent_capabilities,compatibility_error,agent_connected_at,archived_at,created_at`,
+                     agent_capabilities,public_addresses,compatibility_error,agent_connected_at,archived_at,created_at`,
           [id, name, hashToken(nodeToken), workspaceId, internalLegacyWorkspaceId],
         );
         if (result.rowCount !== 1) return reply.code(404).send({ error: "workspace is unavailable" });
@@ -122,7 +123,7 @@ export function registerWorkspaceNodeRoutes(
                  WHERE domain.node_id=n.id AND domain.status<>'DELETING'
               )
           RETURNING n.id,n.workspace_id,n.name,n.status,n.lifecycle_status,n.last_seen_at,n.agent_version,n.agent_build_sha,
-                    n.agent_capabilities,n.compatibility_error,n.agent_connected_at,n.archived_at,n.created_at`,
+                    n.agent_capabilities,n.public_addresses,n.compatibility_error,n.agent_connected_at,n.archived_at,n.created_at`,
           [nodeId, internalLegacyWorkspaceId, revokedTokenHash],
         );
         if (result.rowCount !== 1) {

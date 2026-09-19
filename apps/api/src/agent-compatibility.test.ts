@@ -6,6 +6,7 @@ const compatible = {
   type: "hello" as const,
   agentVersion: "0.1.12",
   buildSha: "a".repeat(40),
+  publicAddresses: ["203.0.113.10", "2001:db8::10"],
   capabilities: [
     "runtimeMetrics",
     "managedIngress",
@@ -27,6 +28,7 @@ test("accepts immutable compatible Agent and sorts capabilities", () => {
   const identity = validateAgentHello(compatible, "staging");
   assert.equal(identity.agentVersion, "0.1.12");
   assert.equal(identity.buildSha, "a".repeat(40));
+  assert.deepEqual(identity.publicAddresses, ["2001:db8::10", "203.0.113.10"]);
   assert.deepEqual(identity.capabilities, [
     "artifactRetention",
     "buildArgs",
@@ -96,5 +98,16 @@ test("rejects malformed or duplicate capabilities", () => {
   assert.throws(
     () => validateAgentHello({ ...compatible, capabilities: [...compatible.capabilities, "runtimeMetrics"] }, "staging"),
     /duplicate capabilities/,
+  );
+});
+
+test("rejects malformed or duplicate public addresses", () => {
+  assert.throws(
+    () => validateAgentHello({ ...compatible, publicAddresses: ["not-an-ip"] }, "staging"),
+    /invalid public address/,
+  );
+  assert.throws(
+    () => validateAgentHello({ ...compatible, publicAddresses: ["203.0.113.10", "203.0.113.10"] }, "staging"),
+    /duplicate public addresses/,
   );
 });

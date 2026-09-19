@@ -445,7 +445,7 @@ app.post<{ Body: { name?: string } }>("/v0/nodes", { preHandler: requireControl 
 
 app.get("/v0/nodes", { preHandler: requireControl }, async () => {
   const result = await pool.query(
-    `SELECT id,name,status,last_seen_at,created_at,agent_version,agent_build_sha,agent_capabilities,compatibility_error,agent_connected_at
+    `SELECT id,name,status,last_seen_at,created_at,agent_version,agent_build_sha,agent_capabilities,public_addresses,compatibility_error,agent_connected_at
        FROM nodes ORDER BY created_at DESC`,
   );
   return result.rows;
@@ -661,9 +661,9 @@ app.get("/v0/agent/ws", { websocket: true }, async (socket, request) => {
   await pool.query(
     `UPDATE nodes
         SET status='ONLINE',last_seen_at=now(),agent_connected_at=now(),agent_version=$2,agent_build_sha=$3,
-            agent_capabilities=$4::jsonb,compatibility_error=NULL
+            agent_capabilities=$4::jsonb,public_addresses=$5::text[],compatibility_error=NULL
       WHERE id=$1`,
-    [nodeId, identity.agentVersion, identity.buildSha, JSON.stringify(identity.capabilities)],
+    [nodeId, identity.agentVersion, identity.buildSha, JSON.stringify(identity.capabilities), identity.publicAddresses],
   );
   if (closed) return;
 

@@ -166,10 +166,11 @@ func connectAndServe(cfg config) error {
 
 	identity := currentAgentIdentity()
 	if err := w.send(map[string]any{
-		"type":         "hello",
-		"agentVersion": identity.AgentVersion,
-		"buildSha":     identity.BuildSHA,
-		"capabilities": identity.Capabilities,
+		"type":            "hello",
+		"agentVersion":    identity.AgentVersion,
+		"buildSha":        identity.BuildSHA,
+		"capabilities":    identity.Capabilities,
+		"publicAddresses": identity.PublicAddresses,
 	}); err != nil {
 		return fmt.Errorf("send Agent hello: %w", err)
 	}
