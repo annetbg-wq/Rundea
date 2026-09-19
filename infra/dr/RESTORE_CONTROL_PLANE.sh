@@ -11,7 +11,7 @@ if [[ -z "$TARGET_ENV_FILE" || -z "$BACKUP_DIR" ]]; then
 fi
 [[ -d "$BACKUP_DIR" ]] || { echo "backup directory not found: $BACKUP_DIR" >&2; exit 2; }
 
-for command in docker openssl sha256sum tar mktemp chmod mkdir mv grep awk; do
+for command in docker openssl sha256sum tar mktemp chmod mkdir mv grep awk stat tr wc install dirname seq sleep; do
   command -v "$command" >/dev/null || { echo "$command is required" >&2; exit 1; }
 done
 
