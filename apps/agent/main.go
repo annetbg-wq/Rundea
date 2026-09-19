@@ -240,6 +240,18 @@ func connectAndServe(cfg config) error {
 				continue
 			}
 			go runIngressReconciliation(cfg, w, cmd)
+		case "updateAgent":
+			var cmd updateAgentCommand
+			if err := json.Unmarshal(payload, &cmd); err != nil || cmd.ActionID == "" {
+				continue
+			}
+			go runAgentUpdate(cfg, w, cmd)
+		case "cleanupNode":
+			var cmd cleanupNodeCommand
+			if err := json.Unmarshal(payload, &cmd); err != nil || cmd.ActionID == "" {
+				continue
+			}
+			go runNodeCleanup(cfg, w, cmd)
 		}
 	}
 }
