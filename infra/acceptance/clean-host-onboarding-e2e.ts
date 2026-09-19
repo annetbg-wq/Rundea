@@ -182,17 +182,30 @@ try {
   const permanentMatch = envText.match(/^RUNDEA_NODE_TOKEN=(.+)$/m);
   if (!permanentMatch || permanentMatch[1] === bootstrapToken) throw new Error("permanent Agent credential was not rotated");
 
-  const replay = await fetch(`${origin}/v0/nodes/${nodeId}/bootstrap/exchange`, {
-    method: "POST",
-    headers: { authorization: `Bearer ${bootstrapToken}`, "content-type": "application/json" },
-    body: JSON.stringify({ agentToken: "a".repeat(64) }),
-  });
-  if (replay.status !== 401) throw new Error(`one-time bootstrap token replay returned ${replay.status}`);
+  let replayStatus = "";
+  try {
+    await run("curl", [
+      "--fail", "--silent", "--show-error", "--output", "/dev/null",
+      "--write-out", "%{http_code}",
+      "--request", "POST",
+      "--header", `Authorization: Bearer ${bootstrapToken}`,
+      "--header", "Content-Type: application/json",
+      "--data", JSON.stringify({ agentToken: "a".repeat(64) }),
+      `${origin}/v0/nodes/${nodeId}/bootstrap/exchange`,
+    ]);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    const match = message.match(/stdout:\n(\d{3})/);
+    replayStatus = match?.[1] ?? "";
+  }
+  if (replayStatus !== "401") throw new Error(`one-time bootstrap token replay returned ${replayStatus || "unexpected status"}`);
 
-  const status = await fetch(`${origin}/v0/nodes/${nodeId}/self/status`, {
-    headers: { authorization: `Bearer ${permanentMatch[1]}` },
-  });
-  if (status.status !== 200 || (await status.text()).trim() !== "ONLINE") {
+  const selfStatus = await run("curl", [
+    "--fail", "--silent", "--show-error",
+    "--header", `Authorization: Bearer ${permanentMatch[1]}`,
+    `${origin}/v0/nodes/${nodeId}/self/status`,
+  ]);
+  if (selfStatus.stdout.trim() !== "ONLINE") {
     throw new Error("permanent credential does not prove ONLINE after canonical install");
   }
 
