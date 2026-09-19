@@ -22,10 +22,12 @@ async function body(response) {
 }
 
 async function request(path, init = {}) {
-  const response = await fetch(api + path, {
-    ...init,
-    headers: { ...controlHeaders, "content-type": "application/json", ...(init.headers ?? {}) },
-  });
+  const headers = {
+    ...controlHeaders,
+    ...(init.body === undefined ? {} : { "content-type": "application/json" }),
+    ...(init.headers ?? {}),
+  };
+  const response = await fetch(api + path, { ...init, headers });
   const parsed = await body(response);
   if (!response.ok) throw new Error(`${init.method ?? "GET"} ${path} -> ${response.status}: ${JSON.stringify(parsed)}`);
   return parsed;
