@@ -75,6 +75,7 @@ async function waitForNode(workspaceId: string, nodeId: string, timeoutMs = 3000
   throw new Error(`installed node did not become ONLINE: ${JSON.stringify(last)}`);
 }
 
+async function main() {
 for (const path of [
   "/etc/rundea",
   "/var/lib/rundea",
@@ -183,3 +184,9 @@ try {
   try { await run("sudo", ["systemctl", "daemon-reload"]); } catch {}
   await new Promise<void>((resolve) => proxy.close(() => resolve()));
 }
+}
+
+main().catch((error) => {
+  console.error(error);
+  process.exitCode = 1;
+});
