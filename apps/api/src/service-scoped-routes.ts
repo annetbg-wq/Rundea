@@ -29,6 +29,12 @@ function optionalNodeId(value: string | undefined): string | null {
   return nodeId;
 }
 
+function requireUuid(value: string, label: string): string {
+  const normalized = value.trim().toLowerCase();
+  if (!uuidPattern.test(normalized)) throw new Error(`${label} must be a UUID`);
+  return normalized;
+}
+
 function encryptedFromRow(row: Record<string, unknown>): EncryptedValue {
   return {
     version: Number(row.encrypted_version) as 1,
