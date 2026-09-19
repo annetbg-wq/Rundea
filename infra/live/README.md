@@ -53,3 +53,10 @@ Once managed mode is active, the compose deployment path never respawns `edge`. 
 12. Re-check `https://rundea.bachopus.com/health` and browser login before attaching workload domains.
 
 The current public hostname does not change the runtime safety boundary: this stack still runs with `RUNDEA_ENVIRONMENT=staging`. Before a final production promotion, production state/secrets and the long-term staging hostname must remain operationally separated.
+
+
+## Backup and disaster recovery
+
+The canonical encrypted backup/restore procedure is in `infra/dr/README.md`.
+
+Before treating this live stack as recoverable, install the daily backup timer, keep the recovery key outside both the VPS and backup volume, replicate backups off-host, and pass the clean-environment DR acceptance. The backup includes PostgreSQL, the protected environment containing the original `RUNDEA_MASTER_KEY`, and managed Caddy/Agent host state required to reconstruct ingress ownership.
