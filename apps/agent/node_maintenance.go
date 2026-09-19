@@ -20,13 +20,13 @@ import (
 const maxAgentUpdateBytes = 64 * 1024 * 1024
 
 type updateAgentCommand struct {
-	Type     string \`json:"type"\`
-	ActionID string \`json:"actionId"\`
+	Type     string `json:"type"`
+	ActionID string `json:"actionId"`
 }
 
 type cleanupNodeCommand struct {
-	Type     string \`json:"type"\`
-	ActionID string \`json:"actionId"\`
+	Type     string `json:"type"`
+	ActionID string `json:"actionId"`
 }
 
 type maintenanceResult struct {
@@ -279,7 +279,7 @@ func managedCleanupContainers() ([]managedContainerIdentity, error) {
 	for _, name := range names {
 		inspect, err := exec.Command(
 			"docker", "inspect", "--format",
-			\`{{ index .Config.Labels "rundea.role" }}|{{ index .Config.Labels "rundea.kind" }}|{{ index .Config.Labels "rundea.backend" }}\`,
+			`{{ index .Config.Labels "rundea.role" }}|{{ index .Config.Labels "rundea.kind" }}|{{ index .Config.Labels "rundea.backend" }}`,
 			name,
 		).CombinedOutput()
 		if err != nil {
@@ -319,7 +319,7 @@ func cleanupManagedNode(cfg config) error {
 	for _, network := range strings.Fields(string(networksOut)) {
 		inspect, err := exec.Command(
 			"docker", "network", "inspect", "--format",
-			\`{{ index .Labels "rundea.kind" }}\`,
+			`{{ index .Labels "rundea.kind" }}`,
 			network,
 		).CombinedOutput()
 		if err != nil {
