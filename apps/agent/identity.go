@@ -3,6 +3,7 @@ package main
 import (
 	_ "embed"
 	"encoding/json"
+	"net"
 	"fmt"
 	"io"
 	"os"
@@ -36,19 +37,62 @@ var declaredAgentCapabilities = []string{
 }
 
 type agentIdentity struct {
-	AgentVersion string   `json:"agentVersion"`
-	BuildSHA     string   `json:"buildSha"`
-	Capabilities []string `json:"capabilities"`
+	AgentVersion    string   `json:"agentVersion"`
+	BuildSHA        string   `json:"buildSha"`
+	Capabilities    []string `json:"capabilities"`
+	PublicAddresses []string `json:"publicAddresses,omitempty"`
 }
 
 func currentAgentIdentity() agentIdentity {
 	capabilities := append([]string(nil), declaredAgentCapabilities...)
 	sort.Strings(capabilities)
 	return agentIdentity{
-		AgentVersion: strings.TrimSpace(embeddedAgentVersion),
-		BuildSHA:     strings.TrimSpace(agentBuildSHA),
-		Capabilities: capabilities,
+		AgentVersion:    strings.TrimSpace(embeddedAgentVersion),
+		BuildSHA:        strings.TrimSpace(agentBuildSHA),
+		Capabilities:    capabilities,
+		PublicAddresses: publicNodeAddresses(),
 	}
+}
+
+func publicNodeAddresses() []string {
+	interfaces, err := net.Interfaces()
+	if err != nil {
+		return nil
+	}
+	seen := map[string]struct{}{}
+	for _, iface := range interfaces {
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, addr := range addrs {
+			var ip net.IP
+			switch value := addr.(type) {
+			case *net.IPNet:
+				ip = value.IP
+			case *net.IPAddr:
+				ip = value.IP
+			}
+			if ip == nil || !ip.IsGlobalUnicast() || ip.IsPrivate() || ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsMulticast() || isCarrierGradeNAT(ip) {
+				continue
+			}
+			seen[ip.String()] = struct{}{}
+		}
+	}
+	result := make([]string, 0, len(seen))
+	for address := range seen {
+		result = append(result, address)
+	}
+	sort.Strings(result)
+	if len(result) > 8 {
+		result = result[:8]
+	}
+	return result
+}
+
+func isCarrierGradeNAT(ip net.IP) bool {
+	v4 := ip.To4()
+	return v4 != nil && v4[0] == 100 && v4[1] >= 64 && v4[1] <= 127
 }
 
 func hasAgentCapability(name string) bool {
