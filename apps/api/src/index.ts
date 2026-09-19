@@ -451,7 +451,11 @@ app.post<{ Body: { name?: string } }>("/v0/nodes", { preHandler: requireControl 
   const id = randomUUID();
   const nodeToken = createOpaqueToken();
   await pool.query("INSERT INTO nodes(id,name,token_hash) VALUES($1,$2,$3)", [id, name, hashToken(nodeToken)]);
-  return reply.code(201).send({ id, name, token: nodeToken });
+  return reply
+    .header("cache-control", "no-store")
+    .header("pragma", "no-cache")
+    .code(201)
+    .send({ id, name, token: nodeToken });
 });
 
 app.get("/v0/nodes", { preHandler: requireControl }, async () => {
