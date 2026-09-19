@@ -33,6 +33,7 @@ import {
   registerRuntimeControlRoutes,
 } from "./runtime-controls";
 import { recordRuntimeMetric, registerRuntimeMetricRoutes } from "./runtime-metrics";
+import { failRunningNodeMaintenanceForNode, recordNodeMaintenance } from "./workspace-node-routes";
 import {
   captureDeploymentEnvironment,
   deleteServiceVariable,
@@ -73,6 +74,8 @@ await pool.query("UPDATE nodes SET status='OFFLINE',agent_connected_at=NULL");
 await pool.query("UPDATE node_qualifications SET status='FAILED', failure_reason='control plane restarted during qualification', completed_at=now() WHERE status='RUNNING'");
 await pool.query("UPDATE node_ingress_reconciliations SET status='FAILED',error='control plane restarted during ingress reconciliation',completed_at=now() WHERE status='RUNNING'");
 await pool.query("UPDATE runtime_actions SET status='FAILED',error='control plane restarted during runtime action',completed_at=now() WHERE status='RUNNING'");
+await pool.query("UPDATE node_maintenance_actions SET status='FAILED',error='control plane restarted during node maintenance',completed_at=now() WHERE status='RUNNING'");
+await pool.query("UPDATE nodes SET lifecycle_status='ACTIVE' WHERE lifecycle_status='MAINTENANCE'");
 await pool.query(
   `UPDATE service_domains
       SET status=CASE WHEN status='DELETING' THEN 'DELETING' ELSE 'PENDING' END,
@@ -142,9 +145,13 @@ async function dispatchQueued(nodeId: string): Promise<void> {
   let row: Record<string, any> | undefined;
   try {
     await client.query("BEGIN");
-    const nodeLock = await client.query("SELECT id FROM nodes WHERE id=$1 FOR UPDATE", [nodeId]);
+    const nodeLock = await client.query("SELECT id,lifecycle_status FROM nodes WHERE id=$1 FOR UPDATE", [nodeId]);
     if (nodeLock.rowCount !== 1) {
       await client.query("ROLLBACK");
+      return;
+    }
+    if (nodeLock.rows[0].lifecycle_status !== "ACTIVE") {
+      await client.query("COMMIT");
       return;
     }
     const result = await client.query(
@@ -724,6 +731,11 @@ app.get("/v0/agent/ws", { websocket: true }, async (socket, request) => {
           await recordIngressResult(pool, nodeId, event);
           return;
         }
+        if (event.type === "nodeMaintenance") {
+          const shouldClose = await recordNodeMaintenance(pool, nodeId, event);
+          if (shouldClose) socket.close(1000, "node cleaned and archived");
+          return;
+        }
         if (event.type === "metric") {
           await recordRuntimeMetric(pool, nodeId, event);
           return;
@@ -752,6 +764,7 @@ app.get("/v0/agent/ws", { websocket: true }, async (socket, request) => {
       await failRunningRuntimeActionsForNode(pool, nodeId).catch((error) => request.log.error(error, "failed to reconcile disconnected runtime action"));
       await failRunningQualificationsForNode(pool, nodeId).catch((error) => request.log.error(error, "failed to reconcile disconnected qualification"));
       await failRunningIngressForNode(pool, nodeId).catch((error) => request.log.error(error, "failed to reconcile disconnected ingress"));
+      await failRunningNodeMaintenanceForNode(pool, nodeId).catch((error) => request.log.error(error, "failed to reconcile disconnected node maintenance"));
     })().catch((error) => request.log.error(error, "failed to reconcile closed Agent connection"));
   });
 

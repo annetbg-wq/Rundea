@@ -69,7 +69,13 @@ jobs:
       - run: npm ci --ignore-scripts
       - name: Build acceptance Agent
         working-directory: apps/agent
-        run: CGO_ENABLED=0 go build -trimpath -o /tmp/rundea-agent .
+        run: |
+          set -euo pipefail
+          CGO_ENABLED=0 go build -trimpath -o /tmp/rundea-agent .
+          mkdir -p /tmp/rundea-agent-release
+          cp /tmp/rundea-agent /tmp/rundea-agent-release/rundea-agent-linux-amd64
+          cp /tmp/rundea-agent /tmp/rundea-agent-release/rundea-agent-linux-arm64
+          cp VERSION /tmp/rundea-agent-release/VERSION
       - name: Start Control Plane
         env:
           DATABASE_URL: postgres://rundea:rundea@127.0.0.1:5432/rundea
@@ -78,6 +84,7 @@ jobs:
           RUNDEA_GITHUB_WEBHOOK_SECRET: acceptance-github-webhook-secret
           RUNDEA_WEB_ORIGIN: http://127.0.0.1:5173
           RUNDEA_TEST_AGENT_AUTH_DELAY_MS: '750'
+          RUNDEA_AGENT_BUNDLE_DIR: /tmp/rundea-agent-release
           PORT: '4000'
         run: |
           set -euo pipefail
@@ -170,6 +177,12 @@ jobs:
           RUNDEA_MASTER_KEY: MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=
           RUNDEA_GITHUB_WEBHOOK_SECRET: acceptance-github-webhook-secret
         run: node infra/acceptance/control-plane-dr-e2e.mjs
+      - name: Prove product-level Agent update and node cleanup
+        env:
+          RUNDEA_ACCEPTANCE_API_URL: http://127.0.0.1:4000
+          RUNDEA_CONTROL_TOKEN: acceptance-control-token
+          RUNDEA_AGENT_BINARY: /tmp/rundea-agent
+        run: node infra/acceptance/node-maintenance-e2e.mjs
       - name: Control Plane log
         if: always()
         run: cat /tmp/rundea-api.log || true

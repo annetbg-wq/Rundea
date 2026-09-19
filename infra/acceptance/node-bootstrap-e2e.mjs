@@ -84,16 +84,16 @@ if (createdResponse.status !== 201 || !created?.id || !created?.token) {
 }
 
 // Bootstrap may fetch the pinned release, but it must not be an Agent
-// credential. The acceptance Control Plane has no release provider configured,
-// so reaching the provider check proves authentication succeeded.
+// credential. The acceptance Control Plane exposes the exact locally-built
+// immutable test bundle so release authorization and checksum delivery are real.
 const bootstrapReleaseResponse = await fetch(`${api}/v0/agent/releases/amd64/sha256`, {
   headers: {
     authorization: `Bearer ${created.token}`,
     "x-rundea-node-id": created.id,
   },
 });
-if (bootstrapReleaseResponse.status !== 503) {
-  throw new Error(`bootstrap credential was not limited to release bootstrap path: ${bootstrapReleaseResponse.status}`);
+if (bootstrapReleaseResponse.status !== 200 || !/^[0-9a-f]{64}\s*$/i.test(await bootstrapReleaseResponse.text())) {
+  throw new Error(`bootstrap credential could not fetch the pinned release checksum: ${bootstrapReleaseResponse.status}`);
 }
 
 const bootstrapSelf = await selfStatus(created.id, created.token);
@@ -155,8 +155,8 @@ const permanentCredentialResponse = await fetch(`${api}/v0/agent/releases/amd64/
     "x-rundea-node-id": created.id,
   },
 });
-if (permanentCredentialResponse.status !== 503) {
-  throw new Error(`permanent node credential was not accepted before release-provider check: ${permanentCredentialResponse.status}`);
+if (permanentCredentialResponse.status !== 200 || !/^[0-9a-f]{64}\s*$/i.test(await permanentCredentialResponse.text())) {
+  throw new Error(`permanent node credential could not fetch the pinned release checksum: ${permanentCredentialResponse.status}`);
 }
 
 const activeWorkDir = await mkdtemp(join(tmpdir(), "rundea-bootstrap-active-"));

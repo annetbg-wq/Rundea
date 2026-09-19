@@ -58,7 +58,7 @@ export function registerServiceScopedRoutes(
   dispatchQueued: DispatchQueued,
 ): void {
   registerProjectServiceAdminRoutes(app, pool, requireControl);
-  registerWorkspaceNodeRoutes(app, pool, requireControl);
+  registerWorkspaceNodeRoutes(app, pool, sockets, requireControl);
   const masterKey = canonicalMasterKey();
 
   app.get<{ Params: { serviceId: string } }>(
