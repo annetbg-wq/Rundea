@@ -175,7 +175,7 @@ try {
     throw new Error(`installed binary identity does not match Control Plane: ${JSON.stringify({ identity, node })}`);
   }
 
-  const envMode = (await run("stat", ["-c", "%a", "/etc/rundea/agent.env"])).stdout.trim();
+  const envMode = (await run("sudo", ["stat", "-c", "%a", "/etc/rundea/agent.env"])).stdout.trim();
   if (envMode !== "600") throw new Error(`agent.env mode is ${envMode}, expected 600`);
   const envText = (await run("sudo", ["cat", "/etc/rundea/agent.env"])).stdout;
   if (envText.includes(bootstrapToken)) throw new Error("one-time bootstrap token persisted on disk");
