@@ -77,10 +77,9 @@ func runningManagedBackendMemoryBytes(ctx context.Context) (uint64, error) {
 		ctx,
 		"docker", "ps", "-q",
 		"--filter", "label=rundea.managed=true",
-		"--filter", "label=rundea.backend=true",
 	).CombinedOutput()
 	if err != nil {
-		return 0, fmt.Errorf("list Rundea runtime backends: %w: %s", err, strings.TrimSpace(string(out)))
+		return 0, fmt.Errorf("list Rundea managed workloads: %w: %s", err, strings.TrimSpace(string(out)))
 	}
 
 	var total uint64
@@ -88,28 +87,33 @@ func runningManagedBackendMemoryBytes(ctx context.Context) (uint64, error) {
 		inspect, inspectErr := exec.CommandContext(
 			ctx,
 			"docker", "inspect", "--format",
-			`{{.HostConfig.Memory}}|{{.State.Running}}|{{ index .Config.Labels "rundea.managed" }}|{{ index .Config.Labels "rundea.backend" }}`,
+			`{{.HostConfig.Memory}}|{{.State.Running}}|{{ index .Config.Labels "rundea.managed" }}|{{ index .Config.Labels "rundea.backend" }}|{{ index .Config.Labels "rundea.kind" }}`,
 			id,
 		).CombinedOutput()
 		if inspectErr != nil {
-			return 0, fmt.Errorf("inspect Rundea runtime backend %s: %w: %s", id, inspectErr, strings.TrimSpace(string(inspect)))
+			return 0, fmt.Errorf("inspect Rundea managed workload %s: %w: %s", id, inspectErr, strings.TrimSpace(string(inspect)))
 		}
 		parts := strings.Split(strings.TrimSpace(string(inspect)), "|")
-		if len(parts) != 4 {
-			return 0, fmt.Errorf("inspect Rundea runtime backend %s returned unexpected capacity fields", id)
+		if len(parts) != 5 {
+			return 0, fmt.Errorf("inspect Rundea managed workload %s returned unexpected capacity fields", id)
 		}
 		if parts[1] != "true" {
 			continue
 		}
-		if parts[2] != "true" || parts[3] != "true" {
-			return 0, fmt.Errorf("container %s matched Rundea backend discovery without Rundea ownership labels", id)
+		if parts[2] != "true" {
+			return 0, fmt.Errorf("container %s matched Rundea discovery without Rundea ownership label", id)
+		}
+		isRuntimeBackend := parts[3] == "true"
+		isManagedRedis := parts[4] == "managed-redis"
+		if !isRuntimeBackend && !isManagedRedis {
+			continue
 		}
 		memory, parseErr := strconv.ParseUint(parts[0], 10, 64)
 		if parseErr != nil || memory == 0 {
-			return 0, fmt.Errorf("Rundea runtime backend %s has no enforceable hard memory limit", id)
+			return 0, fmt.Errorf("Rundea managed workload %s has no enforceable hard memory limit", id)
 		}
 		if total > ^uint64(0)-memory {
-			return 0, errors.New("Rundea runtime backend memory commitments overflow capacity accounting")
+			return 0, errors.New("Rundea managed workload memory commitments overflow capacity accounting")
 		}
 		total += memory
 	}

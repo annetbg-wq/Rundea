@@ -1,7 +1,8 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { Pool } from "pg";
 import type { AgentEvent, RuntimeHealthStatus } from "@rundea/contracts";
-import { equalTokenHash, hashToken } from "@rundea/crypto";
+import { equalTokenHash, hashToken, parseMasterKey } from "@rundea/crypto";
+import { registerManagedRedisRoutes } from "./managed-redis";
 import { executeRuntimeMetricsReadOperation, RuntimeMetricOperationError } from "./runtime-metric-operations";
 
 type RequireControl = (request: FastifyRequest, reply: FastifyReply) => Promise<void>;
@@ -159,6 +160,10 @@ export async function recordRuntimeMetric(pool: Pool, nodeId: string, rawEvent: 
 }
 
 export function registerRuntimeMetricRoutes(app: FastifyInstance, pool: Pool, requireControl: RequireControl): void {
+  const masterKeyEncoded = process.env.RUNDEA_MASTER_KEY;
+  if (!masterKeyEncoded) throw new Error("RUNDEA_MASTER_KEY is required");
+  registerManagedRedisRoutes(app, pool, parseMasterKey(masterKeyEncoded), requireControl);
+
   app.post<{ Body: NodeDiskMetricInput }>("/v0/agent/node-metrics", async (request, reply) => {
     const nodeIdHeader = request.headers["x-rundea-node-id"];
     const nodeId = Array.isArray(nodeIdHeader) ? nodeIdHeader[0] : nodeIdHeader;

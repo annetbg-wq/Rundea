@@ -160,4 +160,12 @@ export type AgentEvent =
       ok: boolean;
       error?: string;
       completedAt: string;
+    }
+  | {
+      type: "managedRedis";
+      addonId: string;
+      projectId: string;
+      ok: boolean;
+      error?: string;
+      completedAt: string;
     };

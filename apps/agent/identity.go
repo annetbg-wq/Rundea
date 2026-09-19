@@ -24,6 +24,7 @@ var declaredAgentCapabilities = []string{
 	"buildGuardrails",
 	"continuousHealth",
 	"managedIngress",
+	"managedRedis",
 	"nodeCapacity",
 	"nodeDiskMetrics",
 	"persistentVolumes",

@@ -25,4 +25,5 @@ export const migrationFiles = [
   "024_runtime_health.sql",
   "025_node_disk_metrics.sql",
   "026_persistent_volumes.sql",
+  "027_managed_redis.sql",
 ] as const;
