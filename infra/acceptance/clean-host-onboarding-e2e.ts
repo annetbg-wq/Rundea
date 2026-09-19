@@ -2,6 +2,7 @@ import https from "node:https";
 import http from "node:http";
 import { readFileSync, existsSync } from "node:fs";
 import { spawn } from "node:child_process";
+import type { Socket } from "node:net";
 import { createNodeInstallCommand } from "../../apps/web/src/node-install-command";
 
 const api = process.env.RUNDEA_ACCEPTANCE_API_URL ?? "http://127.0.0.1:4000";
@@ -40,6 +41,8 @@ async function control(path: string, init: RequestInit = {}) {
   return { response, body };
 }
 
+const upgradedSockets = new Set<Socket>();
+
 function createHttpsProxy() {
   const target = new URL(api);
   const server = https.createServer(
@@ -64,6 +67,8 @@ function createHttpsProxy() {
   );
 
   server.on("upgrade", (request, socket, head) => {
+    upgradedSockets.add(socket);
+    socket.once("close", () => upgradedSockets.delete(socket));
     const upstream = http.request({
       hostname: target.hostname,
       port: Number(target.port || 80),
@@ -72,6 +77,8 @@ function createHttpsProxy() {
       headers: request.headers,
     });
     upstream.on("upgrade", (response, upstreamSocket, upstreamHead) => {
+      upgradedSockets.add(upstreamSocket);
+      upstreamSocket.once("close", () => upgradedSockets.delete(upstreamSocket));
       const headers: string[] = [];
       for (let i = 0; i < response.rawHeaders.length; i += 2) {
         headers.push(`${response.rawHeaders[i]}: ${response.rawHeaders[i + 1]}`);
@@ -210,6 +217,8 @@ try {
   try { await run("sudo", ["systemctl", "disable", "--now", "rundea-agent"]); } catch {}
   try { await run("sudo", ["rm", "-rf", "/etc/rundea", "/var/lib/rundea", "/etc/systemd/system/rundea-agent.service", "/usr/local/bin/rundea-agent"]); } catch {}
   try { await run("sudo", ["systemctl", "daemon-reload"]); } catch {}
+  for (const socket of upgradedSockets) socket.destroy();
+  proxy.closeAllConnections();
   await new Promise<void>((resolve) => proxy.close(() => resolve()));
 }
 }
