@@ -357,6 +357,20 @@ try {
   assert.equal(incompatibleAfter.status, "OFFLINE");
   assert.ok(String(incompatibleAfter.compatibilityError ?? "").includes("managedRedis"));
 
+  // Leave the shared acceptance Control Plane clean for the subsequent node-e2e
+  // signed-push fixture. These configs intentionally use the same public
+  // repository/branch, so keeping them enabled would make that later fixture
+  // correctly trigger more than one deployment.
+  for (const serviceId of [serviceA.id, serviceB.id]) {
+    const removed = await rawRequest(`/v0/services/${serviceId}/push-autodeploy`, {
+      method: "DELETE",
+      headers,
+    });
+    if (![204, 404].includes(removed.response.status)) {
+      throw new Error(`failed to clean Foundation autodeploy for ${serviceId}: ${removed.response.status} ${removed.text}`);
+    }
+  }
+
   console.log(JSON.stringify({
     ok: true,
     workspaceId: workspace.id,
