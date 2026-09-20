@@ -96,10 +96,11 @@ async function connectAgent(nodeId, token, hello) {
 }
 
 async function createWorkspace(name) {
+  const slugBase = name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "workspace";
   return request("/v0/workspaces", {
     method: "POST",
     headers: jsonHeaders,
-    body: JSON.stringify({ slug: `${name}-${suffix}`.slice(0, 63), name }),
+    body: JSON.stringify({ slug: `${slugBase}-${suffix}`.slice(0, 63), name }),
   });
 }
 
