@@ -1,6 +1,6 @@
 import { spawn, spawnSync } from "node:child_process";
 import { createHmac } from "node:crypto";
-import { mkdtemp, rm } from "node:fs/promises";
+import { access, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { activateNodeCredential } from "./node-credential.mjs";
@@ -449,6 +449,40 @@ try {
   assertArtifact(rollbackTwo, "rollback chain to second revision");
   await assertService("rollback chain", rollbackTwo.id);
 
+  // Create a fifth successful promotion so Agent retention must evict the
+  // oldest artifact. Then prove the evicted target is rejected while a retained
+  // rollback remains usable after asynchronous GC has actually run.
+  const rollbackThree = await rollback(firstId, "fifth promotion for retention GC");
+  assertArtifact(rollbackThree, "fifth promotion for retention GC");
+  await assertService("fifth promotion", rollbackThree.id);
+
+  const retentionPath = join(workDir, "artifact-retention.json");
+  const retention = JSON.parse(await readFile(retentionPath, "utf8"));
+  const retainedIds = retention.services?.[serviceName] ?? [];
+  if (retainedIds.length !== 4) throw new Error(`expected exactly 4 retained artifacts, got ${JSON.stringify(retainedIds)}`);
+  if (retainedIds.includes(firstId)) throw new Error(`oldest artifact ${firstId} was not evicted from retention state`);
+  if (!retainedIds.includes(secondId)) throw new Error(`expected rollback target ${secondId} to remain retained`);
+
+  const oldRollback = await rawRequest(`/v0/deployments/${firstId}/rollback`, { method: "POST", headers });
+  if (oldRollback.response.status !== 409) {
+    throw new Error(`evicted rollback target was not rejected with 409: ${oldRollback.response.status} ${oldRollback.text}`);
+  }
+
+  await sleep(70_000);
+  const evictedWorkDir = join(workDir, "deployments", firstId.toLowerCase());
+  try {
+    await access(evictedWorkDir);
+    throw new Error(`evicted deployment workdir still exists after GC: ${evictedWorkDir}`);
+  } catch (error) {
+    if (error?.code !== "ENOENT") throw error;
+  }
+  const evictedImage = spawnSync("docker", ["image", "inspect", `rundea/${firstId.toLowerCase()}:build`], { stdio: "ignore" });
+  if (evictedImage.status === 0) throw new Error(`evicted deployment image still exists after GC: ${firstId}`);
+
+  const rollbackFour = await rollback(secondId, "retained rollback after GC");
+  assertArtifact(rollbackFour, "retained rollback after GC");
+  await assertService("retained rollback after GC", rollbackFour.id);
+
   console.log(JSON.stringify({
     ok: true,
     nodeId,
@@ -488,6 +522,10 @@ try {
       "zero-downtime-rollback-http-traffic",
       "exact-rollback",
       "rollback-chain",
+      "current-plus-three-rollback-retention",
+      "evicted-rollback-rejected",
+      "retired-artifact-gc",
+      "retained-rollback-usable-after-gc",
     ],
   }, null, 2));
 } finally {
