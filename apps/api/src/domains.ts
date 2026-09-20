@@ -81,6 +81,13 @@ export async function reconcileNodeIngress(pool: Pool, sockets: Map<string, Node
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
+    // Serialize ingress reconciliation per node so concurrent domain changes
+    // cannot both create a RUNNING reconciliation.
+    const nodeLock = await client.query(
+      "SELECT id FROM nodes WHERE id=$1 FOR UPDATE",
+      [nodeId],
+    );
+    if (nodeLock.rowCount !== 1) throw new Error("node is unavailable");
     await client.query(
       `UPDATE node_ingress_reconciliations
           SET status='FAILED',error='superseded by newer ingress reconciliation',completed_at=now()
