@@ -115,6 +115,30 @@ jobs:
           RUNDEA_CONTROL_TOKEN: acceptance-control-token
           RUNDEA_ACCEPTANCE_DATABASE_URL: postgres://rundea:rundea@127.0.0.1:5432/rundea
         run: node infra/acceptance/foundation-gate-e2e.mjs
+      - name: Prepare near-full filesystem for disk safety acceptance
+        run: |
+          set -euo pipefail
+          sudo truncate -s 2560M /tmp/rundea-low-disk.img
+          sudo mkfs.ext4 -F /tmp/rundea-low-disk.img >/dev/null
+          sudo mkdir -p /tmp/rundea-low-disk
+          sudo mount -o loop /tmp/rundea-low-disk.img /tmp/rundea-low-disk
+          sudo chmod 0777 /tmp/rundea-low-disk
+          dd if=/dev/zero of=/tmp/rundea-low-disk/filler.bin bs=1M count=700 status=none
+          mkdir -p /tmp/rundea-low-disk/work
+          df -h /tmp/rundea-low-disk
+      - name: Prove memory and disk guardrails preserve Control Plane
+        env:
+          RUNDEA_ACCEPTANCE_API_URL: http://127.0.0.1:4000
+          RUNDEA_CONTROL_TOKEN: acceptance-control-token
+          RUNDEA_AGENT_BINARY: /tmp/rundea-agent
+          RUNDEA_ACCEPTANCE_FIXTURE_SHA: 039c34770852fb07cef7f9f0f8534c5de408b207
+          RUNDEA_LOW_DISK_WORK_DIR: /tmp/rundea-low-disk/work
+        run: node infra/acceptance/runtime-guardrails-e2e.mjs
+      - name: Clean low-disk acceptance filesystem
+        if: always()
+        run: |
+          sudo umount /tmp/rundea-low-disk 2>/dev/null || true
+          sudo rm -f /tmp/rundea-low-disk.img
       - name: Run Control Plane → Agent → Docker acceptance
         env:
           RUNDEA_ACCEPTANCE_API_URL: http://127.0.0.1:4000
