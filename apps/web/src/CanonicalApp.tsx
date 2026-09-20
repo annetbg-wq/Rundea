@@ -52,6 +52,13 @@ type Domain = {
 };
 type DeploymentEvent = { id?: number; kind?: string; status?: string; stream?: string; message?: string; created_at?: string };
 type Metrics = {
+  deploymentId: string;
+  deploymentStatus: string;
+  runtimeHealth: "HEALTHY" | "DEGRADED" | "DOWN" | null;
+  runtimeHealthCheckedAt: string | null;
+  restartCount: number;
+  uptimeSeconds: number;
+  healthError: string | null;
   latest: null | {
     at: string;
     cpuPercent: number;
@@ -231,10 +238,21 @@ export default function CanonicalApp() {
   useEffect(() => {
     const deployment = deployments[0];
     if (!deployment || section !== "observability") { setEvents([]); setMetrics(null); return; }
-    void Promise.all([
-      jsonRequest<DeploymentEvent[]>(`/v0/deployments/${deployment.id}/events`),
-      jsonRequest<Metrics>(`/v0/deployments/${deployment.id}/metrics?minutes=60`),
-    ]).then(([eventRows, metricBody]) => { setEvents(eventRows); setMetrics(metricBody); }).catch((error) => setMessage(error.message));
+    let cancelled = false;
+    const refreshObservability = async () => {
+      try {
+        const [eventRows, metricBody] = await Promise.all([
+          jsonRequest<DeploymentEvent[]>(`/v0/deployments/${deployment.id}/events`),
+          jsonRequest<Metrics>(`/v0/deployments/${deployment.id}/metrics?minutes=60`),
+        ]);
+        if (!cancelled) { setEvents(eventRows); setMetrics(metricBody); }
+      } catch (error) {
+        if (!cancelled) setMessage(error instanceof Error ? error.message : String(error));
+      }
+    };
+    void refreshObservability();
+    const timer = window.setInterval(() => void refreshObservability(), 1500);
+    return () => { cancelled = true; window.clearInterval(timer); };
   }, [section, deployments[0]?.id]);
 
   async function act(label: string, fn: () => Promise<void>) {
@@ -449,7 +467,7 @@ export default function CanonicalApp() {
 
       {workspaceId && section === "nodes" && <section className="cPanel"><div className="cPanelTitle"><div><h2>Workspace nodes</h2><p>Only ACTIVE + ONLINE nodes in this workspace are eligible for automatic deployment. Agent update and safe node cleanup are product operations once the node reports the <code>nodeMaintenance</code> capability.</p></div></div><form className="cInline" onSubmit={createNode}><input value={nodeDraft} onChange={(e) => setNodeDraft(e.target.value)} placeholder="Node name"/><button disabled={busy}>Create node</button></form>{bootstrap && <div className="cBootstrap"><strong>Install {bootstrap.name}</strong><p>Run this command once on the target Linux host with sudo access. It contains only the one-time node bootstrap credential; Rundea rotates it before the node becomes ONLINE.</p>{bootstrapInstallCommand ? <><code>{bootstrapInstallCommand}</code><button type="button" className="ghost" onClick={() => void copyBootstrapCommand()}>Copy install command</button></> : <p>Open Rundea through its canonical HTTPS address to generate the installer command.</p>}</div>}<div className="cTable">{nodes.map((node) => { const maintenanceReady = node.agentCapabilities.includes("nodeMaintenance"); return <div className="cRow cNode" key={node.id}><div><strong>{node.name}</strong><small>Last seen: {formatDate(node.lastSeenAt)} · Agent {node.agentVersion ?? "not connected"} {node.agentBuildSha ? `· ${shortId(node.agentBuildSha)}` : ""}</small>{node.publicAddresses?.length > 0 && <small>Public: {node.publicAddresses.join(", ")}</small>}{node.compatibilityError && <em>{node.compatibilityError}</em>}</div><div className="cCaps">{node.agentCapabilities.slice(0, 5).map((cap) => <span key={cap}>{cap}</span>)}</div><Status value={node.lifecycleStatus === "MAINTENANCE" ? "MAINTENANCE" : node.lifecycleStatus === "ARCHIVED" ? "ARCHIVED" : node.status}/><div className="cNodeActions">{node.status === "ONLINE" && node.lifecycleStatus === "ACTIVE" && maintenanceReady ? <><button type="button" className="ghost" disabled={busy} onClick={() => void updateNodeAgent(node)}>Update Agent</button><button type="button" className="danger ghost" disabled={busy} onClick={() => void cleanupNode(node)}>Clean & archive</button></> : node.status === "OFFLINE" && node.lifecycleStatus === "ACTIVE" ? <button className="danger ghost" onClick={() => void archiveNode(node)}>Archive</button> : <span/>}</div></div>; })}</div>{!nodes.length && <Empty>No nodes in this workspace yet.</Empty>}</section>}
 
-      {serviceId && section === "observability" && <section className="cPanel"><div className="cPanelTitle"><div><h2>Observability</h2><p>Current runtime sample and the exact event/log stream for the latest revision.</p></div></div>{latestDeployment ? <><div className="cMetricGrid"><div><small>CPU</small><strong>{metrics?.latest ? `${metrics.latest.cpuPercent.toFixed(1)}%` : "No sample"}</strong></div><div><small>Memory</small><strong>{metrics?.latest ? bytes(metrics.latest.memoryUsageBytes) : "No sample"}</strong></div><div><small>RX / TX</small><strong>{metrics?.latest ? `${bytes(metrics.latest.networkRxBytes)} / ${bytes(metrics.latest.networkTxBytes)}` : "No sample"}</strong></div><div><small>Latest sample</small><strong>{metrics?.latest ? formatDate(metrics.latest.at) : "—"}</strong></div></div><div className="cLogs">{events.map((event, index) => <div key={event.id ?? index}><time>{formatDate(event.created_at)}</time><b>{event.stream ?? event.status ?? event.kind ?? "event"}</b><pre>{event.message ?? event.status ?? ""}</pre></div>)}</div>{!events.length && <Empty>No events yet for the latest revision.</Empty>}</> : <Empty>Deploy a revision to start runtime observability.</Empty>}</section>}
+      {serviceId && section === "observability" && <section className="cPanel"><div className="cPanelTitle"><div><h2>Observability</h2><p>Live health, restart recovery, runtime telemetry and the exact event/log stream for the latest revision.</p></div></div>{latestDeployment ? <><div className="cMetricGrid"><div data-testid="runtime-health"><small>Runtime health</small><strong><Status value={metrics?.runtimeHealth ?? "UNKNOWN"}/></strong><em>{metrics?.healthError ?? (metrics?.runtimeHealthCheckedAt ? `Checked ${formatDate(metrics.runtimeHealthCheckedAt)}` : "Waiting for health sample")}</em></div><div data-testid="runtime-restarts"><small>Restarts</small><strong>{metrics?.restartCount ?? 0}</strong><em>Automatic recoveries</em></div><div data-testid="runtime-uptime"><small>Uptime</small><strong>{metrics ? `${Math.floor(metrics.uptimeSeconds / 60)}m` : "—"}</strong><em>Current container</em></div><div><small>CPU</small><strong>{metrics?.latest ? `${metrics.latest.cpuPercent.toFixed(1)}%` : "No sample"}</strong></div><div><small>Memory</small><strong>{metrics?.latest ? bytes(metrics.latest.memoryUsageBytes) : "No sample"}</strong></div><div><small>RX / TX</small><strong>{metrics?.latest ? `${bytes(metrics.latest.networkRxBytes)} / ${bytes(metrics.latest.networkTxBytes)}` : "No sample"}</strong></div><div><small>Latest sample</small><strong>{metrics?.latest ? formatDate(metrics.latest.at) : "—"}</strong></div></div><div className="cLogs">{events.map((event, index) => <div key={event.id ?? index}><time>{formatDate(event.created_at)}</time><b>{event.stream ?? event.status ?? event.kind ?? "event"}</b><pre>{event.message ?? event.status ?? ""}</pre></div>)}</div>{!events.length && <Empty>No events yet for the latest revision.</Empty>}</> : <Empty>Deploy a revision to start runtime observability.</Empty>}</section>}
 
       {workspaceId && section === "settings" && <div className="cGrid"><section className="cPanel"><h2>Create project</h2><form className="cInline" onSubmit={createProject}><input value={projectDraft} onChange={(e) => setProjectDraft(e.target.value)} placeholder="Project name"/><button disabled={busy}>Create</button></form></section>{project && <section className="cPanel"><h2>Project settings</h2><form className="cInline" onSubmit={renameProject}><input name="name" defaultValue={project.name}/><button disabled={busy}>Rename</button></form><button className="danger" onClick={() => void archiveProject()}>Archive project</button></section>}{project && <section className="cPanel"><h2>Create service</h2><form className="cInline" onSubmit={createService}><input value={serviceDraft} onChange={(e) => setServiceDraft(e.target.value)} placeholder="Service name"/><button disabled={busy}>Create</button></form></section>}{service && <section className="cPanel"><h2>Service settings</h2><p><code>{service.id}</code></p><button className="danger" onClick={() => void archiveService()}>Archive service</button></section>}<section className="cPanel"><h2>Create workspace</h2><form className="cInline" onSubmit={createWorkspace}><input value={workspaceDraft} onChange={(e) => setWorkspaceDraft(e.target.value)} placeholder="Workspace name"/><button disabled={busy}>Create</button></form></section></div>}
     </main>
