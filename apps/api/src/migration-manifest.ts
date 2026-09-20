@@ -28,4 +28,5 @@ export const migrationFiles = [
   "027_managed_redis.sql",
   "028_node_public_addresses.sql",
   "029_node_maintenance.sql",
+  "030_deadlock_free_port_allocation.sql",
 ] as const;
