@@ -43,7 +43,7 @@ async function selectNode(
               NOT EXISTS(SELECT 1 FROM service_volumes v WHERE v.service_id=$3 AND v.node_id IS NOT NULL)
               OR n.id IN (SELECT v.node_id FROM service_volumes v WHERE v.service_id=$3 AND v.node_id IS NOT NULL)
             )
-          FOR SHARE`,
+          FOR UPDATE`,
         [requestedNodeId, workspaceId, serviceId],
       )
     : await client.query(
@@ -56,7 +56,7 @@ async function selectNode(
             )
           ORDER BY n.last_seen_at DESC NULLS LAST,n.created_at ASC,n.id ASC
           LIMIT 1
-          FOR SHARE`,
+          FOR UPDATE`,
         [workspaceId, serviceId],
       );
   if (result.rowCount !== 1) {
