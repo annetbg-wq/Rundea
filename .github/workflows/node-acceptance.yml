@@ -179,6 +179,43 @@ jobs:
           RUNDEA_ACCEPTANCE_FIXTURE_SHA: 039c34770852fb07cef7f9f0f8534c5de408b207
           RUNDEA_HEALTH_HOST_PORT: '18084'
         run: node infra/acceptance/continuous-health-e2e.mjs
+      - name: Start canonical Web for browser health acceptance
+        env:
+          RUNDEA_API_URL: http://127.0.0.1:4000
+          RUNDEA_CONTROL_TOKEN: acceptance-control-token
+        run: |
+          set -euo pipefail
+          npm run dev -w @rundea/web -- --host 127.0.0.1 --port 5173 > /tmp/rundea-web.log 2>&1 &
+          echo $! > /tmp/rundea-web.pid
+          for attempt in $(seq 1 60); do
+            if curl --fail --silent http://127.0.0.1:5173 >/dev/null; then
+              exit 0
+            fi
+            if ! kill -0 "$(cat /tmp/rundea-web.pid)" 2>/dev/null; then
+              cat /tmp/rundea-web.log
+              exit 1
+            fi
+            sleep 1
+          done
+          cat /tmp/rundea-web.log
+          exit 1
+      - name: Prove browser UI shows READY → DOWN → restart → HEALTHY
+        env:
+          RUNDEA_ACCEPTANCE_API_URL: http://127.0.0.1:4000
+          RUNDEA_ACCEPTANCE_WEB_URL: http://127.0.0.1:5173
+          RUNDEA_CONTROL_TOKEN: acceptance-control-token
+          RUNDEA_AGENT_BINARY: /tmp/rundea-agent
+          RUNDEA_ACCEPTANCE_FIXTURE_SHA: 039c34770852fb07cef7f9f0f8534c5de408b207
+        run: node infra/acceptance/browser-health-e2e.mjs
+      - name: Canonical Web log
+        if: always()
+        run: cat /tmp/rundea-web.log 2>/dev/null || true
+      - name: Stop canonical Web
+        if: always()
+        run: |
+          if [[ -f /tmp/rundea-web.pid ]]; then
+            kill "$(cat /tmp/rundea-web.pid)" 2>/dev/null || true
+          fi
       - name: Prove persistent volume survives redeploy → restart → rollback
         env:
           RUNDEA_ACCEPTANCE_API_URL: http://127.0.0.1:4000
