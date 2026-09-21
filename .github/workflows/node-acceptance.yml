@@ -150,6 +150,15 @@ jobs:
           RUNDEA_ACCEPTANCE_HOST_PORT: '18081'
           RUNDEA_METRICS_INTERVAL: '2s'
         run: node infra/acceptance/node-e2e.mjs
+      - name: Prove immutable prebuilt image deploy avoids production build
+        env:
+          RUNDEA_ACCEPTANCE_API_URL: http://127.0.0.1:4000
+          RUNDEA_CONTROL_TOKEN: acceptance-control-token
+          RUNDEA_AGENT_BINARY: /tmp/rundea-agent
+          RUNDEA_ACCEPTANCE_FIXTURE_SHA: 039c34770852fb07cef7f9f0f8534c5de408b207
+          RUNDEA_PREBUILT_HOST_PORT: '18085'
+          RUNDEA_PREBUILT_REGISTRY_PORT: '15000'
+        run: node infra/acceptance/prebuilt-image-e2e.mjs
       - name: Prove failed backend keeps previous stable route live
         env:
           RUNDEA_ACCEPTANCE_API_URL: http://127.0.0.1:4000
