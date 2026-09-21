@@ -251,7 +251,7 @@ export default function CanonicalApp() {
       }
     };
     void refreshObservability();
-    const timer = window.setInterval(() => void refreshObservability(), 1500);
+    const timer = window.setInterval(() => void refreshObservability(), 500);
     return () => { cancelled = true; window.clearInterval(timer); };
   }, [section, deployments[0]?.id]);
 
