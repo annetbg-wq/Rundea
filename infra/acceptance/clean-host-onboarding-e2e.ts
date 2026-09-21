@@ -157,7 +157,7 @@ try {
   }
 
   const node = await waitForNode(workspace.id, nodeId);
-  const expectedAgentVersion = (await readFile(new URL("../../apps/agent/VERSION", import.meta.url), "utf8")).trim();
+  const expectedAgentVersion = readFileSync(new URL("../../apps/agent/VERSION", import.meta.url), "utf8").trim();
   if (node.agentVersion !== expectedAgentVersion) throw new Error(`unexpected installed Agent version ${node.agentVersion}; expected ${expectedAgentVersion}`);
   for (const capability of [
     "artifactRetention","buildArgs","buildGuardrails","continuousHealth","managedIngress","managedRedis",
