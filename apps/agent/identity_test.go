@@ -16,7 +16,7 @@ func TestCurrentAgentIdentity(t *testing.T) {
 	if strings.TrimSpace(identity.BuildSHA) == "" {
 		t.Fatal("build SHA must never be empty")
 	}
-	for _, required := range []string{"artifactRetention", "buildArgs", "buildGuardrails", "continuousHealth", "managedIngress", "managedRedis", "nodeCapacity", "nodeDiskMetrics", "nodeMaintenance", "persistentVolumes", "privateNetworking", "resourceGuardrails", "runtimeMetrics"} {
+	for _, required := range []string{"artifactRetention", "buildArgs", "buildGuardrails", "continuousHealth", "managedIngress", "managedRedis", "nodeCapacity", "nodeDiskMetrics", "nodeMaintenance", "persistentVolumes", "prebuiltImages", "privateNetworking", "resourceGuardrails", "runtimeMetrics"} {
 		if !hasAgentCapability(required) {
 			t.Fatalf("required capability %q is missing", required)
 		}
@@ -49,7 +49,7 @@ func TestIdentityCLI(t *testing.T) {
 }
 
 func TestRequireCapabilityCLI(t *testing.T) {
-	for _, capability := range []string{"managedIngress", "managedRedis", "privateNetworking", "resourceGuardrails", "buildGuardrails", "nodeCapacity", "nodeDiskMetrics", "nodeMaintenance", "persistentVolumes", "continuousHealth", "artifactRetention"} {
+	for _, capability := range []string{"managedIngress", "managedRedis", "privateNetworking", "resourceGuardrails", "buildGuardrails", "nodeCapacity", "nodeDiskMetrics", "nodeMaintenance", "persistentVolumes", "prebuiltImages", "continuousHealth", "artifactRetention"} {
 		if handled, code := handleIdentityCLI([]string{"--require-capability=" + capability}, &bytes.Buffer{}); !handled || code != 0 {
 			t.Fatalf("capability %s handled=%v code=%d", capability, handled, code)
 		}
