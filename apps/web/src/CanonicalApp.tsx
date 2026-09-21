@@ -240,15 +240,15 @@ export default function CanonicalApp() {
     if (!deployment || section !== "observability") { setEvents([]); setMetrics(null); return; }
     let cancelled = false;
     const refreshObservability = async () => {
-      try {
-        const [eventRows, metricBody] = await Promise.all([
-          jsonRequest<DeploymentEvent[]>(`/v0/deployments/${deployment.id}/events`),
-          jsonRequest<Metrics>(`/v0/deployments/${deployment.id}/metrics?minutes=60`),
-        ]);
-        if (!cancelled) { setEvents(eventRows); setMetrics(metricBody); }
-      } catch (error) {
-        if (!cancelled) setMessage(error instanceof Error ? error.message : String(error));
-      }
+      const [eventsResult, metricsResult] = await Promise.allSettled([
+        jsonRequest<DeploymentEvent[]>(`/v0/deployments/${deployment.id}/events`),
+        jsonRequest<Metrics>(`/v0/deployments/${deployment.id}/metrics?minutes=60`),
+      ]);
+      if (cancelled) return;
+      if (eventsResult.status === "fulfilled") setEvents(eventsResult.value);
+      else setMessage(eventsResult.reason instanceof Error ? eventsResult.reason.message : String(eventsResult.reason));
+      if (metricsResult.status === "fulfilled") setMetrics(metricsResult.value);
+      else setMessage(metricsResult.reason instanceof Error ? metricsResult.reason.message : String(metricsResult.reason));
     };
     void refreshObservability();
     const timer = window.setInterval(() => void refreshObservability(), 500);
