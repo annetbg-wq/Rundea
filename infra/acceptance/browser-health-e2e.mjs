@@ -152,7 +152,21 @@ async function startBrowser(workspaceId, projectId, serviceId) {
       ? { done: true, value: scope }
       : { last: scope };
   }, 30000, 250);
-  await cdp.evaluate(`[...document.querySelectorAll("button")].find((button) => button.textContent?.trim() === "Observability")?.click(); true`);
+  await poll("Observability navigation available", async () => {
+    const available = await cdp.evaluate(`[...document.querySelectorAll("button")].some((button) => button.textContent?.trim() === "Observability")`);
+    return available ? { done: true, value: true } : { last: false };
+  }, 30000, 250);
+  const clicked = await cdp.evaluate(`(() => {
+    const button = [...document.querySelectorAll("button")].find((candidate) => candidate.textContent?.trim() === "Observability");
+    if (!button) return false;
+    button.click();
+    return true;
+  })()`);
+  if (!clicked) throw new Error("Observability navigation disappeared before click");
+  await poll("Observability panel mounted", async () => {
+    const mounted = await cdp.evaluate(`Boolean(document.querySelector('[data-testid="observability-panel"]'))`);
+    return mounted ? { done: true, value: true } : { last: false };
+  }, 30000, 250);
 }
 
 async function browserHealth() {
