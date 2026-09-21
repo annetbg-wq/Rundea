@@ -134,14 +134,26 @@ async function startBrowser(workspaceId, projectId, serviceId) {
     return ready ? { done: true, value: true } : { last: ready };
   }, 30000, 250);
   await poll("Rundea scope restored", async () => {
-    const scope = await cdp.evaluate(`({
-      workspace: localStorage.getItem("rundea:workspace") ?? "",
-      project: localStorage.getItem("rundea:project") ?? "",
-      service: localStorage.getItem("rundea:service") ?? ""
-    })`);
-    return scope.workspace === workspaceId && scope.project === projectId && scope.service === serviceId
-      ? { done: true, value: scope }
-      : { last: scope };
+    const scope = await cdp.evaluate(`(() => {
+      const selects = [...document.querySelectorAll("select")].slice(0, 3).map((select) => select.value);
+      const persisted = {
+        workspace: localStorage.getItem("rundea:workspace") ?? "",
+        project: localStorage.getItem("rundea:project") ?? "",
+        service: localStorage.getItem("rundea:service") ?? ""
+      };
+      return {
+        persisted,
+        selects,
+        ok:
+          persisted.workspace === ${JSON.stringify(workspaceId)} &&
+          persisted.project === ${JSON.stringify(projectId)} &&
+          persisted.service === ${JSON.stringify(serviceId)} &&
+          selects[0] === ${JSON.stringify(workspaceId)} &&
+          selects[1] === ${JSON.stringify(projectId)} &&
+          selects[2] === ${JSON.stringify(serviceId)}
+      };
+    })()`);
+    return scope.ok ? { done: true, value: scope } : { last: scope };
   }, 30000, 250);
   await cdp.evaluate(`[...document.querySelectorAll("button")].find((button) => button.textContent?.trim() === "Observability")?.click(); true`);
 }
