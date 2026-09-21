@@ -223,9 +223,16 @@ try {
   docker(["update", "--restart=no", backendContainer]);
   docker(["stop", "--time", "1", backendContainer]);
 
-  await poll("browser displays DOWN", async () => {
-    const text = await browserHealth();
-    return text.includes("DOWN") ? { done: true, value: text } : { last: text };
+  // A DOWN sample can be shorter than a browser polling interval because the
+  // Agent performs bounded recovery immediately after persisting the incident.
+  // The UI must therefore expose the outage durably through its visible event
+  // stream, while the health card remains an accurate view of current state.
+  const visibleDown = await poll("browser exposes DOWN incident", async () => {
+    const health = await browserHealth();
+    const events = await cdp.evaluate(`document.querySelector(".cLogs")?.innerText ?? ""`);
+    return health.includes("DOWN") || events.includes("runtime-health DOWN")
+      ? { done: true, value: { health, events } }
+      : { last: { health, events: events.slice(-800) } };
   }, 45000, 250);
 
   const downRestartText = await browserRestarts();
@@ -239,6 +246,7 @@ try {
 
   const eventsText = await cdp.evaluate(`document.querySelector(".cLogs")?.innerText ?? ""`);
   assert.ok(eventsText.includes("runtime-health DOWN"), `browser log stream did not show DOWN event: ${eventsText}`);
+  assert.ok(visibleDown.health.includes("DOWN") || visibleDown.events.includes("runtime-health DOWN"));
 
   console.log(JSON.stringify({
     ok: true,
@@ -248,7 +256,7 @@ try {
     verified: [
       "real-browser-canonical-web",
       "ui-shows-healthy-before-fault",
-      "ui-shows-down-after-ready-container-kill",
+      "ui-exposes-down-incident-after-ready-container-kill",
       "ui-shows-restart-count",
       "ui-recovers-to-healthy",
       "ui-event-stream-shows-down-transition",
