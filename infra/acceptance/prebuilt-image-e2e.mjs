@@ -157,7 +157,7 @@ try {
 set -euo pipefail
 printf '%q ' "$@" >> "$RUNDEA_ACCEPTANCE_DOCKER_LOG"
 printf '\\n' >> "$RUNDEA_ACCEPTANCE_DOCKER_LOG"
-if [[ "${1:-}" == "build" ]]; then
+if [[ "\${1:-}" == "build" ]]; then
   echo "docker build is forbidden in prebuilt-image acceptance" >&2
   exit 97
 fi
