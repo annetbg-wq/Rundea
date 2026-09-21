@@ -133,6 +133,16 @@ async function startBrowser(workspaceId, projectId, serviceId) {
     const ready = await cdp.evaluate(`document.readyState === "complete" && document.body.innerText.includes("Observability")`);
     return ready ? { done: true, value: true } : { last: ready };
   }, 30000, 250);
+  await poll("Rundea scope restored", async () => {
+    const scope = await cdp.evaluate(`({
+      workspace: localStorage.getItem("rundea:workspace") ?? "",
+      project: localStorage.getItem("rundea:project") ?? "",
+      service: localStorage.getItem("rundea:service") ?? ""
+    })`);
+    return scope.workspace === workspaceId && scope.project === projectId && scope.service === serviceId
+      ? { done: true, value: scope }
+      : { last: scope };
+  }, 30000, 250);
   await cdp.evaluate(`[...document.querySelectorAll("button")].find((button) => button.textContent?.trim() === "Observability")?.click(); true`);
 }
 
@@ -213,8 +223,11 @@ try {
     return text.includes("HEALTHY") ? { done: true, value: text } : { last: text };
   }, 30000, 500);
 
-  const observedDeploymentId = await cdp.evaluate(`document.querySelector('[data-testid="observability-panel"]')?.getAttribute('data-deployment-id') ?? ""`);
-  assert.equal(observedDeploymentId, deploymentId, `browser observed ${observedDeploymentId || "no deployment"} instead of current READY deployment ${deploymentId}`);
+  const observedDeploymentId = await poll("browser observes current READY deployment", async () => {
+    const value = await cdp.evaluate(`document.querySelector('[data-testid="observability-panel"]')?.getAttribute('data-deployment-id') ?? ""`);
+    return value === deploymentId ? { done: true, value } : { last: value };
+  }, 30000, 250);
+  assert.equal(observedDeploymentId, deploymentId);
 
   backendContainer = docker([
     "ps", "-a",
