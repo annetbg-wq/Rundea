@@ -157,10 +157,11 @@ try {
   }
 
   const node = await waitForNode(workspace.id, nodeId);
-  if (node.agentVersion !== "0.1.14") throw new Error(`unexpected installed Agent version ${node.agentVersion}`);
+  const expectedAgentVersion = (await readFile(new URL("../../apps/agent/VERSION", import.meta.url), "utf8")).trim();
+  if (node.agentVersion !== expectedAgentVersion) throw new Error(`unexpected installed Agent version ${node.agentVersion}; expected ${expectedAgentVersion}`);
   for (const capability of [
     "artifactRetention","buildArgs","buildGuardrails","continuousHealth","managedIngress","managedRedis",
-    "nodeCapacity","nodeDiskMetrics","nodeMaintenance","persistentVolumes","privateNetworking","resourceGuardrails","runtimeMetrics",
+    "nodeCapacity","nodeDiskMetrics","nodeMaintenance","persistentVolumes","prebuiltImages","privateNetworking","resourceGuardrails","runtimeMetrics",
   ]) {
     if (!node.agentCapabilities.includes(capability)) throw new Error(`installed Agent missing capability ${capability}`);
   }
