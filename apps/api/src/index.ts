@@ -322,7 +322,6 @@ async function recordStatus(nodeId: string, event: Extract<AgentEvent, { type: "
     const current = currentResult.rows[0].status as DeploymentStatus;
     const serviceId = currentResult.rows[0].service_id ? String(currentResult.rows[0].service_id) : null;
     const serviceName = currentResult.rows[0].service_name as string;
-    const operation = currentResult.rows[0].operation as string;
     if (current !== event.status) assertTransition(current, event.status);
     const updated = await client.query(
       `UPDATE deployments SET status=$3,runtime_container_id=COALESCE($4,runtime_container_id),dispatch_lease_until=NULL,updated_at=now()
@@ -368,6 +367,8 @@ async function recordRuntimeRecovery(nodeId: string, event: Extract<AgentEvent, 
         "UPDATE deployments SET runtime_container_id=$3,dispatch_lease_until=NULL,updated_at=now() WHERE id=$1 AND node_id=$2",
         [event.deploymentId, nodeId, event.containerId],
       );
+      const serviceId = currentResult.rows[0].service_id ? String(currentResult.rows[0].service_id) : null;
+      await markPreviousReadyAsSuperseded(client, serviceId, serviceName, event.deploymentId);
       await client.query("COMMIT");
       return serviceName;
     }
@@ -401,10 +402,8 @@ async function recordRuntimeRecovery(nodeId: string, event: Extract<AgentEvent, 
        VALUES($1,'STATUS','READY','live runtime route recovered after agent reconnect')`,
       [event.deploymentId],
     );
-    if (operation === "ROLLBACK") {
-      const serviceId = currentResult.rows[0].service_id ? String(currentResult.rows[0].service_id) : null;
-      await markPreviousReadyAsSuperseded(client, serviceId, serviceName, event.deploymentId);
-    }
+    const serviceId = currentResult.rows[0].service_id ? String(currentResult.rows[0].service_id) : null;
+    await markPreviousReadyAsSuperseded(client, serviceId, serviceName, event.deploymentId);
     await client.query("COMMIT");
     return serviceName;
   } catch (error) {
