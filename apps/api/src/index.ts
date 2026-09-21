@@ -281,19 +281,30 @@ async function recordArtifact(nodeId: string, event: Extract<AgentEvent, { type:
   if (updated.rowCount !== 1) throw new Error("artifact identity rejected for authenticated node or deployment state");
 }
 
-async function markPreviousReadyAsRolledBack(client: import("pg").PoolClient, serviceName: string, nodeId: string, deploymentId: string): Promise<void> {
+async function markPreviousReadyAsSuperseded(
+  client: import("pg").PoolClient,
+  serviceId: string | null,
+  serviceName: string,
+  deploymentId: string,
+): Promise<void> {
   const previous = await client.query(
     `SELECT id FROM deployments
-      WHERE service_name=$1 AND node_id=$2 AND id<>$3 AND status='READY'
-      ORDER BY created_at DESC,id DESC LIMIT 1 FOR UPDATE`,
-    [serviceName, nodeId, deploymentId],
+      WHERE id<>$3
+        AND status='READY'
+        AND (
+          ($1::uuid IS NOT NULL AND service_id=$1::uuid)
+          OR ($1::uuid IS NULL AND service_id IS NULL AND service_name=$2)
+        )
+      ORDER BY created_at DESC,id DESC
+      FOR UPDATE`,
+    [serviceId, serviceName, deploymentId],
   );
-  if (previous.rowCount === 1) {
-    await client.query("UPDATE deployments SET status='ROLLED_BACK',updated_at=now() WHERE id=$1", [previous.rows[0].id]);
+  for (const row of previous.rows) {
+    await client.query("UPDATE deployments SET status='ROLLED_BACK',updated_at=now() WHERE id=$1", [row.id]);
     await client.query(
       `INSERT INTO deployment_events(deployment_id,kind,status,message)
        VALUES($1,'STATUS','ROLLED_BACK',$2)`,
-      [previous.rows[0].id, `replaced by rollback deployment ${deploymentId}`],
+      [row.id, `superseded by READY deployment ${deploymentId}`],
     );
   }
 }
@@ -304,11 +315,12 @@ async function recordStatus(nodeId: string, event: Extract<AgentEvent, { type: "
   try {
     await client.query("BEGIN");
     const currentResult = await client.query(
-      "SELECT status,service_name,operation FROM deployments WHERE id=$1 AND node_id=$2 FOR UPDATE",
+      "SELECT status,service_id,service_name,operation FROM deployments WHERE id=$1 AND node_id=$2 FOR UPDATE",
       [event.deploymentId, nodeId],
     );
     if (currentResult.rowCount !== 1) throw new Error("deployment not found for authenticated node");
     const current = currentResult.rows[0].status as DeploymentStatus;
+    const serviceId = currentResult.rows[0].service_id ? String(currentResult.rows[0].service_id) : null;
     const serviceName = currentResult.rows[0].service_name as string;
     const operation = currentResult.rows[0].operation as string;
     if (current !== event.status) assertTransition(current, event.status);
@@ -323,8 +335,8 @@ async function recordStatus(nodeId: string, event: Extract<AgentEvent, { type: "
       [event.deploymentId, event.status, event.message ?? null],
     );
 
-    if (operation === "ROLLBACK" && event.status === "READY") {
-      await markPreviousReadyAsRolledBack(client, serviceName, nodeId, event.deploymentId);
+    if (event.status === "READY") {
+      await markPreviousReadyAsSuperseded(client, serviceId, serviceName, event.deploymentId);
     }
 
     await client.query("COMMIT");
@@ -343,7 +355,7 @@ async function recordRuntimeRecovery(nodeId: string, event: Extract<AgentEvent, 
   try {
     await client.query("BEGIN");
     const currentResult = await client.query(
-      "SELECT status,service_name,operation FROM deployments WHERE id=$1 AND node_id=$2 FOR UPDATE",
+      "SELECT status,service_id,service_name,operation FROM deployments WHERE id=$1 AND node_id=$2 FOR UPDATE",
       [event.deploymentId, nodeId],
     );
     if (currentResult.rowCount !== 1) throw new Error("recovered deployment not found for authenticated node");
@@ -390,7 +402,8 @@ async function recordRuntimeRecovery(nodeId: string, event: Extract<AgentEvent, 
       [event.deploymentId],
     );
     if (operation === "ROLLBACK") {
-      await markPreviousReadyAsRolledBack(client, serviceName, nodeId, event.deploymentId);
+      const serviceId = currentResult.rows[0].service_id ? String(currentResult.rows[0].service_id) : null;
+      await markPreviousReadyAsSuperseded(client, serviceId, serviceName, event.deploymentId);
     }
     await client.query("COMMIT");
     return serviceName;
