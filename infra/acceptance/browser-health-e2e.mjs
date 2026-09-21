@@ -128,7 +128,16 @@ async function startBrowser(workspaceId, projectId, serviceId) {
     const ready = await cdp.evaluate(`location.origin === ${JSON.stringify(web)} && document.readyState === "complete"`);
     return ready ? { done: true, value: true } : { last: ready };
   }, 30000, 250);
-  await cdp.evaluate(`localStorage.setItem("rundea:workspace", ${JSON.stringify(workspaceId)}); localStorage.setItem("rundea:project", ${JSON.stringify(projectId)}); localStorage.setItem("rundea:service", ${JSON.stringify(serviceId)}); location.reload(); true`);
+  await cdp.send("Page.addScriptToEvaluateOnNewDocument", {
+    source: `
+      try {
+        localStorage.setItem("rundea:workspace", ${JSON.stringify(workspaceId)});
+        localStorage.setItem("rundea:project", ${JSON.stringify(projectId)});
+        localStorage.setItem("rundea:service", ${JSON.stringify(serviceId)});
+      } catch {}
+    `,
+  });
+  await cdp.send("Page.reload", { ignoreCache: true });
   await poll("Rundea Web loaded", async () => {
     const ready = await cdp.evaluate(`document.readyState === "complete" && document.body.innerText.includes("Observability")`);
     return ready ? { done: true, value: true } : { last: ready };
