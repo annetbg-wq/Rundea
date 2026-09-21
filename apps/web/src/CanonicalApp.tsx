@@ -211,12 +211,12 @@ export default function CanonicalApp() {
   useEffect(() => { void refreshWorkspaces().catch((error) => setMessage(error.message)); }, []);
   useEffect(() => {
     localStorage.setItem("rundea:workspace", workspaceId);
-    setProjectId(""); setServiceId(""); setDeployments([]); setRuntimeVariables([]); setDomains([]);
+    setDeployments([]); setRuntimeVariables([]); setDomains([]);
     void refreshWorkspaceScope(workspaceId).catch((error) => setMessage(error.message));
   }, [workspaceId]);
   useEffect(() => {
     localStorage.setItem("rundea:project", projectId);
-    setServiceId(""); setDeployments([]); setRuntimeVariables([]); setDomains([]);
+    setDeployments([]); setRuntimeVariables([]); setDomains([]);
     void refreshProjectScope(projectId).catch((error) => setMessage(error.message));
   }, [projectId]);
   useEffect(() => {
@@ -425,8 +425,8 @@ export default function CanonicalApp() {
     <aside className="cSidebar">
       <div className="cBrand"><span>R</span><div><strong>Rundea</strong><small>Dogfood Gate</small></div></div>
       <div className="cScope">
-        <label>Workspace<select value={workspaceId} onChange={(event) => setWorkspaceId(event.target.value)}><option value="">Select workspace</option>{workspaces.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
-        <label>Project<select value={projectId} disabled={!workspaceId} onChange={(event) => setProjectId(event.target.value)}><option value="">Select project</option>{projects.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
+        <label>Workspace<select value={workspaceId} onChange={(event) => { setWorkspaceId(event.target.value); setProjectId(""); setServiceId(""); }}><option value="">Select workspace</option>{workspaces.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
+        <label>Project<select value={projectId} disabled={!workspaceId} onChange={(event) => { setProjectId(event.target.value); setServiceId(""); }}><option value="">Select project</option>{projects.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
         <label>Service<select value={serviceId} disabled={!projectId} onChange={(event) => setServiceId(event.target.value)}><option value="">Select service</option>{services.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
       </div>
       <nav>{nav.map(([id, label]) => <button key={id} className={section === id ? "active" : ""} disabled={!serviceId && !["nodes", "settings"].includes(id)} onClick={() => setSection(id)}>{label}</button>)}</nav>
