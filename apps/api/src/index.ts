@@ -13,6 +13,11 @@ import { assertTransition } from "@rundea/deployer";
 import { validateAgentHello } from "./agent-compatibility";
 import { normalizeBuildArgs } from "./build-args";
 import { resolveLiveEnvironment } from "./live-environment";
+import {
+  normalizeArtifactSourceCommit,
+  normalizePrebuiltImageRef,
+  supportsPrebuiltImages,
+} from "./prebuilt-image";
 import { migrationFiles } from "./migration-manifest";
 import { registerReadonlyMcpHttp, resolveReadonlyMcpHttpConfig } from "./mcp-http";
 import {
@@ -143,9 +148,10 @@ async function dispatchQueued(nodeId: string): Promise<void> {
   if (!socket) return;
   const client = await pool.connect();
   let row: Record<string, any> | undefined;
+  let nodeCapabilities: unknown = [];
   try {
     await client.query("BEGIN");
-    const nodeLock = await client.query("SELECT id,lifecycle_status FROM nodes WHERE id=$1 FOR UPDATE", [nodeId]);
+    const nodeLock = await client.query("SELECT id,lifecycle_status,agent_capabilities FROM nodes WHERE id=$1 FOR UPDATE", [nodeId]);
     if (nodeLock.rowCount !== 1) {
       await client.query("ROLLBACK");
       return;
@@ -154,9 +160,10 @@ async function dispatchQueued(nodeId: string): Promise<void> {
       await client.query("COMMIT");
       return;
     }
+    nodeCapabilities = nodeLock.rows[0].agent_capabilities;
     const result = await client.query(
       `SELECT id,service_name,source_repository,source_ref,source_delivery,dockerfile,build_args,container_port,host_port,healthcheck_path,
-              operation,rollback_target_id,image_id
+              operation,rollback_target_id,image_id,artifact_image_ref,artifact_source_commit_sha
          FROM deployments
         WHERE node_id=$1 AND status='QUEUED' AND (dispatch_lease_until IS NULL OR dispatch_lease_until < now())
           AND NOT EXISTS (
@@ -209,6 +216,10 @@ async function dispatchQueued(nodeId: string): Promise<void> {
   };
 
   let command: AgentCommand;
+  if (row.operation !== "ROLLBACK" && row.artifact_image_ref && !supportsPrebuiltImages(nodeCapabilities)) {
+    await failQueuedBeforeDispatch(row.id, "selected Agent does not support immutable prebuilt image deployments");
+    return;
+  }
   if (row.operation === "ROLLBACK") {
     if (!row.rollback_target_id || !row.image_id) {
       await failQueuedBeforeDispatch(row.id, "rollback deployment is missing retained artifact identity");
@@ -220,6 +231,21 @@ async function dispatchQueued(nodeId: string): Promise<void> {
       targetDeploymentId: row.rollback_target_id,
       expectedImageId: row.image_id,
       serviceName: row.service_name,
+      runtime,
+    };
+  } else if (row.artifact_image_ref) {
+    if (!row.artifact_source_commit_sha) {
+      await failQueuedBeforeDispatch(row.id, "prebuilt deployment is missing immutable source provenance");
+      return;
+    }
+    command = {
+      type: "deploy",
+      deploymentId: row.id,
+      serviceName: row.service_name,
+      artifact: {
+        imageRef: row.artifact_image_ref,
+        sourceCommitSha: row.artifact_source_commit_sha,
+      },
       runtime,
     };
   } else if (row.source_delivery === "BROKER") {
@@ -532,7 +558,7 @@ app.get("/v0/deployments", { preHandler: requireControl }, async () => {
   const result = await pool.query(
     `SELECT id,service_name,node_id,source_repository,source_ref,source_delivery,dockerfile,build_args,container_port,host_port,healthcheck_path,
             status,runtime_container_id,operation,rollback_target_id,environment_snapshot_at,source_commit_sha,image_id,
-            created_at,updated_at
+            artifact_image_ref,artifact_source_commit_sha,created_at,updated_at
        FROM deployments ORDER BY created_at DESC LIMIT 100`,
   );
   return result.rows;
@@ -546,7 +572,7 @@ app.get<{ Params: { id: string } }>("/v0/deployments/:id/events", { preHandler: 
   return result.rows;
 });
 
-app.post<{ Body: { serviceName?: string; nodeId?: string; sourceRepository?: string; sourceRef?: string; sourceDelivery?: string; dockerfile?: string; buildArgs?: unknown; containerPort?: number; hostPort?: number; healthcheckPath?: string } }>(
+app.post<{ Body: { serviceName?: string; nodeId?: string; sourceRepository?: string; sourceRef?: string; sourceDelivery?: string; dockerfile?: string; buildArgs?: unknown; artifactImageRef?: string; artifactSourceCommitSha?: string; containerPort?: number; hostPort?: number; healthcheckPath?: string } }>(
   "/v0/deployments",
   { preHandler: requireControl },
   async (request, reply) => {
@@ -578,14 +604,35 @@ app.post<{ Body: { serviceName?: string; nodeId?: string; sourceRepository?: str
       return reply.code(400).send({ error: error instanceof Error ? error.message : "invalid build args" });
     }
 
+    let artifactImageRef: string | null = null;
+    let artifactSourceCommitSha: string | null = null;
+    const hasArtifactInput = body.artifactImageRef !== undefined || body.artifactSourceCommitSha !== undefined;
+    if (hasArtifactInput) {
+      try {
+        artifactImageRef = normalizePrebuiltImageRef(body.artifactImageRef);
+        artifactSourceCommitSha = normalizeArtifactSourceCommit(body.artifactSourceCommitSha);
+      } catch (error) {
+        return reply.code(400).send({ error: error instanceof Error ? error.message : "invalid prebuilt artifact" });
+      }
+      if (String(body.sourceRef).trim().toLowerCase() !== artifactSourceCommitSha) {
+        return reply.code(400).send({ error: "sourceRef must exactly match artifactSourceCommitSha for prebuilt deployments" });
+      }
+      if (Object.keys(buildArgs).length > 0) {
+        return reply.code(400).send({ error: "prebuilt deployments must not contain local build arguments" });
+      }
+      if (sourceDelivery !== "DIRECT") {
+        return reply.code(400).send({ error: "prebuilt deployments use artifact delivery and sourceDelivery must be DIRECT" });
+      }
+    }
+
     const id = randomUUID();
     const client = await pool.connect();
     try {
       await client.query("BEGIN");
       await client.query(
-        `INSERT INTO deployments(id,service_name,node_id,source_repository,source_ref,source_delivery,dockerfile,build_args,container_port,host_port,healthcheck_path,status,operation)
-         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'QUEUED','DEPLOY')`,
-        [id, body.serviceName, body.nodeId, body.sourceRepository, body.sourceRef, sourceDelivery, body.dockerfile?.trim() || null, buildArgs, body.containerPort, body.hostPort, body.healthcheckPath?.trim() ?? ""],
+        `INSERT INTO deployments(id,service_name,node_id,source_repository,source_ref,source_delivery,dockerfile,build_args,artifact_image_ref,artifact_source_commit_sha,container_port,host_port,healthcheck_path,status,operation)
+         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,'QUEUED','DEPLOY')`,
+        [id, body.serviceName, body.nodeId, body.sourceRepository, body.sourceRef, sourceDelivery, body.dockerfile?.trim() || null, buildArgs, artifactImageRef, artifactSourceCommitSha, body.containerPort, body.hostPort, body.healthcheckPath?.trim() ?? ""],
       );
       await captureDeploymentEnvironment(client, id, body.serviceName);
       await client.query("COMMIT");
@@ -597,7 +644,7 @@ app.post<{ Body: { serviceName?: string; nodeId?: string; sourceRepository?: str
       client.release();
     }
     await dispatchQueued(body.nodeId);
-    return reply.code(201).send({ id, status: "QUEUED", operation: "DEPLOY", sourceDelivery, agentConnected: sockets.has(body.nodeId) });
+    return reply.code(201).send({ id, status: "QUEUED", operation: "DEPLOY", sourceDelivery, artifactDelivery: Boolean(artifactImageRef), agentConnected: sockets.has(body.nodeId) });
   },
 );
 
