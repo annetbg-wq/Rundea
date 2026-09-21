@@ -38,6 +38,10 @@ type deployCommand struct {
 		Ticket     string `json:"ticket"`
 		Dockerfile string `json:"dockerfile"`
 	} `json:"source"`
+	Artifact *struct {
+		ImageRef        string `json:"imageRef"`
+		SourceCommitSHA string `json:"sourceCommitSha"`
+	} `json:"artifact,omitempty"`
 	Build struct {
 		Args map[string]string `json:"args"`
 	} `json:"build"`
@@ -278,53 +282,77 @@ func runDeployment(cfg config, w *writer, cmd deployCommand) {
 		return
 	}
 
-	if err := w.status(cmd.DeploymentID, "BUILDING", "checking out source", ""); err != nil {
-		return
-	}
+	imageTag := "rundea/" + strings.ToLower(cmd.DeploymentID) + ":build"
 	var sourceSHA string
-	if cmd.Source.Mode == "bundle" {
-		if err := fetchBrokeredSource(ctx, cfg, cmd.DeploymentID, cmd.Source.Ticket, cmd.Source.Ref, sourceDir); err != nil {
-			fail(fmt.Errorf("brokered source checkout: %w", err))
+	var healthcheckPath string
+	var imageID string
+
+	if cmd.Artifact != nil {
+		if err := w.status(cmd.DeploymentID, "BUILDING", "pulling immutable prebuilt image", ""); err != nil {
 			return
 		}
-		sourceSHA = strings.ToLower(cmd.Source.Ref)
-		w.log(cmd.DeploymentID, "system", "source delivered through Rundea broker")
-	} else {
-		if err := cloneSource(ctx, w, cmd.DeploymentID, cmd.Source.Repository, cmd.Source.Ref, sourceDir); err != nil {
-			fail(fmt.Errorf("source checkout: %w", err))
-			return
+		sourceSHA = strings.ToLower(cmd.Artifact.SourceCommitSHA)
+		healthcheckPath = strings.TrimSpace(cmd.Runtime.Healthcheck.Path)
+		if healthcheckPath == "" {
+			healthcheckPath = "/"
+		} else if !strings.HasPrefix(healthcheckPath, "/") {
+			healthcheckPath = "/" + healthcheckPath
 		}
-		resolvedSHA, err := sourceCommitSHA(ctx, sourceDir)
+		w.log(cmd.DeploymentID, "system", "using immutable prebuilt artifact "+cmd.Artifact.ImageRef)
+		var err error
+		imageID, err = pullAndRetainPrebuiltImage(ctx, w, cmd.DeploymentID, cmd.Artifact.ImageRef, imageTag)
 		if err != nil {
 			fail(err)
 			return
 		}
-		sourceSHA = resolvedSHA
+	} else {
+		if err := w.status(cmd.DeploymentID, "BUILDING", "checking out source", ""); err != nil {
+			return
+		}
+		if cmd.Source.Mode == "bundle" {
+			if err := fetchBrokeredSource(ctx, cfg, cmd.DeploymentID, cmd.Source.Ticket, cmd.Source.Ref, sourceDir); err != nil {
+				fail(fmt.Errorf("brokered source checkout: %w", err))
+				return
+			}
+			sourceSHA = strings.ToLower(cmd.Source.Ref)
+			w.log(cmd.DeploymentID, "system", "source delivered through Rundea broker")
+		} else {
+			if err := cloneSource(ctx, w, cmd.DeploymentID, cmd.Source.Repository, cmd.Source.Ref, sourceDir); err != nil {
+				fail(fmt.Errorf("source checkout: %w", err))
+				return
+			}
+			resolvedSHA, err := sourceCommitSHA(ctx, sourceDir)
+			if err != nil {
+				fail(err)
+				return
+			}
+			sourceSHA = resolvedSHA
+		}
+
+		dockerfile, plan, err := prepareDockerfile(sourceDir, cmd.Source.Dockerfile)
+		if err != nil {
+			fail(err)
+			return
+		}
+		healthcheckPath = resolveHealthcheckPath(sourceDir, cmd.Runtime.Healthcheck.Path)
+		w.log(cmd.DeploymentID, "system", "selected build plan: "+plan)
+		w.log(cmd.DeploymentID, "system", "healthcheck path: "+healthcheckPath)
+		buildArgs, err := dockerBuildCommandArgs(dockerfile, imageTag, cmd.Build.Args)
+		if err != nil {
+			fail(fmt.Errorf("docker build arguments: %w", err))
+			return
+		}
+		if err := runGuardedDockerBuild(ctx, sourceDir, w, cmd.DeploymentID, buildArgs); err != nil {
+			fail(fmt.Errorf("docker build: %w", err))
+			return
+		}
+		imageID, err = inspectImageID(ctx, imageTag)
+		if err != nil {
+			fail(err)
+			return
+		}
 	}
 
-	dockerfile, plan, err := prepareDockerfile(sourceDir, cmd.Source.Dockerfile)
-	if err != nil {
-		fail(err)
-		return
-	}
-	healthcheckPath := resolveHealthcheckPath(sourceDir, cmd.Runtime.Healthcheck.Path)
-	w.log(cmd.DeploymentID, "system", "selected build plan: "+plan)
-	w.log(cmd.DeploymentID, "system", "healthcheck path: "+healthcheckPath)
-	imageTag := "rundea/" + strings.ToLower(cmd.DeploymentID) + ":build"
-	buildArgs, err := dockerBuildCommandArgs(dockerfile, imageTag, cmd.Build.Args)
-	if err != nil {
-		fail(fmt.Errorf("docker build arguments: %w", err))
-		return
-	}
-	if err := runGuardedDockerBuild(ctx, sourceDir, w, cmd.DeploymentID, buildArgs); err != nil {
-		fail(fmt.Errorf("docker build: %w", err))
-		return
-	}
-	imageID, err := inspectImageID(ctx, imageTag)
-	if err != nil {
-		fail(err)
-		return
-	}
 	if err := w.send(map[string]any{
 		"type": "artifact",
 		"deploymentId": cmd.DeploymentID,
@@ -381,42 +409,63 @@ func cleanupContainer(ctx context.Context, w *writer, deploymentID, containerNam
 }
 
 func validateCommand(cmd deployCommand) error {
-	if cmd.DeploymentID == "" || cmd.Source.Ref == "" {
-		return errors.New("deployment command is missing source fields")
+	if cmd.DeploymentID == "" {
+		return errors.New("deployment command is missing deployment identity")
 	}
-	if cmd.Source.Mode == "bundle" {
-		if cmd.Source.Ticket == "" || !isFullGitCommit(cmd.Source.Ref) {
-			return errors.New("brokered source requires a ticket and exact commit SHA")
+
+	hasSource := cmd.Source.Ref != "" || cmd.Source.Repository != "" || cmd.Source.Ticket != "" || cmd.Source.Dockerfile != "" || cmd.Source.Mode != ""
+	if cmd.Artifact != nil {
+		if hasSource {
+			return errors.New("prebuilt deployment must not also contain source checkout fields")
 		}
-		if cmd.Source.Repository != "" {
-			return errors.New("brokered source must not expose repository credentials or clone URLs to the Agent")
+		if err := validateImmutableImageRef(cmd.Artifact.ImageRef); err != nil {
+			return err
+		}
+		if !isFullGitCommit(strings.ToLower(strings.TrimSpace(cmd.Artifact.SourceCommitSHA))) {
+			return errors.New("prebuilt deployment requires an exact source commit SHA")
+		}
+		if len(cmd.Build.Args) != 0 {
+			return errors.New("prebuilt deployment must not contain local build arguments")
 		}
 	} else {
-		if cmd.Source.Mode != "" && cmd.Source.Mode != "git" {
-			return errors.New("deployment command contains an unknown source mode")
+		if cmd.Source.Ref == "" {
+			return errors.New("deployment command is missing source fields")
 		}
-		if cmd.Source.Repository == "" {
-			return errors.New("direct git source is missing repository")
-		}
-		repoURL, err := url.Parse(cmd.Source.Repository)
-		if err != nil || repoURL.Scheme != "https" || !strings.EqualFold(repoURL.Hostname(), "github.com") || repoURL.User != nil {
-			return errors.New("source repository must be an HTTPS github.com URL without embedded credentials")
-		}
-		if !isFullGitCommit(cmd.Source.Ref) {
-			if err := validateNamedGitRef(cmd.Source.Ref); err != nil {
-				return err
+		if cmd.Source.Mode == "bundle" {
+			if cmd.Source.Ticket == "" || !isFullGitCommit(cmd.Source.Ref) {
+				return errors.New("brokered source requires a ticket and exact commit SHA")
+			}
+			if cmd.Source.Repository != "" {
+				return errors.New("brokered source must not expose repository credentials or clone URLs to the Agent")
+			}
+		} else {
+			if cmd.Source.Mode != "" && cmd.Source.Mode != "git" {
+				return errors.New("deployment command contains an unknown source mode")
+			}
+			if cmd.Source.Repository == "" {
+				return errors.New("direct git source is missing repository")
+			}
+			repoURL, err := url.Parse(cmd.Source.Repository)
+			if err != nil || repoURL.Scheme != "https" || !strings.EqualFold(repoURL.Hostname(), "github.com") || repoURL.User != nil {
+				return errors.New("source repository must be an HTTPS github.com URL without embedded credentials")
+			}
+			if !isFullGitCommit(cmd.Source.Ref) {
+				if err := validateNamedGitRef(cmd.Source.Ref); err != nil {
+					return err
+				}
 			}
 		}
-	}
-	if cmd.Source.Dockerfile != "" {
-		cleanDockerfile := filepath.Clean(cmd.Source.Dockerfile)
-		if filepath.IsAbs(cleanDockerfile) || cleanDockerfile == ".." || strings.HasPrefix(cleanDockerfile, ".."+string(filepath.Separator)) {
-			return errors.New("dockerfile path must stay inside the source repository")
+		if cmd.Source.Dockerfile != "" {
+			cleanDockerfile := filepath.Clean(cmd.Source.Dockerfile)
+			if filepath.IsAbs(cleanDockerfile) || cleanDockerfile == ".." || strings.HasPrefix(cleanDockerfile, ".."+string(filepath.Separator)) {
+				return errors.New("dockerfile path must stay inside the source repository")
+			}
+		}
+		if err := validateBuildArgs(cmd.Build.Args); err != nil {
+			return err
 		}
 	}
-	if err := validateBuildArgs(cmd.Build.Args); err != nil {
-		return err
-	}
+
 	if cmd.Runtime.ContainerName == "" || cmd.Runtime.ContainerPort < 1 || cmd.Runtime.ContainerPort > 65535 || cmd.Runtime.HostPort < 1 || cmd.Runtime.HostPort > 65535 {
 		return errors.New("deployment command contains invalid runtime fields")
 	}
