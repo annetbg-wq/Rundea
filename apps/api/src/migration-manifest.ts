@@ -29,4 +29,5 @@ export const migrationFiles = [
   "028_node_public_addresses.sql",
   "029_node_maintenance.sql",
   "030_deadlock_free_port_allocation.sql",
+  "031_prebuilt_image_deploy.sql",
 ] as const;
