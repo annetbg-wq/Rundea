@@ -213,6 +213,9 @@ try {
     return text.includes("HEALTHY") ? { done: true, value: text } : { last: text };
   }, 30000, 500);
 
+  const observedDeploymentId = await cdp.evaluate(`document.querySelector('[data-testid="observability-panel"]')?.getAttribute('data-deployment-id') ?? ""`);
+  assert.equal(observedDeploymentId, deploymentId, `browser observed ${observedDeploymentId || "no deployment"} instead of current READY deployment ${deploymentId}`);
+
   backendContainer = docker([
     "ps", "-a",
     "--filter", "label=rundea.managed=true",
@@ -227,6 +230,12 @@ try {
   // Agent performs bounded recovery immediately after persisting the incident.
   // The UI must therefore expose the outage durably through its visible event
   // stream, while the health card remains an accurate view of current state.
+  await poll("Control Plane persists DOWN incident for observed deployment", async () => {
+    const rows = await request(`/v0/deployments/${deploymentId}/events`, { headers });
+    const text = Array.isArray(rows) ? rows.map((row) => row?.message ?? "").join("\n") : "";
+    return text.includes("runtime-health DOWN") ? { done: true, value: text } : { last: text.slice(-800) };
+  }, 45000, 250);
+
   const visibleDown = await poll("browser exposes DOWN incident", async () => {
     const health = await browserHealth();
     const events = await cdp.evaluate(`document.querySelector(".cLogs")?.innerText ?? ""`);
