@@ -45,11 +45,17 @@ export type BrokeredSourceSpec = {
   dockerfile?: string;
 };
 
+export type PrebuiltArtifactSpec = {
+  imageRef: string;
+  sourceCommitSha: string;
+};
+
 export type DeployCommand = {
   type: "deploy";
   deploymentId: string;
   serviceName: string;
-  source: DirectGitSourceSpec | BrokeredSourceSpec;
+  source?: DirectGitSourceSpec | BrokeredSourceSpec;
+  artifact?: PrebuiltArtifactSpec;
   build?: BuildSpec;
   runtime: RuntimeSpec;
 };
