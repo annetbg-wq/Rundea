@@ -308,8 +308,15 @@ export function registerBuildEngineRoutes(
         const workerId = requireWorkerId(request.headers["x-rundea-builder-id"]);
         const artifactImageRef = request.body?.artifactImageRef?.trim() ?? "";
         const imageId = request.body?.imageId?.trim() ?? "";
-        if (!artifactImageRef.endsWith(imageId) || !digestPattern.test(imageId) || !/@sha256:[0-9a-f]{64}$/.test(artifactImageRef)) {
+        if (!digestPattern.test(imageId) || !/@sha256:[0-9a-f]{64}$/.test(artifactImageRef)) {
           throw new Error("immutable build artifact identity is invalid");
+        }
+        const owned = await workerJob(pool, buildId, workerId);
+        if (!owned || owned.status !== "BUILDING" || !owned.lease_until || new Date(owned.lease_until).getTime() <= Date.now()) {
+          return reply.code(409).send({ error: "build lease is unavailable" });
+        }
+        if (artifactImageRef !== `${owned.registry_repository}@${imageId}`) {
+          throw new Error("build artifact repository does not match the claimed job");
         }
         const result = await pool.query(
           `UPDATE build_jobs SET status='PUSHED',artifact_image_ref=$3,image_id=$4,
