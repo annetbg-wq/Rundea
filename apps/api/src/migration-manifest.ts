@@ -31,4 +31,5 @@ export const migrationFiles = [
   "030_deadlock_free_port_allocation.sql",
   "031_prebuilt_image_deploy.sql",
   "032_build_engine.sql",
+  "033_build_deploy_handoff.sql",
 ] as const;
