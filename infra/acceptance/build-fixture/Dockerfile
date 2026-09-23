@@ -1,3 +1,3 @@
-FROM scratch
+FROM nginx:alpine
 LABEL org.rundea.acceptance="build-engine"
-COPY marker.txt /marker.txt
+COPY index.html /usr/share/nginx/html/index.html
