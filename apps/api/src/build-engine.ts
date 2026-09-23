@@ -4,9 +4,11 @@ import type { Pool } from "pg";
 import { equalTokenHash, hashToken } from "@rundea/crypto";
 import { normalizeBuildArgs } from "./build-args";
 import { createGitHubArchiveProviderFromEnv, type GitHubArchiveProvider } from "./github-app-source";
+import { captureDeploymentEnvironment } from "./service-variables";
 
 type ControlPreHandler = (request: FastifyRequest, reply: FastifyReply) => Promise<void>;
 type ArchiveProvider = Pick<GitHubArchiveProvider, "fetchArchive">;
+type DispatchQueued = (nodeId: string) => Promise<void>;
 
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const fullCommitPattern = /^[0-9a-f]{40}$/;
@@ -87,6 +89,7 @@ async function workerJob(pool: Pool, buildId: string, workerId: string) {
   const result = await pool.query(
     `SELECT id,service_id,project_id,source_repository,source_commit_sha,source_path,dockerfile,build_args,
             registry_repository,status,worker_id,lease_until,artifact_image_ref,image_id,error,
+            deploy_after_push,target_service_name,target_node_id,target_container_port,target_host_port,target_healthcheck_path,deployment_id,
             started_at,completed_at,created_at,updated_at
        FROM build_jobs
       WHERE id=$1 AND worker_id=$2`,
@@ -99,10 +102,11 @@ export function registerBuildEngineRoutes(
   app: FastifyInstance,
   pool: Pool,
   requireControl: ControlPreHandler,
+  dispatchQueued: DispatchQueued,
   config: BuildEngineConfig = resolveBuildEngineConfig(),
   archiveProvider: ArchiveProvider = createGitHubArchiveProviderFromEnv(),
 ): void {
-  app.post<{ Params: { serviceId: string }; Body: { revisionSha?: string; dockerfile?: string; buildArgs?: unknown } }>(
+  app.post<{ Params: { serviceId: string }; Body: { revisionSha?: string; dockerfile?: string; buildArgs?: unknown; deployAfterPush?: boolean } }>(
     "/v0/services/:serviceId/builds",
     { preHandler: requireControl },
     async (request, reply) => {
@@ -125,16 +129,41 @@ export function registerBuildEngineRoutes(
         const id = randomUUID();
         const registryRepository = buildRepository(config.registryPrefix, serviceId);
         const sourceRepository = `https://github.com/${row.repository_full_name}.git`;
+        let target: Record<string, any> | null = null;
+        if (request.body?.deployAfterPush === true) {
+          const targetResult = await pool.query(
+            `SELECT a.service_name,a.node_id,a.container_port,a.host_port,a.healthcheck_path,
+                    n.status AS node_status,n.lifecycle_status,n.agent_capabilities
+               FROM service_autodeploys a
+               JOIN nodes n ON n.id=a.node_id
+              WHERE a.service_id=$1 AND a.enabled=true`,
+            [serviceId],
+          );
+          if (targetResult.rowCount !== 1) {
+            return reply.code(409).send({ error: "automatic deploy requires enabled canonical push-autodeploy configuration" });
+          }
+          target = targetResult.rows[0];
+          const capabilities = Array.isArray(target.agent_capabilities) ? target.agent_capabilities : [];
+          if (target.node_status !== "ONLINE" || target.lifecycle_status !== "ACTIVE" || !capabilities.includes("prebuiltImages")) {
+            return reply.code(409).send({ error: "automatic deploy target must be an ONLINE active node with prebuiltImages capability" });
+          }
+        }
+
         const inserted = await pool.query(
           `INSERT INTO build_jobs(
-             id,service_id,project_id,source_repository,source_commit_sha,source_path,dockerfile,build_args,registry_repository,status
-           ) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,'QUEUED')
+             id,service_id,project_id,source_repository,source_commit_sha,source_path,dockerfile,build_args,registry_repository,status,
+             deploy_after_push,target_service_name,target_node_id,target_container_port,target_host_port,target_healthcheck_path
+           ) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,'QUEUED',$10,$11,$12,$13,$14,$15)
            RETURNING *`,
-          [id, serviceId, row.project_id, sourceRepository, revision, row.source_path, dockerfile, buildArgs, registryRepository],
+          [
+            id, serviceId, row.project_id, sourceRepository, revision, row.source_path, dockerfile, buildArgs, registryRepository,
+            Boolean(target), target?.service_name ?? null, target?.node_id ?? null, target?.container_port ?? null,
+            target?.host_port ?? null, target?.healthcheck_path ?? null,
+          ],
         );
         await pool.query(
-          "INSERT INTO build_events(build_id,kind,status,message) VALUES($1,'STATUS','QUEUED','build queued')",
-          [id],
+          "INSERT INTO build_events(build_id,kind,status,message) VALUES($1,'STATUS','QUEUED',$2)",
+          [id, target ? "build queued with automatic deploy handoff" : "build queued"],
         );
         return reply.code(201).send({ build: inserted.rows[0] });
       } catch (error) {
@@ -152,6 +181,7 @@ export function registerBuildEngineRoutes(
         const result = await pool.query(
           `SELECT id,service_id,project_id,source_repository,source_commit_sha,source_path,dockerfile,build_args,
                   registry_repository,status,worker_id,lease_until,artifact_image_ref,image_id,error,
+                  deploy_after_push,target_node_id,target_container_port,target_host_port,target_healthcheck_path,deployment_id,
                   started_at,completed_at,created_at,updated_at
              FROM build_jobs WHERE service_id=$1 ORDER BY created_at DESC LIMIT 100`,
           [serviceId],
@@ -303,6 +333,9 @@ export function registerBuildEngineRoutes(
     "/v0/build-worker/jobs/:buildId/complete",
     async (request, reply) => {
       if (!workerAuthorized(config, request)) return reply.code(401).send({ error: "builder authorization failed" });
+      let targetNodeId: string | null = null;
+      let createdDeploymentId: string | null = null;
+      const client = await pool.connect();
       try {
         const buildId = requireBuildId(request.params.buildId);
         const workerId = requireWorkerId(request.headers["x-rundea-builder-id"]);
@@ -311,29 +344,80 @@ export function registerBuildEngineRoutes(
         if (!digestPattern.test(imageId) || !/@sha256:[0-9a-f]{64}$/.test(artifactImageRef)) {
           throw new Error("immutable build artifact identity is invalid");
         }
-        const owned = await workerJob(pool, buildId, workerId);
+
+        await client.query("BEGIN");
+        const locked = await client.query(
+          `SELECT id,service_id,source_repository,source_commit_sha,registry_repository,status,worker_id,lease_until,
+                  deploy_after_push,target_service_name,target_node_id,target_container_port,target_host_port,target_healthcheck_path
+             FROM build_jobs
+            WHERE id=$1 AND worker_id=$2
+            FOR UPDATE`,
+          [buildId, workerId],
+        );
+        const owned = locked.rows[0];
         if (!owned || owned.status !== "BUILDING" || !owned.lease_until || new Date(owned.lease_until).getTime() <= Date.now()) {
+          await client.query("ROLLBACK");
           return reply.code(409).send({ error: "build lease is unavailable" });
         }
         if (artifactImageRef !== `${owned.registry_repository}@${imageId}`) {
           throw new Error("build artifact repository does not match the claimed job");
         }
-        const result = await pool.query(
-          `UPDATE build_jobs SET status='PUSHED',artifact_image_ref=$3,image_id=$4,
-                   lease_until=NULL,completed_at=now(),updated_at=now()
-             WHERE id=$1 AND worker_id=$2 AND status='BUILDING' AND lease_until > now()
-             RETURNING id`,
+
+        await client.query(
+          `UPDATE build_jobs
+              SET status='PUSHED',artifact_image_ref=$3,image_id=$4,lease_until=NULL,completed_at=now(),updated_at=now()
+            WHERE id=$1 AND worker_id=$2`,
           [buildId, workerId, artifactImageRef, imageId],
         );
-        if (result.rowCount !== 1) return reply.code(409).send({ error: "build lease is unavailable" });
-        await pool.query(
+        await client.query(
           "INSERT INTO build_events(build_id,kind,status,message) VALUES($1,'STATUS','PUSHED','immutable image pushed to registry')",
           [buildId],
         );
-        return reply.code(204).send();
+
+        if (owned.deploy_after_push) {
+          if (!owned.target_service_name || !owned.target_node_id || !owned.target_container_port || !owned.target_host_port || owned.target_healthcheck_path === null) {
+            throw new Error("automatic deploy target snapshot is incomplete");
+          }
+          createdDeploymentId = randomUUID();
+          targetNodeId = String(owned.target_node_id);
+          await client.query(
+            `INSERT INTO deployments(
+               id,service_id,service_name,node_id,source_repository,source_ref,source_delivery,dockerfile,build_args,
+               artifact_image_ref,artifact_source_commit_sha,container_port,host_port,healthcheck_path,status,operation
+             ) VALUES($1,$2,$3,$4,$5,$6,'DIRECT',NULL,'{}'::jsonb,$7,$6,$8,$9,$10,'QUEUED','DEPLOY')`,
+            [
+              createdDeploymentId,
+              owned.service_id,
+              owned.target_service_name,
+              targetNodeId,
+              owned.source_repository,
+              owned.source_commit_sha,
+              artifactImageRef,
+              owned.target_container_port,
+              owned.target_host_port,
+              owned.target_healthcheck_path,
+            ],
+          );
+          await captureDeploymentEnvironment(client, createdDeploymentId, owned.target_service_name);
+          await client.query("UPDATE build_jobs SET deployment_id=$2,updated_at=now() WHERE id=$1", [buildId, createdDeploymentId]);
+          await client.query(
+            "INSERT INTO build_events(build_id,kind,status,message) VALUES($1,'LOG',NULL,$2)",
+            [buildId, `automatic deployment ${createdDeploymentId} queued from immutable artifact`],
+          );
+        }
+
+        await client.query("COMMIT");
       } catch (error) {
+        await client.query("ROLLBACK").catch(() => undefined);
         return reply.code(400).send({ error: error instanceof Error ? error.message : "build completion rejected" });
+      } finally {
+        client.release();
       }
+
+      if (targetNodeId) {
+        await dispatchQueued(targetNodeId).catch((error) => request.log.error(error, "automatic build handoff dispatch failed"));
+      }
+      return reply.send({ ok: true, deploymentId: createdDeploymentId });
     },
   );
 
