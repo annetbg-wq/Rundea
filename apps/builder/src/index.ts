@@ -25,10 +25,10 @@ function sleep(ms: number) {
 }
 
 async function request(path: string, init: RequestInit = {}): Promise<Response> {
-  return fetch(`${config.controlPlaneUrl}${path}`, {
-    ...init,
-    headers: { ...headers, ...(init.headers ?? {}) },
-  });
+  const mergedHeaders = new Headers(init.headers);
+  mergedHeaders.set("authorization", headers.authorization);
+  mergedHeaders.set("x-rundea-builder-id", headers["x-rundea-builder-id"]);
+  return fetch(`${config.controlPlaneUrl}${path}`, { ...init, headers: mergedHeaders });
 }
 
 async function json(path: string, init: RequestInit = {}) {
@@ -39,7 +39,7 @@ async function json(path: string, init: RequestInit = {}) {
   return body;
 }
 
-function docker(args: string[], options: Parameters<typeof spawnSync>[2] = {}) {
+function docker(args: string[], options: Record<string, unknown> = {}) {
   const result = spawnSync("docker", args, { encoding: "utf8", ...options });
   if (result.status !== 0) throw new Error(`docker ${args.join(" ")} failed: ${result.stderr || result.stdout}`);
   return String(result.stdout ?? "").trim();
