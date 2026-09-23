@@ -509,7 +509,7 @@ registerNodeQualificationRoutes(app, pool, sockets, requireControl);
 registerDomainRoutes(app, pool, sockets, requireControl);
 registerRuntimeControlRoutes(app, pool, sockets, requireControl, dispatchQueued);
 registerSourceBrokerRoutes(app, pool);
-registerBuildEngineRoutes(app, pool, requireControl, resolveBuildEngineConfig());
+registerBuildEngineRoutes(app, pool, requireControl, dispatchQueued, resolveBuildEngineConfig());
 registerRuntimeMetricRoutes(app, pool, requireControl);
 const mcpHttp = mcpHttpConfig ? registerReadonlyMcpHttp(app, pool, mcpHttpConfig) : null;
 
