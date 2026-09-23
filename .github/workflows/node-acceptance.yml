@@ -85,6 +85,8 @@ jobs:
           RUNDEA_WEB_ORIGIN: http://127.0.0.1:5173
           RUNDEA_TEST_AGENT_AUTH_DELAY_MS: '750'
           RUNDEA_AGENT_BUNDLE_DIR: /tmp/rundea-agent-release
+          RUNDEA_BUILDER_TOKEN: acceptance-builder-token
+          RUNDEA_BUILD_REGISTRY_PREFIX: localhost:15001/rundea-builds
           PORT: '4000'
         run: |
           set -euo pipefail
@@ -150,6 +152,15 @@ jobs:
           RUNDEA_ACCEPTANCE_HOST_PORT: '18081'
           RUNDEA_METRICS_INTERVAL: '2s'
         run: node infra/acceptance/node-e2e.mjs
+      - name: Prove isolated Build Engine builds and pushes immutable artifact
+        env:
+          RUNDEA_ACCEPTANCE_API_URL: http://127.0.0.1:4000
+          RUNDEA_CONTROL_TOKEN: acceptance-control-token
+          RUNDEA_BUILDER_TOKEN: acceptance-builder-token
+          RUNDEA_ACCEPTANCE_DATABASE_URL: postgres://rundea:rundea@127.0.0.1:5432/rundea
+          RUNDEA_ACCEPTANCE_SOURCE_SHA: ${{ github.sha }}
+          RUNDEA_BUILD_REGISTRY_PORT: '15001'
+        run: node infra/acceptance/build-engine-e2e.mjs
       - name: Prove immutable prebuilt image deploy avoids production build
         env:
           RUNDEA_ACCEPTANCE_API_URL: http://127.0.0.1:4000

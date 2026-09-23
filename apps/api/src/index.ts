@@ -12,6 +12,7 @@ import { createOpaqueToken, equalTokenHash, hashToken, parseMasterKey } from "@r
 import { assertTransition } from "@rundea/deployer";
 import { validateAgentHello } from "./agent-compatibility";
 import { normalizeBuildArgs } from "./build-args";
+import { registerBuildEngineRoutes, resolveBuildEngineConfig } from "./build-engine";
 import { resolveLiveEnvironment } from "./live-environment";
 import {
   normalizeArtifactSourceCommit,
@@ -508,6 +509,7 @@ registerNodeQualificationRoutes(app, pool, sockets, requireControl);
 registerDomainRoutes(app, pool, sockets, requireControl);
 registerRuntimeControlRoutes(app, pool, sockets, requireControl, dispatchQueued);
 registerSourceBrokerRoutes(app, pool);
+registerBuildEngineRoutes(app, pool, requireControl, resolveBuildEngineConfig());
 registerRuntimeMetricRoutes(app, pool, requireControl);
 const mcpHttp = mcpHttpConfig ? registerReadonlyMcpHttp(app, pool, mcpHttpConfig) : null;
 
