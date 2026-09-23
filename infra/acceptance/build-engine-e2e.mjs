@@ -208,10 +208,10 @@ exec "$RUNDEA_ACCEPTANCE_REAL_DOCKER" "$@"
   }
 
   const agentDocker = await readFile(dockerLog, "utf8");
-  if (/^build(?:\\s|$)/m.test(agentDocker)) {
+  if (/^build(?:\s|$)/m.test(agentDocker)) {
     throw new Error(`production Agent invoked docker build during automatic handoff:\n${agentDocker}`);
   }
-  if (!/^pull(?:\\s|$)/m.test(agentDocker)) throw new Error("production Agent never pulled the immutable artifact");
+  if (!/^pull(?:\s|$)/m.test(agentDocker)) throw new Error("production Agent never pulled the immutable artifact");
 
   const eventBody = await request(`/v0/builds/${queued.build.id}/events`);
   const statuses = eventBody.events.filter((event) => event.kind === "STATUS").map((event) => event.status);
