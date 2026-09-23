@@ -102,9 +102,9 @@ exec "$RUNDEA_ACCEPTANCE_REAL_DOCKER" "$@"
     body:JSON.stringify({ slug:"build-fixture", name:"build-fixture" }),
   });
 
-  const node = await request("/v0/nodes", {
+  const node = await request(`/v0/workspaces/${workspace.id}/nodes`, {
     method:"POST",
-    body:JSON.stringify({ workspaceId:workspace.id, name:`handoff-${suffix}` }),
+    body:JSON.stringify({ name:`handoff-${suffix}` }),
   });
   nodeId = node.id;
   const nodeToken = await activateNodeCredential(api, node.id, node.token);
