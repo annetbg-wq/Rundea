@@ -85,7 +85,7 @@ function workerAuthorized(config: BuildEngineConfig, request: FastifyRequest): b
 
 async function workerJob(pool: Pool, buildId: string, workerId: string) {
   const result = await pool.query(
-    `SELECT id,service_id,project_id,source_repository,source_commit_sha,dockerfile,build_args,
+    `SELECT id,service_id,project_id,source_repository,source_commit_sha,source_path,dockerfile,build_args,
             registry_repository,status,worker_id,lease_until,artifact_image_ref,image_id,error,
             started_at,completed_at,created_at,updated_at
        FROM build_jobs
@@ -110,7 +110,7 @@ export function registerBuildEngineRoutes(
         if (!config.registryPrefix) return reply.code(503).send({ error: "Build Engine registry is not configured" });
         const serviceId = requireServiceId(request.params.serviceId);
         const service = await pool.query(
-          `SELECT s.id,s.project_id,s.status,s.name,c.repository_full_name,c.revision_sha,c.dockerfile
+          `SELECT s.id,s.project_id,s.status,s.name,c.repository_full_name,c.revision_sha,c.source_path,c.dockerfile
              FROM services s
              JOIN service_source_configs c ON c.service_id=s.id
             WHERE s.id=$1 AND s.status='ACTIVE'`,
@@ -127,10 +127,10 @@ export function registerBuildEngineRoutes(
         const sourceRepository = `https://github.com/${row.repository_full_name}.git`;
         const inserted = await pool.query(
           `INSERT INTO build_jobs(
-             id,service_id,project_id,source_repository,source_commit_sha,dockerfile,build_args,registry_repository,status
-           ) VALUES($1,$2,$3,$4,$5,$6,$7,$8,'QUEUED')
+             id,service_id,project_id,source_repository,source_commit_sha,source_path,dockerfile,build_args,registry_repository,status
+           ) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,'QUEUED')
            RETURNING *`,
-          [id, serviceId, row.project_id, sourceRepository, revision, dockerfile, buildArgs, registryRepository],
+          [id, serviceId, row.project_id, sourceRepository, revision, row.source_path, dockerfile, buildArgs, registryRepository],
         );
         await pool.query(
           "INSERT INTO build_events(build_id,kind,status,message) VALUES($1,'STATUS','QUEUED','build queued')",
@@ -150,7 +150,7 @@ export function registerBuildEngineRoutes(
       try {
         const serviceId = requireServiceId(request.params.serviceId);
         const result = await pool.query(
-          `SELECT id,service_id,project_id,source_repository,source_commit_sha,dockerfile,build_args,
+          `SELECT id,service_id,project_id,source_repository,source_commit_sha,source_path,dockerfile,build_args,
                   registry_repository,status,worker_id,lease_until,artifact_image_ref,image_id,error,
                   started_at,completed_at,created_at,updated_at
              FROM build_jobs WHERE service_id=$1 ORDER BY created_at DESC LIMIT 100`,
@@ -210,7 +210,7 @@ export function registerBuildEngineRoutes(
           `UPDATE build_jobs
               SET status='CLAIMED',worker_id=$2,lease_until=now()+($3 || ' seconds')::interval,updated_at=now()
             WHERE id=$1
-            RETURNING id,service_id,project_id,source_repository,source_commit_sha,dockerfile,build_args,registry_repository,status,worker_id,lease_until`,
+            RETURNING id,service_id,project_id,source_repository,source_commit_sha,source_path,dockerfile,build_args,registry_repository,status,worker_id,lease_until`,
           [buildId, workerId, leaseSeconds],
         );
         await client.query(
