@@ -5,8 +5,8 @@
   "workspaces": ["apps/api", "apps/web", "packages/*"],
   "engines": {"node": ">=24"},
   "scripts": {
-    "typecheck": "npm run typecheck --workspaces --if-present",
-    "test": "npm run test --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present && tsc -p apps/builder/tsconfig.json --noEmit",
+    "test": "npm run test --workspaces --if-present && tsx --test apps/builder/src/*.test.ts",
     "dev:api": "npm run dev -w @rundea/api",
     "dev:web": "npm run dev -w @rundea/web"
   },
