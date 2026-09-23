@@ -99,7 +99,7 @@ try {
     throw new Error(`unexpected registry repository ${queued.build.registry_repository}`);
   }
 
-  builder = spawn("npm", ["run","start","-w","@rundea/builder"], {
+  builder = spawn("npx", ["tsx","apps/builder/src/index.ts"], {
     stdio:["ignore","inherit","inherit"],
     env:{
       ...process.env,
