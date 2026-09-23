@@ -8,6 +8,7 @@ type Job = {
   id: string;
   service_id: string;
   source_commit_sha: string;
+  source_path: string;
   dockerfile: string | null;
   build_args: Record<string, string>;
   registry_repository: string;
@@ -75,11 +76,20 @@ async function downloadSource(job: Job, target: string) {
   return extractDir;
 }
 
+function validateSourcePath(value: string): string {
+  const normalized = value.trim().replace(/^\.\//, "").replace(/\/$/, "") || ".";
+  if (normalized.startsWith("/") || normalized.split("/").includes("..") || /[\r\n\0]/.test(normalized)) {
+    throw new Error("source path escapes repository root");
+  }
+  return normalized;
+}
+
 function sortedBuildArgs(args: Record<string, string>): string[] {
   return Object.keys(args ?? {}).sort().flatMap((key) => ["--build-arg", `${key}=${args[key]}`]);
 }
 
 async function runBuild(job: Job, sourceDir: string) {
+  const contextDir = join(sourceDir, validateSourcePath(job.source_path));
   const tag = `${job.registry_repository}:build-${job.id.replaceAll("-", "")}`;
   const dockerfile = job.dockerfile ?? "Dockerfile";
   const buildArgs = [
@@ -93,7 +103,7 @@ async function runBuild(job: Job, sourceDir: string) {
     ".",
   ];
 
-  const child = spawn("docker", buildArgs, { cwd: sourceDir, stdio: ["ignore", "inherit", "inherit"] });
+  const child = spawn("docker", buildArgs, { cwd: contextDir, stdio: ["ignore", "inherit", "inherit"] });
   const timeout = setTimeout(() => child.kill("SIGKILL"), config.timeoutMs);
   const heartbeat = setInterval(() => {
     void request(`/v0/build-worker/jobs/${job.id}/heartbeat`, { method: "POST" }).catch(() => undefined);
