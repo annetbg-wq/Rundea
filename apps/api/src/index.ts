@@ -39,6 +39,7 @@ import {
   registerRuntimeControlRoutes,
 } from "./runtime-controls";
 import { recordRuntimeMetric, registerRuntimeMetricRoutes } from "./runtime-metrics";
+import { issueRegistryPullTicket, registerRegistryPullBrokerRoutes, resolveRegistryPullConfig } from "./registry-pull-broker";
 import { failRunningNodeMaintenanceForNode, recordNodeMaintenance } from "./workspace-node-routes";
 import {
   captureDeploymentEnvironment,
@@ -247,13 +248,11 @@ async function dispatchQueued(nodeId: string): Promise<void> {
       await failQueuedBeforeDispatch(row.id, error instanceof Error ? error.message : "registry pull credential ticket could not be issued");
       return;
     }
-    if (registryAuthTicket && !Array.isArray(nodeCapabilities)) {
-      await failQueuedBeforeDispatch(row.id, "selected Agent cannot advertise registry pull credential support");
-      return;
-    }
-    if (registryAuthTicket && !nodeCapabilities.includes("registryPullCredentials")) {
-      await failQueuedBeforeDispatch(row.id, "selected Agent does not support brokered registry pull credentials");
-      return;
+    if (registryAuthTicket) {
+      if (!Array.isArray(nodeCapabilities) || !nodeCapabilities.includes("registryPullCredentials")) {
+        await failQueuedBeforeDispatch(row.id, "selected Agent does not support brokered registry pull credentials");
+        return;
+      }
     }
     command = {
       type: "deploy",
