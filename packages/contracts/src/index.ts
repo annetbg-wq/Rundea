@@ -48,6 +48,7 @@ export type BrokeredSourceSpec = {
 export type PrebuiltArtifactSpec = {
   imageRef: string;
   sourceCommitSha: string;
+  registryAuthTicket?: string;
 };
 
 export type DeployCommand = {
