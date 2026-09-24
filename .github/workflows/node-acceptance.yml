@@ -400,3 +400,87 @@ jobs:
           fi
           sudo rm -f /usr/local/share/ca-certificates/rundea-acceptance.crt
           sudo update-ca-certificates >/dev/null 2>&1 || true
+
+
+  registry-auth-e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    needs: agent-bundle
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: rundea
+          POSTGRES_PASSWORD: rundea
+          POSTGRES_DB: rundea
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U rundea -d rundea"
+          --health-interval 2s
+          --health-timeout 2s
+          --health-retries 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - uses: actions/download-artifact@v4
+        with:
+          name: rundea-agent-linux
+          path: /tmp/rundea-agent-release
+      - name: Prepare acceptance Agent
+        run: |
+          set -euo pipefail
+          cp /tmp/rundea-agent-release/rundea-agent-linux-amd64 /tmp/rundea-agent
+          chmod +x /tmp/rundea-agent
+      - name: Start private-registry Control Plane
+        env:
+          DATABASE_URL: postgres://rundea:rundea@127.0.0.1:5432/rundea
+          RUNDEA_CONTROL_TOKEN: acceptance-control-token
+          RUNDEA_MASTER_KEY: MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=
+          RUNDEA_WEB_ORIGIN: http://127.0.0.1:5173
+          RUNDEA_BUILDER_TOKEN: acceptance-builder-token
+          RUNDEA_BUILD_REGISTRY_PREFIX: localhost:15011/rundea-builds
+          RUNDEA_REGISTRY_PULL_USERNAME: acceptance
+          RUNDEA_REGISTRY_PULL_PASSWORD: acceptance-password
+          PORT: '4010'
+        run: |
+          set -euo pipefail
+          npm run start -w @rundea/api > /tmp/rundea-registry-api.log 2>&1 &
+          echo $! > /tmp/rundea-registry-api.pid
+          for attempt in $(seq 1 60); do
+            if curl --fail --silent http://127.0.0.1:4010/health >/dev/null; then
+              exit 0
+            fi
+            if ! kill -0 "$(cat /tmp/rundea-registry-api.pid)" 2>/dev/null; then
+              cat /tmp/rundea-registry-api.log
+              exit 1
+            fi
+            sleep 1
+          done
+          cat /tmp/rundea-registry-api.log
+          exit 1
+      - name: Prove private registry pull uses one-time brokered credentials
+        env:
+          RUNDEA_ACCEPTANCE_API_URL: http://127.0.0.1:4010
+          RUNDEA_CONTROL_TOKEN: acceptance-control-token
+          RUNDEA_BUILDER_TOKEN: acceptance-builder-token
+          RUNDEA_ACCEPTANCE_DATABASE_URL: postgres://rundea:rundea@127.0.0.1:5432/rundea
+          RUNDEA_AGENT_BINARY: /tmp/rundea-agent
+          RUNDEA_ACCEPTANCE_SOURCE_SHA: ${{ github.sha }}
+          RUNDEA_BUILD_REGISTRY_PORT: '15011'
+          RUNDEA_REGISTRY_USERNAME: acceptance
+          RUNDEA_REGISTRY_PASSWORD: acceptance-password
+        run: node infra/acceptance/registry-auth-e2e.mjs
+      - name: Private registry Control Plane log
+        if: always()
+        run: cat /tmp/rundea-registry-api.log || true
+      - name: Stop private-registry Control Plane
+        if: always()
+        run: |
+          if [[ -f /tmp/rundea-registry-api.pid ]]; then
+            kill "$(cat /tmp/rundea-registry-api.pid)" 2>/dev/null || true
+          fi

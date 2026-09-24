@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 )
@@ -25,11 +26,37 @@ func validateImmutableImageRef(value string) error {
 	return nil
 }
 
-func pullAndRetainPrebuiltImage(ctx context.Context, w *writer, deploymentID, imageRef, localTag string) (string, error) {
+func pullAndRetainPrebuiltImage(
+	ctx context.Context,
+	w *writer,
+	deploymentID, imageRef, localTag string,
+	credentials *registryPullCredentials,
+) (string, error) {
 	if err := validateImmutableImageRef(imageRef); err != nil {
 		return "", err
 	}
-	if err := runStreaming(ctx, w, deploymentID, "build", "docker", "pull", imageRef); err != nil {
+
+	dockerEnv := os.Environ()
+	var authDir string
+	if credentials != nil {
+		var err error
+		authDir, err = os.MkdirTemp("", "rundea-docker-auth-")
+		if err != nil {
+			return "", fmt.Errorf("create temporary Docker auth directory: %w", err)
+		}
+		defer os.RemoveAll(authDir)
+		dockerEnv = append(dockerEnv, "DOCKER_CONFIG="+authDir)
+
+		login := exec.CommandContext(ctx, "docker", "login", credentials.Server, "--username", credentials.Username, "--password-stdin")
+		login.Env = dockerEnv
+		login.Stdin = strings.NewReader(credentials.Password)
+		out, err := login.CombinedOutput()
+		if err != nil {
+			return "", fmt.Errorf("docker registry login failed: %w: %s", err, strings.TrimSpace(string(out)))
+		}
+	}
+
+	if err := runStreamingEnv(ctx, dockerEnv, w, deploymentID, "build", "docker", "pull", imageRef); err != nil {
 		return "", fmt.Errorf("docker pull immutable artifact: %w", err)
 	}
 	pulledID, err := inspectImageID(ctx, imageRef)
@@ -48,4 +75,13 @@ func pullAndRetainPrebuiltImage(ctx context.Context, w *writer, deploymentID, im
 		return "", fmt.Errorf("retained prebuilt artifact identity mismatch: pulled %s, retained %s", pulledID, retainedID)
 	}
 	return retainedID, nil
+}
+
+func runStreamingEnv(ctx context.Context, env []string, w *writer, deploymentID, stream, name string, args ...string) error {
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.Env = env
+	sink := logSink{w: w, deploymentID: deploymentID, stream: stream}
+	cmd.Stdout = sink
+	cmd.Stderr = sink
+	return cmd.Run()
 }

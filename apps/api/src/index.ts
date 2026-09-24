@@ -39,6 +39,7 @@ import {
   registerRuntimeControlRoutes,
 } from "./runtime-controls";
 import { recordRuntimeMetric, registerRuntimeMetricRoutes } from "./runtime-metrics";
+import { issueRegistryPullTicket, registerRegistryPullBrokerRoutes, resolveRegistryPullConfig } from "./registry-pull-broker";
 import { failRunningNodeMaintenanceForNode, recordNodeMaintenance } from "./workspace-node-routes";
 import {
   captureDeploymentEnvironment,
@@ -66,6 +67,7 @@ const controlTokenHash = hashToken(controlToken);
 const masterKey = parseMasterKey(masterKeyEncoded);
 const liveEnvironment = resolveLiveEnvironment(process.env);
 const mcpHttpConfig = resolveReadonlyMcpHttpConfig(process.env, controlToken);
+const registryPullConfig = resolveRegistryPullConfig(process.env);
 
 const pool = new Pool({ connectionString: databaseUrl });
 const app = Fastify({ logger: true });
@@ -239,6 +241,19 @@ async function dispatchQueued(nodeId: string): Promise<void> {
       await failQueuedBeforeDispatch(row.id, "prebuilt deployment is missing immutable source provenance");
       return;
     }
+    let registryAuthTicket: string | null = null;
+    try {
+      registryAuthTicket = await issueRegistryPullTicket(pool, row.id, nodeId, row.artifact_image_ref, registryPullConfig);
+    } catch (error) {
+      await failQueuedBeforeDispatch(row.id, error instanceof Error ? error.message : "registry pull credential ticket could not be issued");
+      return;
+    }
+    if (registryAuthTicket) {
+      if (!Array.isArray(nodeCapabilities) || !nodeCapabilities.includes("registryPullCredentials")) {
+        await failQueuedBeforeDispatch(row.id, "selected Agent does not support brokered registry pull credentials");
+        return;
+      }
+    }
     command = {
       type: "deploy",
       deploymentId: row.id,
@@ -246,6 +261,7 @@ async function dispatchQueued(nodeId: string): Promise<void> {
       artifact: {
         imageRef: row.artifact_image_ref,
         sourceCommitSha: row.artifact_source_commit_sha,
+        ...(registryAuthTicket ? { registryAuthTicket } : {}),
       },
       runtime,
     };
@@ -509,6 +525,7 @@ registerNodeQualificationRoutes(app, pool, sockets, requireControl);
 registerDomainRoutes(app, pool, sockets, requireControl);
 registerRuntimeControlRoutes(app, pool, sockets, requireControl, dispatchQueued);
 registerSourceBrokerRoutes(app, pool);
+registerRegistryPullBrokerRoutes(app, pool, registryPullConfig);
 registerBuildEngineRoutes(app, pool, requireControl, dispatchQueued, resolveBuildEngineConfig());
 registerRuntimeMetricRoutes(app, pool, requireControl);
 const mcpHttp = mcpHttpConfig ? registerReadonlyMcpHttp(app, pool, mcpHttpConfig) : null;

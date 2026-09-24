@@ -33,4 +33,5 @@ export const migrationFiles = [
   "032_build_engine.sql",
   "033_build_deploy_handoff.sql",
   "034_github_push_build_pipeline.sql",
+  "035_registry_pull_broker.sql",
 ] as const;
