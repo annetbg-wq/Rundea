@@ -2,86 +2,84 @@
 
 ## Status
 
-Accepted for v0.
+Accepted. Registry-first canonical path updated in 2026.
 
 ## Context
 
-Rundea already supports manual deployment of an exact Git commit SHA, but a Railway-like workflow requires a push to create a deployment without an operator copying a ref into the UI. The Control Plane is the correct trust boundary for GitHub events: nodes must not receive a webhook secret or a long-lived GitHub credential.
+Rundea supports automatic deployment from signed GitHub push events. The Control Plane remains the trust boundary for GitHub events: production nodes must not receive webhook secrets, GitHub App private keys, or build credentials.
 
-Private repository access is intentionally separate. A GitHub webhook proves that GitHub emitted an event; it does not by itself authorize a node to clone a private repository.
+The original v0 path created source-build deployments directly from a push. That is no longer the canonical production design because it can move Docker build CPU/RAM pressure onto the production node.
 
 ## Decision
 
-Rundea stores a per-service autodeploy configuration containing:
+Rundea stores a per-service autodeploy configuration containing the canonical service identity, target node, GitHub repository, branch, build arguments, runtime port, healthcheck path and enabled state.
 
-- target node;
-- canonical GitHub repository;
-- source branch;
-- optional Dockerfile path;
-- container/host ports;
-- healthcheck path;
-- enabled state.
+The public webhook endpoint accepts GitHub events only when `RUNDEA_GITHUB_WEBHOOK_SECRET` is configured and `X-Hub-Signature-256` matches HMAC-SHA256 over the exact raw request body.
 
-The public webhook endpoint accepts GitHub events only when `RUNDEA_GITHUB_WEBHOOK_SECRET` is configured and `X-Hub-Signature-256` matches an HMAC-SHA256 computed over the exact raw HTTP request body.
+For a canonical service push Rundea:
 
-For `push` events Rundea:
+1. validates the delivery id, raw-body signature, repository, branch and exact 40-character `after` commit SHA;
+2. matches enabled canonical autodeploy configuration by repository + branch;
+3. creates a Build Engine job for that exact commit SHA with `deploy_after_push=true`;
+4. records delivery-to-build provenance transactionally;
+5. lets an isolated Builder fetch source through the Control Plane, build with explicit CPU/RAM/time limits, and push to the configured registry;
+6. persists the immutable `repository@sha256:...` result;
+7. atomically creates the runtime deployment only after the immutable artifact exists;
+8. dispatches the production Agent a prebuilt-image command;
+9. requires the Agent to pull the immutable digest, run the candidate, pass the existing healthcheck and only then switch the stable route.
 
-1. validates `X-GitHub-Delivery`;
-2. fingerprints the exact signed raw body with SHA-256;
-3. validates `repository.full_name` and `refs/heads/<branch>`;
-4. requires `after` to be a full 40-hex Git SHA;
-5. matches enabled autodeploy configurations by canonical repository + branch;
-6. creates each deployment transactionally using the **stored repository URL**, never a clone URL supplied by the webhook payload;
-7. sets `source_ref` to the exact `after` SHA;
-8. captures the immutable encrypted environment snapshot in the same transaction;
-9. records delivery-to-deployment links for observability;
-10. dispatches queued deployments after commit.
+The canonical GitHub path therefore is:
 
-Branch deletion events are recorded as ignored. Unsupported GitHub event types are ignored without creating deployments.
+```
+GitHub push
+  -> signed Control Plane webhook
+  -> Build Engine
+  -> Registry @sha256
+  -> prebuilt deployment
+  -> production Agent pull
+  -> candidate
+  -> healthcheck
+  -> READY
+```
+
+No canonical GitHub push may cause a production Agent to run `docker build`.
+
+A bounded hidden/prototype compatibility path remains for legacy service-name-only autodeploy records that do not have a canonical `service_source_configs` identity. User-facing canonical services always take the Build Engine path.
 
 ## Idempotency and replay boundary
 
-`X-GitHub-Delivery` is persisted with a primary-key constraint, so normal GitHub redelivery cannot create a second deployment.
+`X-GitHub-Delivery` is persisted with a primary-key constraint. Rundea also stores a unique SHA-256 fingerprint of the already signature-verified raw body because the delivery header itself is not included in GitHub's body HMAC.
 
-The delivery header itself is not covered by GitHub's body HMAC. Therefore Rundea also stores a unique SHA-256 fingerprint of the **already signature-verified raw body**. Replaying the same signed event bytes under a different delivery id is treated as a duplicate and cannot create a second deployment. This closes the header-substitution replay path while keeping signatures and raw webhook bodies out of persistent logs.
+Replaying the same delivery, or the same signed body under another delivery id, cannot enqueue a second build.
 
-HTTPS remains part of the trust boundary. A future public edge may additionally enforce provider-specific request metadata or explicit event-age policy, but correctness does not rely solely on `X-GitHub-Delivery` uniqueness.
+## Provenance
 
-## Raw-body parsing
+Migration `034_github_push_build_pipeline.sql` adds `github_webhook_builds`. A delivery is linked to the exact canonical `service_id` and `build_id`.
 
-Signature verification must occur against the exact bytes GitHub sent. The webhook is therefore registered in an encapsulated Fastify scope with a buffer JSON parser. Ordinary Control Plane JSON routes keep Fastify's normal parsed-object behavior.
+The build record retains the source commit SHA and immutable registry artifact. The runtime deployment retains both the source SHA and artifact digest, so the chain from GitHub event to running image is auditable.
 
-## Schema
+## Failure behavior
 
-Migration `006_github_autodeploy.sql` owns:
+A failed build does not create a runtime deployment.
 
-- `service_autodeploys`;
-- `github_webhook_deliveries`, including a unique raw-body SHA-256 fingerprint;
-- `github_webhook_deployments`.
+If the configured production node is offline when a completed build attempts handoff, Rundea does not silently choose another node.
 
-The current migration runner is intentionally primitive. Until it is replaced with versioned migration bookkeeping, the feature registration also executes the same idempotent migration file and all feature routes await that bootstrap promise. There is one DDL source, not duplicated schema strings.
+If a candidate runtime fails its healthcheck, the existing READY route remains active.
 
 ## Acceptance contract
 
-The node acceptance workflow must:
+The node acceptance workflow must prove that a signed canonical GitHub push:
 
-- configure autodeploy for the fixture service;
-- send a correctly signed GitHub `push` payload;
-- assert exactly one triggered deployment;
-- replay the same `X-GitHub-Delivery` and assert idempotency;
-- replay the same signed body under a different delivery id and assert raw-body replay protection;
-- assert delivery observability links to the deployment;
-- wait for the webhook-created deployment to reach `READY` on a real Docker runner;
-- continue through Restart and exact Rollback checks.
+- enqueues exactly one Build Engine job and no direct canonical source-build deployment;
+- builds outside the production Agent;
+- persists an immutable registry digest;
+- automatically creates the linked deployment;
+- preserves the exact GitHub commit SHA as provenance;
+- reaches READY through the prebuilt-image Agent path;
+- records an Agent log proving use of the immutable prebuilt artifact;
+- does not emit the old source-broker/local-build log on the production Agent;
+- remains idempotent on duplicate webhook delivery.
 
-## Not included
+## Still separate
 
-This ADR does not provide:
-
-- GitHub App installation creation or OAuth setup;
-- private-repository source delivery;
-- short-lived installation-token brokering;
-- automatic GitHub webhook registration on customer repositories;
-- cross-provider SCM support.
-
-Those require a separate GitHub App/private-source trust design.
+Private-registry pull authentication on production nodes must use scoped, preferably short-lived credentials. Automatic GitHub webhook installation on customer repositories and cross-provider SCM support remain separate work.
