@@ -52,14 +52,24 @@ function safeServiceName(value: string): string {
   return cleaned || "service";
 }
 
-async function latestReadyForService(db: Queryable, serviceName: string) {
-  const result = await db.query(
-    `SELECT id,service_name,node_id,host_port,container_port,healthcheck_path,environment_snapshot_at,image_id,source_commit_sha
-       FROM deployments
-      WHERE service_name=$1 AND status='READY'
-      ORDER BY created_at DESC,id DESC LIMIT 1`,
-    [serviceName],
-  );
+async function latestReadyForService(db: Queryable, serviceName: string, serviceId?: string | null) {
+  const result = serviceId
+    ? await db.query(
+        `SELECT id,service_id,service_name,node_id,host_port,container_port,healthcheck_path,environment_snapshot_at,image_id,
+                source_commit_sha,artifact_image_ref,artifact_source_commit_sha
+           FROM deployments
+          WHERE service_id=$1 AND status='READY'
+          ORDER BY created_at DESC,id DESC LIMIT 1`,
+        [serviceId],
+      )
+    : await db.query(
+        `SELECT id,service_id,service_name,node_id,host_port,container_port,healthcheck_path,environment_snapshot_at,image_id,
+                source_commit_sha,artifact_image_ref,artifact_source_commit_sha
+           FROM deployments
+          WHERE service_id IS NULL AND service_name=$1 AND status='READY'
+          ORDER BY created_at DESC,id DESC LIMIT 1`,
+        [serviceName],
+      );
   return result.rows[0] as Record<string, any> | undefined;
 }
 
@@ -102,7 +112,7 @@ export async function executeRestartOperation(
     await client.query("BEGIN");
     await client.query("SELECT id FROM nodes WHERE id=$1 FOR UPDATE", [nodeId]);
     const target = await client.query(
-      `SELECT id,service_name,node_id,host_port,healthcheck_path,status
+      `SELECT id,service_id,service_name,node_id,host_port,healthcheck_path,status
          FROM deployments WHERE id=$1 FOR UPDATE`,
       [deploymentId],
     );
@@ -110,7 +120,7 @@ export async function executeRestartOperation(
     row = target.rows[0];
     if (row.status !== "READY") return rollbackAndThrow(client, 409, "only a READY deployment can be restarted");
 
-    const current = await latestReadyForService(client, row.service_name);
+    const current = await latestReadyForService(client, row.service_name, row.service_id ?? null);
     if (!current || current.id !== row.id) {
       return rollbackAndThrow(client, 409, "only the current READY revision can be restarted");
     }
@@ -167,18 +177,16 @@ export async function executeRollbackOperation(
   const { pool, dispatchQueued, reportError } = dependencies;
   if (!validRuntimeResourceId(targetDeploymentId)) throw new RuntimeOperationError(400, "invalid deployment id");
 
-  const initial = await pool.query("SELECT node_id FROM deployments WHERE id=$1", [targetDeploymentId]);
-  if (initial.rowCount !== 1) throw new RuntimeOperationError(404, "rollback target not found");
-  const nodeId = initial.rows[0].node_id as string;
   const id = randomUUID();
   let target: Record<string, any>;
+  let destinationNodeId = "";
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
-    await client.query("SELECT id FROM nodes WHERE id=$1 FOR UPDATE", [nodeId]);
     const targetResult = await client.query(
-      `SELECT id,service_name,node_id,source_repository,source_ref,dockerfile,container_port,host_port,healthcheck_path,
-              status,environment_snapshot_at,source_commit_sha,image_id
+      `SELECT id,service_id,service_name,node_id,source_repository,source_ref,source_delivery,dockerfile,build_args,
+              container_port,host_port,healthcheck_path,status,environment_snapshot_at,source_commit_sha,image_id,
+              artifact_image_ref,artifact_source_commit_sha
          FROM deployments WHERE id=$1 FOR UPDATE`,
       [targetDeploymentId],
     );
@@ -188,33 +196,68 @@ export async function executeRollbackOperation(
       return rollbackAndThrow(client, 409, "rollback target must be a revision that previously reached READY");
     }
     if (!target.environment_snapshot_at || !target.image_id || !target.source_commit_sha) {
-      return rollbackAndThrow(client, 409, "deployment predates immutable rollback snapshots or has no retained artifact identity");
+      return rollbackAndThrow(client, 409, "deployment predates immutable rollback snapshots or has no artifact identity");
     }
 
-    const current = await latestReadyForService(client, target.service_name);
+    const current = await latestReadyForService(client, target.service_name, target.service_id ?? null);
     if (!current) return rollbackAndThrow(client, 409, "service has no current READY deployment");
     if (current.id === target.id) return rollbackAndThrow(client, 409, "target deployment is already the current revision");
-    if (current.node_id !== nodeId) {
-      return rollbackAndThrow(client, 409, "v0 rollback requires target and current revision on the same node");
+
+    destinationNodeId = String(current.node_id);
+    const node = await client.query(
+      "SELECT id,status,lifecycle_status FROM nodes WHERE id=$1 FOR UPDATE",
+      [destinationNodeId],
+    );
+    if (node.rowCount !== 1 || node.rows[0].lifecycle_status !== "ACTIVE" || node.rows[0].status !== "ONLINE") {
+      return rollbackAndThrow(client, 409, "current service node is not ONLINE and ACTIVE");
     }
-    if (!(await rollbackTargetIsRetained(client, target.service_name, nodeId, target.id))) {
-      return rollbackAndThrow(client, 409, "rollback target is outside the retained artifact window");
+
+    const sameNode = String(target.node_id) === destinationNodeId;
+    const registryBacked = Boolean(target.artifact_image_ref && target.artifact_source_commit_sha);
+    if (!sameNode && !registryBacked) {
+      return rollbackAndThrow(client, 409, "cross-node rollback requires an immutable registry artifact");
     }
-    if (await nodeHasActiveDeployment(client, nodeId)) {
-      return rollbackAndThrow(client, 409, "node already has an active deployment operation");
+    if (sameNode && !registryBacked) {
+      if (!(await rollbackTargetIsRetained(client, target.service_name, destinationNodeId, target.id))) {
+        return rollbackAndThrow(client, 409, "rollback target is outside the retained artifact window and has no registry artifact");
+      }
     }
-    if (await nodeHasRuntimeAction(client, nodeId)) {
-      return rollbackAndThrow(client, 409, "node already has a running runtime action");
+    if (registryBacked && String(target.artifact_source_commit_sha).toLowerCase() !== String(target.source_commit_sha).toLowerCase()) {
+      return rollbackAndThrow(client, 409, "rollback registry artifact provenance does not match the target source commit");
+    }
+    if (await nodeHasActiveDeployment(client, destinationNodeId)) {
+      return rollbackAndThrow(client, 409, "destination node already has an active deployment operation");
+    }
+    if (await nodeHasRuntimeAction(client, destinationNodeId)) {
+      return rollbackAndThrow(client, 409, "destination node already has a running runtime action");
     }
 
     await client.query(
       `INSERT INTO deployments(
-         id,service_name,node_id,source_repository,source_ref,dockerfile,container_port,host_port,healthcheck_path,
-         status,operation,rollback_target_id,source_commit_sha,image_id
-       ) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,'QUEUED','ROLLBACK',$10,$11,$12)`,
+         id,service_id,service_name,node_id,source_repository,source_ref,source_delivery,dockerfile,build_args,
+         container_port,host_port,healthcheck_path,status,operation,rollback_target_id,source_commit_sha,image_id,
+         artifact_image_ref,artifact_source_commit_sha
+       ) VALUES(
+         $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'QUEUED','ROLLBACK',$13,$14,$15,$16,$17
+       )`,
       [
-        id,target.service_name,nodeId,target.source_repository,target.source_ref,target.dockerfile,
-        target.container_port,target.host_port,target.healthcheck_path,target.id,target.source_commit_sha,target.image_id,
+        id,
+        target.service_id,
+        target.service_name,
+        destinationNodeId,
+        target.source_repository,
+        target.source_ref,
+        target.source_delivery ?? "DIRECT",
+        target.dockerfile,
+        target.build_args ?? {},
+        target.container_port,
+        current.host_port,
+        target.healthcheck_path,
+        target.id,
+        target.source_commit_sha,
+        target.image_id,
+        target.artifact_image_ref ?? null,
+        target.artifact_source_commit_sha ?? null,
       ],
     );
     await copyDeploymentEnvironment(client, target.id, id);
@@ -231,6 +274,7 @@ export async function executeRollbackOperation(
     client.release();
   }
 
-  await dispatchQueued(nodeId);
+  await dispatchQueued(destinationNodeId);
   return { id, status: "QUEUED", operation: "ROLLBACK", rollbackTargetId: target!.id };
 }
+
