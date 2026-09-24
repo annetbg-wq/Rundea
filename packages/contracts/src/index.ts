@@ -67,6 +67,7 @@ export type RollbackCommand = {
   targetDeploymentId: string;
   expectedImageId: string;
   serviceName: string;
+  artifact?: PrebuiltArtifactSpec;
   runtime: RuntimeSpec;
 };
 
