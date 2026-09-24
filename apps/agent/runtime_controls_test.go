@@ -55,3 +55,33 @@ func TestDockerImageIDPatternRequiresContentAddress(t *testing.T) {
 		t.Fatal("mutable image tag must not be accepted as artifact identity")
 	}
 }
+
+func TestValidateRollbackCommandAcceptsRegistryFallback(t *testing.T) {
+	cmd := validRollbackFixture()
+	cmd.Artifact = &struct {
+		ImageRef           string `json:"imageRef"`
+		SourceCommitSHA    string `json:"sourceCommitSha"`
+		RegistryAuthTicket string `json:"registryAuthTicket,omitempty"`
+	}{
+		ImageRef:        "registry.example.test/acme/sendina@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		SourceCommitSHA: "cccccccccccccccccccccccccccccccccccccccc",
+	}
+	if err := validateRollbackCommand(cmd); err != nil {
+		t.Fatalf("expected registry-backed rollback command to be valid: %v", err)
+	}
+}
+
+func TestValidateRollbackCommandRejectsMutableRegistryFallback(t *testing.T) {
+	cmd := validRollbackFixture()
+	cmd.Artifact = &struct {
+		ImageRef           string `json:"imageRef"`
+		SourceCommitSHA    string `json:"sourceCommitSha"`
+		RegistryAuthTicket string `json:"registryAuthTicket,omitempty"`
+	}{
+		ImageRef:        "registry.example.test/acme/sendina:latest",
+		SourceCommitSHA: "cccccccccccccccccccccccccccccccccccccccc",
+	}
+	if err := validateRollbackCommand(cmd); err == nil {
+		t.Fatal("expected mutable registry rollback artifact to be rejected")
+	}
+}
