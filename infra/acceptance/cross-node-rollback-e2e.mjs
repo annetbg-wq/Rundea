@@ -221,7 +221,7 @@ try {
 
   spawnSync("docker",["image","rm","-f",`rundea/${targetDeploymentId.toLowerCase()}:build`],{stdio:"ignore"});
 
-  const rollback = await request(`/v0/deployments/${targetDeploymentId}/rollback`, { method:"POST" });
+  const rollback = await request(`/v0/deployments/${targetDeploymentId}/rollback`, { method:"POST", body:"{}" });
   rollbackDeploymentId = rollback.id;
 
   const rolledBack = await waitReady(service.id, rollbackDeploymentId);
