@@ -225,15 +225,45 @@ async function dispatchQueued(nodeId: string): Promise<void> {
   }
   if (row.operation === "ROLLBACK") {
     if (!row.rollback_target_id || !row.image_id) {
-      await failQueuedBeforeDispatch(row.id, "rollback deployment is missing retained artifact identity");
+      await failQueuedBeforeDispatch(row.id, "rollback deployment is missing immutable artifact identity");
       return;
     }
+
+    let rollbackArtifact: { imageRef: string; sourceCommitSha: string; registryAuthTicket?: string } | undefined;
+    if (row.artifact_image_ref) {
+      if (!row.artifact_source_commit_sha) {
+        await failQueuedBeforeDispatch(row.id, "registry-backed rollback is missing immutable source provenance");
+        return;
+      }
+      if (!supportsPrebuiltImages(nodeCapabilities)) {
+        await failQueuedBeforeDispatch(row.id, "selected Agent does not support registry-backed rollback artifacts");
+        return;
+      }
+      let registryAuthTicket: string | null = null;
+      try {
+        registryAuthTicket = await issueRegistryPullTicket(pool, row.id, nodeId, row.artifact_image_ref, registryPullConfig);
+      } catch (error) {
+        await failQueuedBeforeDispatch(row.id, error instanceof Error ? error.message : "registry pull credential ticket could not be issued");
+        return;
+      }
+      if (registryAuthTicket && (!Array.isArray(nodeCapabilities) || !nodeCapabilities.includes("registryPullCredentials"))) {
+        await failQueuedBeforeDispatch(row.id, "selected Agent does not support brokered registry pull credentials");
+        return;
+      }
+      rollbackArtifact = {
+        imageRef: row.artifact_image_ref,
+        sourceCommitSha: row.artifact_source_commit_sha,
+        ...(registryAuthTicket ? { registryAuthTicket } : {}),
+      };
+    }
+
     command = {
       type: "rollback",
       deploymentId: row.id,
       targetDeploymentId: row.rollback_target_id,
       expectedImageId: row.image_id,
       serviceName: row.service_name,
+      ...(rollbackArtifact ? { artifact: rollbackArtifact } : {}),
       runtime,
     };
   } else if (row.artifact_image_ref) {
