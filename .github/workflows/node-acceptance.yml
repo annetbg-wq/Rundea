@@ -158,6 +158,7 @@ jobs:
           RUNDEA_CONTROL_TOKEN: acceptance-control-token
           RUNDEA_BUILDER_TOKEN: acceptance-builder-token
           RUNDEA_ACCEPTANCE_DATABASE_URL: postgres://rundea:rundea@127.0.0.1:5432/rundea
+          RUNDEA_AGENT_BINARY: /tmp/rundea-agent
           RUNDEA_ACCEPTANCE_SOURCE_SHA: ${{ github.sha }}
           RUNDEA_BUILD_REGISTRY_PORT: '15001'
         run: node infra/acceptance/build-engine-e2e.mjs

@@ -3,9 +3,11 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { Pool } from "pg";
 import { equalTokenHash, hashToken } from "@rundea/crypto";
 import { normalizeBuildArgs } from "./build-args";
+import { captureDeploymentEnvironment } from "./service-variables";
 import { createGitHubArchiveProviderFromEnv, type GitHubArchiveProvider } from "./github-app-source";
 
 type ControlPreHandler = (request: FastifyRequest, reply: FastifyReply) => Promise<void>;
+type DispatchQueued = (nodeId: string) => Promise<void>;
 type ArchiveProvider = Pick<GitHubArchiveProvider, "fetchArchive">;
 
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -87,7 +89,7 @@ async function workerJob(pool: Pool, buildId: string, workerId: string) {
   const result = await pool.query(
     `SELECT id,service_id,project_id,source_repository,source_commit_sha,source_path,dockerfile,build_args,
             registry_repository,status,worker_id,lease_until,artifact_image_ref,image_id,error,
-            started_at,completed_at,created_at,updated_at
+            deploy_after_push,deployment_id,started_at,completed_at,created_at,updated_at
        FROM build_jobs
       WHERE id=$1 AND worker_id=$2`,
     [buildId, workerId],
@@ -99,10 +101,11 @@ export function registerBuildEngineRoutes(
   app: FastifyInstance,
   pool: Pool,
   requireControl: ControlPreHandler,
+  dispatchQueued: DispatchQueued,
   config: BuildEngineConfig = resolveBuildEngineConfig(),
   archiveProvider: ArchiveProvider = createGitHubArchiveProviderFromEnv(),
 ): void {
-  app.post<{ Params: { serviceId: string }; Body: { revisionSha?: string; dockerfile?: string; buildArgs?: unknown } }>(
+  app.post<{ Params: { serviceId: string }; Body: { revisionSha?: string; dockerfile?: string; buildArgs?: unknown; deployAfterPush?: boolean } }>(
     "/v0/services/:serviceId/builds",
     { preHandler: requireControl },
     async (request, reply) => {
@@ -127,10 +130,10 @@ export function registerBuildEngineRoutes(
         const sourceRepository = `https://github.com/${row.repository_full_name}.git`;
         const inserted = await pool.query(
           `INSERT INTO build_jobs(
-             id,service_id,project_id,source_repository,source_commit_sha,source_path,dockerfile,build_args,registry_repository,status
-           ) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,'QUEUED')
+             id,service_id,project_id,source_repository,source_commit_sha,source_path,dockerfile,build_args,registry_repository,status,deploy_after_push
+           ) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,'QUEUED',$10)
            RETURNING *`,
-          [id, serviceId, row.project_id, sourceRepository, revision, row.source_path, dockerfile, buildArgs, registryRepository],
+          [id, serviceId, row.project_id, sourceRepository, revision, row.source_path, dockerfile, buildArgs, registryRepository, request.body?.deployAfterPush === true],
         );
         await pool.query(
           "INSERT INTO build_events(build_id,kind,status,message) VALUES($1,'STATUS','QUEUED','build queued')",
@@ -152,7 +155,7 @@ export function registerBuildEngineRoutes(
         const result = await pool.query(
           `SELECT id,service_id,project_id,source_repository,source_commit_sha,source_path,dockerfile,build_args,
                   registry_repository,status,worker_id,lease_until,artifact_image_ref,image_id,error,
-                  started_at,completed_at,created_at,updated_at
+                  deploy_after_push,deployment_id,started_at,completed_at,created_at,updated_at
              FROM build_jobs WHERE service_id=$1 ORDER BY created_at DESC LIMIT 100`,
           [serviceId],
         );
@@ -303,6 +306,7 @@ export function registerBuildEngineRoutes(
     "/v0/build-worker/jobs/:buildId/complete",
     async (request, reply) => {
       if (!workerAuthorized(config, request)) return reply.code(401).send({ error: "builder authorization failed" });
+      let dispatchNodeId: string | null = null;
       try {
         const buildId = requireBuildId(request.params.buildId);
         const workerId = requireWorkerId(request.headers["x-rundea-builder-id"]);
@@ -311,27 +315,96 @@ export function registerBuildEngineRoutes(
         if (!digestPattern.test(imageId) || !/@sha256:[0-9a-f]{64}$/.test(artifactImageRef)) {
           throw new Error("immutable build artifact identity is invalid");
         }
-        const owned = await workerJob(pool, buildId, workerId);
-        if (!owned || owned.status !== "BUILDING" || !owned.lease_until || new Date(owned.lease_until).getTime() <= Date.now()) {
-          return reply.code(409).send({ error: "build lease is unavailable" });
+
+        const client = await pool.connect();
+        try {
+          await client.query("BEGIN");
+          const ownedResult = await client.query(
+            `SELECT id,service_id,source_repository,source_commit_sha,registry_repository,status,worker_id,lease_until,
+                    deploy_after_push,deployment_id
+               FROM build_jobs
+              WHERE id=$1
+              FOR UPDATE`,
+            [buildId],
+          );
+          const owned = ownedResult.rows[0];
+          if (!owned || owned.worker_id !== workerId || owned.status !== "BUILDING" || !owned.lease_until || new Date(owned.lease_until).getTime() <= Date.now()) {
+            await client.query("ROLLBACK");
+            return reply.code(409).send({ error: "build lease is unavailable" });
+          }
+          if (artifactImageRef !== `${owned.registry_repository}@${imageId}`) {
+            throw new Error("build artifact repository does not match the claimed job");
+          }
+
+          let deploymentId: string | null = owned.deployment_id ? String(owned.deployment_id) : null;
+          if (owned.deploy_after_push && !deploymentId) {
+            const target = await client.query(
+              `SELECT a.service_id,a.service_name,a.node_id,a.container_port,a.host_port,a.healthcheck_path,a.enabled
+                 FROM service_autodeploys a
+                 JOIN services s ON s.id=a.service_id AND s.status='ACTIVE'
+                 JOIN nodes n ON n.id=a.node_id
+                WHERE a.service_id=$1
+                  AND a.enabled=true
+                  AND n.lifecycle_status='ACTIVE'
+                  AND n.status='ONLINE'
+                FOR SHARE`,
+              [owned.service_id],
+            );
+            if (target.rowCount !== 1) {
+              throw new Error("automatic deploy target is unavailable or offline");
+            }
+            const deployTarget = target.rows[0];
+            deploymentId = randomUUID();
+            await client.query(
+              `INSERT INTO deployments(
+                 id,service_id,service_name,node_id,source_repository,source_ref,source_delivery,dockerfile,build_args,
+                 container_port,host_port,healthcheck_path,status,operation,artifact_image_ref,artifact_source_commit_sha
+               ) VALUES($1,$2,$3,$4,$5,$6,'DIRECT',NULL,'{}'::jsonb,$7,$8,$9,'QUEUED','DEPLOY',$10,$11)`,
+              [
+                deploymentId,
+                owned.service_id,
+                deployTarget.service_name,
+                deployTarget.node_id,
+                owned.source_repository,
+                owned.source_commit_sha,
+                deployTarget.container_port,
+                deployTarget.host_port,
+                deployTarget.healthcheck_path,
+                artifactImageRef,
+                owned.source_commit_sha,
+              ],
+            );
+            await captureDeploymentEnvironment(client, deploymentId, deployTarget.service_name);
+            dispatchNodeId = String(deployTarget.node_id);
+          }
+
+          const updated = await client.query(
+            `UPDATE build_jobs
+                SET status='PUSHED',artifact_image_ref=$3,image_id=$4,deployment_id=COALESCE(deployment_id,$5),
+                    lease_until=NULL,completed_at=now(),updated_at=now()
+              WHERE id=$1 AND worker_id=$2 AND status='BUILDING'
+              RETURNING id,deployment_id`,
+            [buildId, workerId, artifactImageRef, imageId, deploymentId],
+          );
+          if (updated.rowCount !== 1) throw new Error("build completion update was lost");
+          await client.query(
+            "INSERT INTO build_events(build_id,kind,status,message) VALUES($1,'STATUS','PUSHED',$2)",
+            [buildId, deploymentId ? `immutable image pushed; deployment ${deploymentId} queued` : "immutable image pushed to registry"],
+          );
+          await client.query("COMMIT");
+        } catch (error) {
+          await client.query("ROLLBACK").catch(() => undefined);
+          throw error;
+        } finally {
+          client.release();
         }
-        if (artifactImageRef !== `${owned.registry_repository}@${imageId}`) {
-          throw new Error("build artifact repository does not match the claimed job");
+
+        if (dispatchNodeId) {
+          await dispatchQueued(dispatchNodeId);
         }
-        const result = await pool.query(
-          `UPDATE build_jobs SET status='PUSHED',artifact_image_ref=$3,image_id=$4,
-                   lease_until=NULL,completed_at=now(),updated_at=now()
-             WHERE id=$1 AND worker_id=$2 AND status='BUILDING' AND lease_until > now()
-             RETURNING id`,
-          [buildId, workerId, artifactImageRef, imageId],
-        );
-        if (result.rowCount !== 1) return reply.code(409).send({ error: "build lease is unavailable" });
-        await pool.query(
-          "INSERT INTO build_events(build_id,kind,status,message) VALUES($1,'STATUS','PUSHED','immutable image pushed to registry')",
-          [buildId],
-        );
         return reply.code(204).send();
       } catch (error) {
+        request.log.error(error, "build completion rejected");
         return reply.code(400).send({ error: error instanceof Error ? error.message : "build completion rejected" });
       }
     },
