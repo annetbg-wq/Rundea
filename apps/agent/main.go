@@ -39,8 +39,9 @@ type deployCommand struct {
 		Dockerfile string `json:"dockerfile"`
 	} `json:"source"`
 	Artifact *struct {
-		ImageRef        string `json:"imageRef"`
-		SourceCommitSHA string `json:"sourceCommitSha"`
+		ImageRef           string `json:"imageRef"`
+		SourceCommitSHA    string `json:"sourceCommitSha"`
+		RegistryAuthTicket string `json:"registryAuthTicket,omitempty"`
 	} `json:"artifact,omitempty"`
 	Build struct {
 		Args map[string]string `json:"args"`
@@ -299,8 +300,21 @@ func runDeployment(cfg config, w *writer, cmd deployCommand) {
 			healthcheckPath = "/" + healthcheckPath
 		}
 		w.log(cmd.DeploymentID, "system", "using immutable prebuilt artifact "+cmd.Artifact.ImageRef)
-		var err error
-		imageID, err = pullAndRetainPrebuiltImage(ctx, w, cmd.DeploymentID, cmd.Artifact.ImageRef, imageTag)
+		credentials, err := fetchRegistryPullCredentials(
+			ctx,
+			cfg,
+			cmd.DeploymentID,
+			cmd.Artifact.RegistryAuthTicket,
+			cmd.Artifact.ImageRef,
+		)
+		if err != nil {
+			fail(err)
+			return
+		}
+		if credentials != nil {
+			w.log(cmd.DeploymentID, "system", "using one-time brokered registry pull credentials")
+		}
+		imageID, err = pullAndRetainPrebuiltImage(ctx, w, cmd.DeploymentID, cmd.Artifact.ImageRef, imageTag, credentials)
 		if err != nil {
 			fail(err)
 			return
