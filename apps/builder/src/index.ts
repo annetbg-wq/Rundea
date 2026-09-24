@@ -3,6 +3,7 @@ import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { resolveBuilderConfig } from "./config";
+import { prepareBuildDockerfile } from "./build-plan";
 
 type Job = {
   id: string;
@@ -91,13 +92,13 @@ function sortedBuildArgs(args: Record<string, string>): string[] {
 async function runBuild(job: Job, sourceDir: string) {
   const contextDir = join(sourceDir, validateSourcePath(job.source_path));
   const tag = `${job.registry_repository}:build-${job.id.replaceAll("-", "")}`;
-  const dockerfile = job.dockerfile ?? "Dockerfile";
+  const plan = await prepareBuildDockerfile(contextDir, job.dockerfile);
   const buildArgs = [
     "build",
     "--memory", String(config.memoryBytes),
     "--cpu-period", String(config.cpuPeriod),
     "--cpu-quota", String(config.cpuQuota),
-    "--file", dockerfile,
+    "--file", plan.dockerfile,
     "--tag", tag,
     ...sortedBuildArgs(job.build_args),
     ".",

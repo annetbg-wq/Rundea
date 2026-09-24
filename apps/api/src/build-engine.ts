@@ -9,6 +9,7 @@ import { createGitHubArchiveProviderFromEnv, type GitHubArchiveProvider } from "
 type ControlPreHandler = (request: FastifyRequest, reply: FastifyReply) => Promise<void>;
 type DispatchQueued = (nodeId: string) => Promise<void>;
 type ArchiveProvider = Pick<GitHubArchiveProvider, "fetchArchive">;
+type Queryable = Pick<Pool, "query">;
 
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const fullCommitPattern = /^[0-9a-f]{40}$/;
@@ -85,6 +86,49 @@ function workerAuthorized(config: BuildEngineConfig, request: FastifyRequest): b
   return Boolean(token && config.builderTokenHash && equalTokenHash(hashToken(token), config.builderTokenHash));
 }
 
+export async function enqueueBuildJob(
+  db: Queryable,
+  config: BuildEngineConfig,
+  input: {
+    serviceId: string;
+    revisionSha?: string;
+    dockerfile?: string | null;
+    buildArgs?: unknown;
+    deployAfterPush?: boolean;
+  },
+) {
+  if (!config.registryPrefix) throw new Error("Build Engine registry is not configured");
+  const serviceId = requireServiceId(input.serviceId);
+  const service = await db.query(
+    `SELECT s.id,s.project_id,s.status,s.name,c.repository_full_name,c.revision_sha,c.source_path,c.dockerfile
+       FROM services s
+       JOIN service_source_configs c ON c.service_id=s.id
+      WHERE s.id=$1 AND s.status='ACTIVE'`,
+    [serviceId],
+  );
+  if (service.rowCount !== 1) throw new Error("active service source config is unavailable");
+  const row = service.rows[0];
+  const revision = input.revisionSha?.trim().toLowerCase() || String(row.revision_sha);
+  if (!fullCommitPattern.test(revision)) throw new Error("revisionSha must be an exact 40-character Git commit SHA");
+  const dockerfile = input.dockerfile === undefined ? (row.dockerfile ?? null) : validateDockerfile(input.dockerfile);
+  const buildArgs = normalizeBuildArgs(input.buildArgs);
+  const id = randomUUID();
+  const registryRepository = buildRepository(config.registryPrefix, serviceId);
+  const sourceRepository = `https://github.com/${row.repository_full_name}.git`;
+  const inserted = await db.query(
+    `INSERT INTO build_jobs(
+       id,service_id,project_id,source_repository,source_commit_sha,source_path,dockerfile,build_args,registry_repository,status,deploy_after_push
+     ) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,'QUEUED',$10)
+     RETURNING *`,
+    [id, serviceId, row.project_id, sourceRepository, revision, row.source_path, dockerfile, buildArgs, registryRepository, input.deployAfterPush === true],
+  );
+  await db.query(
+    "INSERT INTO build_events(build_id,kind,status,message) VALUES($1,'STATUS','QUEUED','build queued')",
+    [id],
+  );
+  return inserted.rows[0];
+}
+
 async function workerJob(pool: Pool, buildId: string, workerId: string) {
   const result = await pool.query(
     `SELECT id,service_id,project_id,source_repository,source_commit_sha,source_path,dockerfile,build_args,
@@ -110,38 +154,17 @@ export function registerBuildEngineRoutes(
     { preHandler: requireControl },
     async (request, reply) => {
       try {
-        if (!config.registryPrefix) return reply.code(503).send({ error: "Build Engine registry is not configured" });
-        const serviceId = requireServiceId(request.params.serviceId);
-        const service = await pool.query(
-          `SELECT s.id,s.project_id,s.status,s.name,c.repository_full_name,c.revision_sha,c.source_path,c.dockerfile
-             FROM services s
-             JOIN service_source_configs c ON c.service_id=s.id
-            WHERE s.id=$1 AND s.status='ACTIVE'`,
-          [serviceId],
-        );
-        if (service.rowCount !== 1) return reply.code(404).send({ error: "active service source config is unavailable" });
-        const row = service.rows[0];
-        const revision = request.body?.revisionSha?.trim().toLowerCase() || String(row.revision_sha);
-        if (!fullCommitPattern.test(revision)) throw new Error("revisionSha must be an exact 40-character Git commit SHA");
-        const dockerfile = request.body?.dockerfile === undefined ? (row.dockerfile ?? null) : validateDockerfile(request.body.dockerfile);
-        const buildArgs = normalizeBuildArgs(request.body?.buildArgs);
-        const id = randomUUID();
-        const registryRepository = buildRepository(config.registryPrefix, serviceId);
-        const sourceRepository = `https://github.com/${row.repository_full_name}.git`;
-        const inserted = await pool.query(
-          `INSERT INTO build_jobs(
-             id,service_id,project_id,source_repository,source_commit_sha,source_path,dockerfile,build_args,registry_repository,status,deploy_after_push
-           ) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,'QUEUED',$10)
-           RETURNING *`,
-          [id, serviceId, row.project_id, sourceRepository, revision, row.source_path, dockerfile, buildArgs, registryRepository, request.body?.deployAfterPush === true],
-        );
-        await pool.query(
-          "INSERT INTO build_events(build_id,kind,status,message) VALUES($1,'STATUS','QUEUED','build queued')",
-          [id],
-        );
-        return reply.code(201).send({ build: inserted.rows[0] });
+        const build = await enqueueBuildJob(pool, config, {
+          serviceId: request.params.serviceId,
+          revisionSha: request.body?.revisionSha,
+          dockerfile: request.body?.dockerfile,
+          buildArgs: request.body?.buildArgs,
+          deployAfterPush: request.body?.deployAfterPush,
+        });
+        return reply.code(201).send({ build });
       } catch (error) {
-        return reply.code(400).send({ error: error instanceof Error ? error.message : "build could not be queued" });
+        const message = error instanceof Error ? error.message : "build could not be queued";
+        return reply.code(message.includes("registry is not configured") ? 503 : message.includes("source config is unavailable") ? 404 : 400).send({ error: message });
       }
     },
   );

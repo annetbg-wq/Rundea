@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { Pool } from "pg";
 import { normalizeBuildArgs } from "./build-args";
+import { enqueueBuildJob, resolveBuildEngineConfig, type BuildEngineConfig } from "./build-engine";
 import { captureDeploymentEnvironment } from "./service-variables";
 
 type RequireControl = (request: FastifyRequest, reply: FastifyReply) => Promise<void>;
@@ -122,9 +123,9 @@ async function duplicateResponse(
   pool: Pool,
   deliveryId: string,
   bodySha256: string,
-): Promise<{ ok: true; duplicate: true; status: string; deploymentCount: number; originalDeliveryId?: string }> {
+): Promise<{ ok: true; duplicate: true; status: string; deploymentCount: number; buildCount: number; originalDeliveryId?: string }> {
   const existing = await pool.query(
-    `SELECT delivery_id,status,deployment_count
+    `SELECT delivery_id,status,deployment_count,build_count
        FROM github_webhook_deliveries
       WHERE delivery_id=$1 OR body_sha256=$2
       ORDER BY (delivery_id=$1) DESC,received_at ASC
@@ -136,6 +137,7 @@ async function duplicateResponse(
     duplicate: true,
     status: existing.rows[0]?.status ?? "UNKNOWN",
     deploymentCount: Number(existing.rows[0]?.deployment_count ?? 0),
+    buildCount: Number(existing.rows[0]?.build_count ?? 0),
     ...(existing.rows[0]?.delivery_id ? { originalDeliveryId: String(existing.rows[0].delivery_id) } : {}),
   };
 }
@@ -146,6 +148,7 @@ export function registerGitHubAutodeployRoutes(
   requireControl: RequireControl,
   dispatchQueued: DispatchQueued,
   webhookSecret: string | undefined,
+  buildConfig: BuildEngineConfig = resolveBuildEngineConfig(),
 ): void {
   const migrationUrl = new URL("../migrations/006_github_autodeploy.sql", import.meta.url);
   const schemaReady = readFile(migrationUrl, "utf8").then((sql) => pool.query(sql)).then(() => undefined);
@@ -252,12 +255,18 @@ export function registerGitHubAutodeployRoutes(
     await schemaReady;
     const result = await pool.query(
       `SELECT d.delivery_id,d.event_name,d.repository_full_name,d.source_branch,d.after_sha,d.status,
-              d.deployment_count,d.received_at,d.completed_at,
-              COALESCE(json_agg(json_build_object('serviceName',m.service_name,'deploymentId',m.deployment_id))
-                       FILTER (WHERE m.deployment_id IS NOT NULL),'[]'::json) AS deployments
+              d.deployment_count,d.build_count,d.received_at,d.completed_at,
+              COALESCE((
+                SELECT json_agg(json_build_object('serviceName',m.service_name,'deploymentId',m.deployment_id))
+                  FROM github_webhook_deployments m
+                 WHERE m.delivery_id=d.delivery_id
+              ),'[]'::json) AS deployments,
+              COALESCE((
+                SELECT json_agg(json_build_object('serviceId',b.service_id,'buildId',b.build_id))
+                  FROM github_webhook_builds b
+                 WHERE b.delivery_id=d.delivery_id
+              ),'[]'::json) AS builds
          FROM github_webhook_deliveries d
-         LEFT JOIN github_webhook_deployments m ON m.delivery_id=d.delivery_id
-        GROUP BY d.delivery_id
         ORDER BY d.received_at DESC
         LIMIT 100`,
     );
@@ -304,8 +313,13 @@ export function registerGitHubAutodeployRoutes(
         return reply.code(400).send({ error: error instanceof Error ? error.message : "invalid push payload" });
       }
 
+      if (!buildConfig.registryPrefix) {
+        return reply.code(503).send({ error: "Build Engine registry is not configured" });
+      }
+
       const client = await pool.connect();
-      const created: Array<{ serviceName: string; deploymentId: string; nodeId: string }> = [];
+      const createdBuilds: Array<{ serviceId: string; serviceName: string; buildId: string }> = [];
+      const legacyDeployments: Array<{ serviceName: string; deploymentId: string; nodeId: string }> = [];
       try {
         await client.query("BEGIN");
         const inserted = await client.query(
@@ -328,18 +342,47 @@ export function registerGitHubAutodeployRoutes(
             [deliveryId],
           );
           await client.query("COMMIT");
-          return reply.code(202).send({ ok: true, ignored: true, reason: "branch deletion", deployments: [] });
+          return reply.code(202).send({ ok: true, ignored: true, reason: "branch deletion", builds: [], deployments: [] });
         }
 
         const configs = await client.query(
-          `SELECT service_name,node_id,source_repository,dockerfile,build_args,container_port,host_port,healthcheck_path
-             FROM service_autodeploys
-            WHERE enabled=true AND repository_full_name=$1 AND source_branch=$2
-            ORDER BY service_name ASC
-            FOR SHARE`,
+          `SELECT a.service_id,a.service_name,a.node_id,a.source_repository,a.dockerfile,a.build_args,
+                  a.container_port,a.host_port,a.healthcheck_path,
+                  c.service_id AS source_config_service_id
+             FROM service_autodeploys a
+             LEFT JOIN service_source_configs c
+               ON c.service_id=a.service_id
+              AND lower(c.repository_full_name)=a.repository_full_name
+              AND c.selected_branch=a.source_branch
+            WHERE a.enabled=true AND a.repository_full_name=$1 AND a.source_branch=$2
+            ORDER BY a.service_name ASC
+            FOR SHARE OF a`,
           [repositoryFullName, branch],
         );
-        for (const config of configs.rows) {
+
+        for (const configRow of configs.rows) {
+          if (configRow.source_config_service_id) {
+            const build = await enqueueBuildJob(client, buildConfig, {
+              serviceId: String(configRow.service_id),
+              revisionSha: afterSha,
+              dockerfile: configRow.dockerfile ?? undefined,
+              buildArgs: configRow.build_args ?? {},
+              deployAfterPush: true,
+            });
+            await client.query(
+              "INSERT INTO github_webhook_builds(delivery_id,service_id,build_id) VALUES($1,$2,$3)",
+              [deliveryId, configRow.service_id, build.id],
+            );
+            createdBuilds.push({
+              serviceId: String(configRow.service_id),
+              serviceName: String(configRow.service_name),
+              buildId: String(build.id),
+            });
+            continue;
+          }
+
+          // Hidden/prototype compatibility only. Canonical services always have
+          // service_source_configs and therefore use Build Engine above.
           const deploymentId = randomUUID();
           await client.query(
             `INSERT INTO deployments(
@@ -348,47 +391,50 @@ export function registerGitHubAutodeployRoutes(
              ) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'QUEUED','DEPLOY')`,
             [
               deploymentId,
-              config.service_name,
-              config.node_id,
-              config.source_repository,
+              configRow.service_name,
+              configRow.node_id,
+              configRow.source_repository,
               afterSha,
-              config.dockerfile,
-              config.build_args ?? {},
-              config.container_port,
-              config.host_port,
-              config.healthcheck_path,
+              configRow.dockerfile,
+              configRow.build_args ?? {},
+              configRow.container_port,
+              configRow.host_port,
+              configRow.healthcheck_path,
             ],
           );
-          await captureDeploymentEnvironment(client, deploymentId, config.service_name);
+          await captureDeploymentEnvironment(client, deploymentId, configRow.service_name);
           await client.query(
             "INSERT INTO github_webhook_deployments(delivery_id,service_name,deployment_id) VALUES($1,$2,$3)",
-            [deliveryId, config.service_name, deploymentId],
+            [deliveryId, configRow.service_name, deploymentId],
           );
-          created.push({ serviceName: config.service_name, deploymentId, nodeId: config.node_id });
+          legacyDeployments.push({ serviceName: configRow.service_name, deploymentId, nodeId: configRow.node_id });
         }
 
+        const triggered = createdBuilds.length + legacyDeployments.length;
         await client.query(
           `UPDATE github_webhook_deliveries
-              SET status=$2,deployment_count=$3,completed_at=now()
+              SET status=$2,deployment_count=$3,build_count=$4,completed_at=now()
             WHERE delivery_id=$1`,
-          [deliveryId, created.length > 0 ? "TRIGGERED" : "IGNORED", created.length],
+          [deliveryId, triggered > 0 ? "TRIGGERED" : "IGNORED", legacyDeployments.length, createdBuilds.length],
         );
         await client.query("COMMIT");
       } catch (error) {
         await client.query("ROLLBACK");
         request.log.error(error, "GitHub push autodeploy transaction failed");
-        return reply.code(500).send({ error: "GitHub push could not create deployment" });
+        return reply.code(500).send({ error: "GitHub push could not enqueue build" });
       } finally {
         client.release();
       }
 
-      for (const nodeId of new Set(created.map((item) => item.nodeId))) {
-        await dispatchQueued(nodeId).catch((error) => request.log.error(error, "failed to dispatch GitHub-triggered deployment"));
+      for (const nodeId of new Set(legacyDeployments.map((item) => item.nodeId))) {
+        await dispatchQueued(nodeId).catch((error) => request.log.error(error, "failed to dispatch legacy GitHub-triggered deployment"));
       }
+
       return reply.code(202).send({
         ok: true,
-        status: created.length > 0 ? "TRIGGERED" : "IGNORED",
-        deployments: created.map(({ serviceName, deploymentId }) => ({ serviceName, deploymentId })),
+        status: createdBuilds.length + legacyDeployments.length > 0 ? "TRIGGERED" : "IGNORED",
+        builds: createdBuilds,
+        deployments: legacyDeployments.map(({ serviceName, deploymentId }) => ({ serviceName, deploymentId })),
       });
     });
   });

@@ -70,7 +70,8 @@ export function registerServiceScopedRoutes(
         const result = await pool.query(
           `SELECT d.id,d.service_id,d.node_id,d.source_repository,d.source_ref,d.source_delivery,d.dockerfile,d.build_args,
                   d.container_port,d.healthcheck_path,d.status,d.runtime_container_id,d.operation,d.rollback_target_id,
-                  d.environment_snapshot_at,d.source_commit_sha,d.image_id,d.created_at,d.updated_at
+                  d.environment_snapshot_at,d.source_commit_sha,d.image_id,d.artifact_image_ref,d.artifact_source_commit_sha,
+                  d.created_at,d.updated_at
              FROM deployments d
             WHERE d.service_id=$1
             ORDER BY d.created_at DESC,d.id DESC
