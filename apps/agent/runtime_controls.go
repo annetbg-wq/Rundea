@@ -22,6 +22,11 @@ type rollbackCommand struct {
 	TargetDeploymentID string `json:"targetDeploymentId"`
 	ExpectedImageID    string `json:"expectedImageId"`
 	ServiceName        string `json:"serviceName"`
+	Artifact *struct {
+		ImageRef           string `json:"imageRef"`
+		SourceCommitSHA    string `json:"sourceCommitSha"`
+		RegistryAuthTicket string `json:"registryAuthTicket,omitempty"`
+	} `json:"artifact,omitempty"`
 	Runtime            struct {
 		ContainerName string            `json:"containerName"`
 		ContainerPort int               `json:"containerPort"`
@@ -85,6 +90,14 @@ func validateRollbackCommand(cmd rollbackCommand) error {
 	if !dockerImageIDPattern.MatchString(cmd.ExpectedImageID) {
 		return errors.New("rollback command contains invalid expected image identity")
 	}
+	if cmd.Artifact != nil {
+		if err := validateImmutableImageRef(cmd.Artifact.ImageRef); err != nil {
+			return err
+		}
+		if !isFullGitCommit(strings.ToLower(strings.TrimSpace(cmd.Artifact.SourceCommitSHA))) {
+			return errors.New("registry-backed rollback requires an exact source commit SHA")
+		}
+	}
 	if cmd.Runtime.ContainerName == "" || cmd.Runtime.ContainerPort < 1 || cmd.Runtime.ContainerPort > 65535 || cmd.Runtime.HostPort < 1 || cmd.Runtime.HostPort > 65535 {
 		return errors.New("rollback command contains invalid runtime fields")
 	}
@@ -112,20 +125,47 @@ func runRollback(cfg config, w *writer, cmd rollbackCommand) {
 	}
 
 	targetImageTag := "rundea/" + strings.ToLower(cmd.TargetDeploymentID) + ":build"
-	actualImageID, err := inspectImageID(ctx, targetImageTag)
-	if err != nil {
-		fail(err)
-		return
-	}
-	if actualImageID != cmd.ExpectedImageID {
-		fail(fmt.Errorf("retained rollback artifact identity mismatch: expected %s, found %s", cmd.ExpectedImageID, actualImageID))
-		return
-	}
 	rollbackImageTag := "rundea/" + strings.ToLower(cmd.DeploymentID) + ":build"
-	if out, err := exec.CommandContext(ctx, "docker", "image", "tag", targetImageTag, rollbackImageTag).CombinedOutput(); err != nil {
-		fail(fmt.Errorf("retain rollback artifact under new revision: %w: %s", err, strings.TrimSpace(string(out))))
-		return
+
+	actualImageID, localErr := inspectImageID(ctx, targetImageTag)
+	if localErr == nil {
+		if actualImageID != cmd.ExpectedImageID {
+			fail(fmt.Errorf("retained rollback artifact identity mismatch: expected %s, found %s", cmd.ExpectedImageID, actualImageID))
+			return
+		}
+		if out, err := exec.CommandContext(ctx, "docker", "image", "tag", targetImageTag, rollbackImageTag).CombinedOutput(); err != nil {
+			fail(fmt.Errorf("retain rollback artifact under new revision: %w: %s", err, strings.TrimSpace(string(out))))
+			return
+		}
+		w.log(cmd.DeploymentID, "system", "using node-local retained rollback artifact")
+	} else {
+		if cmd.Artifact == nil {
+			fail(fmt.Errorf("retained rollback artifact is unavailable locally and no registry artifact was provided: %w", localErr))
+			return
+		}
+		credentials, err := fetchRegistryPullCredentials(
+			ctx,
+			cfg,
+			cmd.DeploymentID,
+			cmd.Artifact.RegistryAuthTicket,
+			cmd.Artifact.ImageRef,
+		)
+		if err != nil {
+			fail(err)
+			return
+		}
+		w.log(cmd.DeploymentID, "system", "pulling immutable rollback artifact from registry "+cmd.Artifact.ImageRef)
+		pulledID, err := pullAndRetainPrebuiltImage(ctx, w, cmd.DeploymentID, cmd.Artifact.ImageRef, rollbackImageTag, credentials)
+		if err != nil {
+			fail(err)
+			return
+		}
+		if pulledID != cmd.ExpectedImageID {
+			fail(fmt.Errorf("registry rollback artifact identity mismatch: expected %s, pulled %s", cmd.ExpectedImageID, pulledID))
+			return
+		}
 	}
+
 	if retainedID, err := inspectImageID(ctx, rollbackImageTag); err != nil || retainedID != cmd.ExpectedImageID {
 		if err != nil {
 			fail(err)
