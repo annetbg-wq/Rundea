@@ -188,6 +188,40 @@ exec "$RUNDEA_ACCEPTANCE_REAL_DOCKER" "$@"
   deploymentId = pushed.deployment_id;
   if (!artifactRef || !/@sha256:[0-9a-f]{64}$/.test(artifactRef)) throw new Error(`immutable artifact missing: ${artifactRef}`);
 
+  const completionBody = JSON.stringify({
+    artifactImageRef: artifactRef,
+    imageId: artifactRef.slice(artifactRef.lastIndexOf("@") + 1),
+  });
+  const retryCompletion = await fetch(`${api}/v0/build-worker/jobs/${queued.build.id}/complete`, {
+    method:"POST",
+    headers:{
+      "authorization":`Bearer ${builderToken}`,
+      "x-rundea-builder-id":`acceptance-${suffix}`,
+      "content-type":"application/json",
+    },
+    body:completionBody,
+  });
+  if (retryCompletion.status !== 204) {
+    throw new Error(`successful build completion retry was not idempotent: ${retryCompletion.status} ${await retryCompletion.text()}`);
+  }
+
+  const wrongDigest = "sha256:" + "f".repeat(64);
+  const mismatchCompletion = await fetch(`${api}/v0/build-worker/jobs/${queued.build.id}/complete`, {
+    method:"POST",
+    headers:{
+      "authorization":`Bearer ${builderToken}`,
+      "x-rundea-builder-id":`acceptance-${suffix}`,
+      "content-type":"application/json",
+    },
+    body:JSON.stringify({
+      artifactImageRef:`${pushed.registry_repository}@${wrongDigest}`,
+      imageId:wrongDigest,
+    }),
+  });
+  if (mismatchCompletion.ok) {
+    throw new Error("completed build accepted a mismatched artifact on retry");
+  }
+
   const ready = await poll("handoff deployment READY", async () => {
     const rows = await request("/v0/deployments");
     const row = rows.find((item) => item.id === deploymentId);
@@ -231,6 +265,8 @@ exec "$RUNDEA_ACCEPTANCE_REAL_DOCKER" "$@"
       "registry-push",
       "immutable-digest-persisted",
       "automatic-build-to-deploy-handoff",
+      "idempotent-complete-retry",
+      "mismatched-complete-retry-rejected",
       "production-agent-pull-only",
       "runtime-ready",
       "source-provenance-preserved",
