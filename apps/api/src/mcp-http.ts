@@ -264,13 +264,14 @@ export function registerReadonlyMcpHttp(
   app: FastifyInstance,
   pool: Pool,
   config: ReadonlyMcpHttpConfig,
-  controlToken: string,
+  controlToken?: string,
 ): ReadonlyMcpHttpRegistration {
   const expectedStaticTokenHash = config.authMode === "static" ? hashToken(config.token) : null;
   const oauthVerifier = config.authMode === "oauth" ? createMcpOAuthTokenVerifier(config.oauth) : null;
   const actorContext = new OperationActorContext();
   const dependencies = createPostgresReadonlyMcpDependencies(pool, () => actorContext.current());
-  const control = config.authMode === "static" ? { controlToken } : undefined;
+  if (config.authMode === "static" && !controlToken) throw new Error("RUNDEA_CONTROL_TOKEN is required for static MCP operator tools");
+  const control = config.authMode === "static" ? { controlToken: controlToken! } : undefined;
   const handler = createMcpHandler(() => createReadonlyMcpServer(dependencies, control), {
     onerror: (error) => app.log.error({ err: error }, "MCP protocol handler failed"),
   });
