@@ -154,6 +154,37 @@ export function registerStaticControlMcpTools(server: McpServer, dependencies: M
   );
 
   server.registerTool(
+    "rundea_workspace_nodes_list",
+    {
+      title: "List workspace nodes",
+      description: "List active nodes assigned to one Rundea workspace.",
+      inputSchema: z.strictObject({ workspaceId: uuid }),
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    },
+    async ({ workspaceId }) => request(
+      dependencies,
+      "GET",
+      `/v0/workspaces/${encodeURIComponent(workspaceId)}/nodes`,
+    ),
+  );
+
+  server.registerTool(
+    "rundea_workspace_node_adopt",
+    {
+      title: "Adopt legacy node into workspace",
+      description: "Move one empty unscoped legacy Rundea node into a canonical workspace without rotating its Agent credential. The Control Plane refuses adoption when workloads or stateful resources exist.",
+      inputSchema: z.strictObject({ workspaceId: uuid, nodeId: uuid }),
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+    },
+    async ({ workspaceId, nodeId }) => request(
+      dependencies,
+      "POST",
+      `/v0/workspaces/${encodeURIComponent(workspaceId)}/nodes/${encodeURIComponent(nodeId)}/adopt`,
+      {},
+    ),
+  );
+
+  server.registerTool(
     "rundea_service_variables_read",
     {
       title: "Read service variables",
@@ -188,6 +219,41 @@ export function registerStaticControlMcpTools(server: McpServer, dependencies: M
       "PUT",
       `/v0/services/${encodeURIComponent(serviceId)}/config/variables`,
       { variables },
+    ),
+  );
+
+  server.registerTool(
+    "rundea_service_volumes_list",
+    {
+      title: "List service volumes",
+      description: "List persistent volumes configured for one canonical service.",
+      inputSchema: z.strictObject({ serviceId: uuid }),
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    },
+    async ({ serviceId }) => request(
+      dependencies,
+      "GET",
+      `/v0/services/${encodeURIComponent(serviceId)}/volumes`,
+    ),
+  );
+
+  server.registerTool(
+    "rundea_service_volume_create",
+    {
+      title: "Create persistent service volume",
+      description: "Create a persistent Docker volume mount for one canonical service. The volume becomes node-bound when the service is deployed.",
+      inputSchema: z.strictObject({
+        serviceId: uuid,
+        name: z.string().regex(/^[a-z][a-z0-9-]{0,62}$/),
+        mountPath: z.string().min(2).max(512),
+      }),
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+    },
+    async ({ serviceId, name, mountPath }) => request(
+      dependencies,
+      "POST",
+      `/v0/services/${encodeURIComponent(serviceId)}/volumes`,
+      { name, mountPath },
     ),
   );
 
