@@ -19,6 +19,7 @@ import {
 } from "./mcp-oauth";
 import { OperationActorContext, staticTokenOperationActor, type OperationActor } from "./operation-actor";
 import type { OperationExecutionResult } from "./operation-execution";
+import { registerStaticControlMcpTools, type McpControlHttpDependencies } from "./mcp-control-tools";
 
 const maxMcpTokenLength = 512;
 const minMcpTokenLength = 32;
@@ -158,12 +159,17 @@ function safeToolResult(result: OperationExecutionResult<unknown>) {
   };
 }
 
-export function createReadonlyMcpServer(dependencies: McpReadonlyDependencies): McpServer {
+export function createReadonlyMcpServer(
+  dependencies: McpReadonlyDependencies,
+  control?: McpControlHttpDependencies,
+): McpServer {
   const server = new McpServer({
     name: "rundea",
     title: "Rundea",
-    version: "0.1.0",
-    description: "Read-only diagnostic access to the Rundea infrastructure control plane.",
+    version: control ? "0.2.0" : "0.1.0",
+    description: control
+      ? "Operator access to the Rundea infrastructure control plane. Mutating tools are available only with the dedicated static MCP credential."
+      : "Read-only diagnostic access to the Rundea infrastructure control plane.",
   });
 
   server.registerTool(
@@ -201,11 +207,16 @@ export function createReadonlyMcpServer(dependencies: McpReadonlyDependencies): 
     async (input) => safeToolResult(await executeReadonlyMcpTool(dependencies, "rundea_node_qualifications_read", input)),
   );
 
+  if (control) registerStaticControlMcpTools(server, control);
+
   return server;
 }
 
-export function createReadonlyMcpHandler(dependencies: McpReadonlyDependencies) {
-  return createMcpHandler(() => createReadonlyMcpServer(dependencies), {
+export function createReadonlyMcpHandler(
+  dependencies: McpReadonlyDependencies,
+  control?: McpControlHttpDependencies,
+) {
+  return createMcpHandler(() => createReadonlyMcpServer(dependencies, control), {
     onerror: () => undefined,
   });
 }
@@ -253,12 +264,15 @@ export function registerReadonlyMcpHttp(
   app: FastifyInstance,
   pool: Pool,
   config: ReadonlyMcpHttpConfig,
+  controlToken?: string,
 ): ReadonlyMcpHttpRegistration {
   const expectedStaticTokenHash = config.authMode === "static" ? hashToken(config.token) : null;
   const oauthVerifier = config.authMode === "oauth" ? createMcpOAuthTokenVerifier(config.oauth) : null;
   const actorContext = new OperationActorContext();
   const dependencies = createPostgresReadonlyMcpDependencies(pool, () => actorContext.current());
-  const handler = createMcpHandler(() => createReadonlyMcpServer(dependencies), {
+  if (config.authMode === "static" && !controlToken) throw new Error("RUNDEA_CONTROL_TOKEN is required for static MCP operator tools");
+  const control = config.authMode === "static" ? { controlToken: controlToken! } : undefined;
+  const handler = createMcpHandler(() => createReadonlyMcpServer(dependencies, control), {
     onerror: (error) => app.log.error({ err: error }, "MCP protocol handler failed"),
   });
   const nodeHandler = toNodeHandler(handler, {

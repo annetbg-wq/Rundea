@@ -279,6 +279,85 @@ export function registerWorkspaceNodeRoutes(
     },
   );
 
+  app.post<{ Params: { workspaceId: string; nodeId: string } }>(
+    "/v0/workspaces/:workspaceId/nodes/:nodeId/adopt",
+    { preHandler: requireControl },
+    async (request, reply) => {
+      const client = await pool.connect();
+      try {
+        const workspaceId = requireUuid(request.params.workspaceId, "workspaceId");
+        const nodeId = requireUuid(request.params.nodeId, "nodeId");
+        if (workspaceId === internalLegacyWorkspaceId) return reply.code(404).send({ error: "workspace is unavailable" });
+
+        await client.query("BEGIN");
+        const workspace = await client.query(
+          "SELECT id FROM workspaces WHERE id=$1 AND id<>$2 FOR SHARE",
+          [workspaceId, internalLegacyWorkspaceId],
+        );
+        if (workspace.rowCount !== 1) {
+          await client.query("ROLLBACK");
+          return reply.code(404).send({ error: "workspace is unavailable" });
+        }
+
+        const node = await client.query(
+          `SELECT n.id,n.workspace_id,n.name,n.status,n.lifecycle_status,n.last_seen_at,n.agent_version,n.agent_build_sha,
+                  n.agent_capabilities,n.public_addresses,n.compatibility_error,n.agent_connected_at,n.archived_at,n.created_at
+             FROM nodes n
+            WHERE n.id=$1
+            FOR UPDATE`,
+          [nodeId],
+        );
+        if (node.rowCount !== 1) {
+          await client.query("ROLLBACK");
+          return reply.code(404).send({ error: "node is unavailable" });
+        }
+        const current = node.rows[0];
+        if (current.workspace_id !== internalLegacyWorkspaceId) {
+          await client.query("ROLLBACK");
+          return reply.code(409).send({ error: "only an unscoped legacy node can be adopted into a workspace" });
+        }
+        if (current.lifecycle_status !== "ACTIVE") {
+          await client.query("ROLLBACK");
+          return reply.code(409).send({ error: "node must be ACTIVE before workspace adoption" });
+        }
+
+        const blockers = await client.query(
+          `SELECT
+             EXISTS(SELECT 1 FROM deployments d WHERE d.node_id=$1 AND d.status IN ('QUEUED','BUILDING','DEPLOYING','HEALTHCHECK','READY')) AS deployment,
+             EXISTS(SELECT 1 FROM service_domains d WHERE d.node_id=$1 AND d.status<>'DELETING') AS domain,
+             EXISTS(SELECT 1 FROM service_volumes v WHERE v.node_id=$1) AS volume,
+             EXISTS(SELECT 1 FROM project_redis_addons r WHERE r.node_id=$1) AS redis`,
+          [nodeId],
+        );
+        const blocked = blockers.rows[0];
+        if (blocked.deployment || blocked.domain || blocked.volume || blocked.redis) {
+          await client.query("ROLLBACK");
+          return reply.code(409).send({
+            error: "legacy node adoption requires zero active/READY deployments, active domains, persistent volumes and managed Redis addons",
+          });
+        }
+
+        const updated = await client.query(
+          `UPDATE nodes
+              SET workspace_id=$2
+            WHERE id=$1 AND workspace_id=$3
+          RETURNING id,workspace_id,name,status,lifecycle_status,last_seen_at,agent_version,agent_build_sha,
+                    agent_capabilities,public_addresses,compatibility_error,agent_connected_at,archived_at,created_at`,
+          [nodeId, workspaceId, internalLegacyWorkspaceId],
+        );
+        if (updated.rowCount !== 1) throw new Error("node workspace adoption lost ownership");
+        await client.query("COMMIT");
+        return reply.send(nodeView(updated.rows[0]));
+      } catch (error) {
+        await client.query("ROLLBACK").catch(() => undefined);
+        request.log.error(error, "legacy node workspace adoption failed");
+        return reply.code(400).send({ error: error instanceof Error ? error.message : "node could not be adopted" });
+      } finally {
+        client.release();
+      }
+    },
+  );
+
   app.post<{ Params: { workspaceId: string }; Body: { name?: string } }>(
     "/v0/workspaces/:workspaceId/nodes",
     { preHandler: requireControl },

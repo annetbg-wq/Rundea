@@ -558,7 +558,7 @@ registerSourceBrokerRoutes(app, pool);
 registerRegistryPullBrokerRoutes(app, pool, registryPullConfig);
 registerBuildEngineRoutes(app, pool, requireControl, dispatchQueued, resolveBuildEngineConfig());
 registerRuntimeMetricRoutes(app, pool, requireControl);
-const mcpHttp = mcpHttpConfig ? registerReadonlyMcpHttp(app, pool, mcpHttpConfig) : null;
+const mcpHttp = mcpHttpConfig ? registerReadonlyMcpHttp(app, pool, mcpHttpConfig, controlToken) : null;
 
 app.put<{ Params: { serviceName: string }; Body: { variables?: ServiceVariableInput[] } }>(
   "/v0/services/:serviceName/variables",

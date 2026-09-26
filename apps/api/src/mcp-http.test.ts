@@ -207,3 +207,47 @@ test("strict MCP input schema rejects unexpected fields before a typed operation
     await handler.close();
   }
 });
+
+
+test("static operator MCP exposes bounded control-plane tools without changing the read-only default", async () => {
+  const { deps } = dependencies();
+  const seen: Array<{ url: string; method: string; body?: unknown }> = [];
+  const fetchImpl = async (input: string | URL | Request, init?: RequestInit) => {
+    const url = String(input);
+    const body = typeof init?.body === "string" ? JSON.parse(init.body) : undefined;
+    seen.push({ url, method: init?.method ?? "GET", ...(body === undefined ? {} : { body }) });
+    return new Response(JSON.stringify({ workspaces: [] }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  };
+  const handler = createReadonlyMcpHandler(deps, {
+    controlToken,
+    port: 4000,
+    fetchImpl: fetchImpl as typeof fetch,
+  });
+  try {
+    const listed = await handler.fetch(modernRequest("tools/list"));
+    assert.equal(listed.status, 200);
+    const listedBody = await json(listed);
+    const names = (listedBody.result?.tools as Array<{ name: string }>).map((tool) => tool.name);
+    assert.equal(names.includes("rundea_workspace_create"), true);
+    assert.equal(names.includes("rundea_service_deploy"), true);
+    assert.equal(names.includes("rundea_service_variables_upsert"), true);
+
+    const called = await handler.fetch(modernRequest(
+      "tools/call",
+      { name: "rundea_workspaces_list", arguments: {} },
+      "rundea_workspaces_list",
+    ));
+    assert.equal(called.status, 200);
+    const calledBody = await json(called);
+    assert.equal(calledBody.result?.isError ?? false, false);
+    assert.deepEqual(seen, [{
+      url: "http://127.0.0.1:4000/v0/workspaces",
+      method: "GET",
+    }]);
+  } finally {
+    await handler.close();
+  }
+});
