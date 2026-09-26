@@ -28,7 +28,9 @@ Read:
 - `rundea_projects_list`
 - `rundea_services_list`
 - `rundea_nodes_list`
+- `rundea_workspace_nodes_list`
 - `rundea_service_variables_read`
+- `rundea_service_volumes_list`
 - `rundea_service_deployments_list`
 - `rundea_deployment_events_read`
 - `rundea_service_domains_list`
@@ -38,7 +40,9 @@ Write:
 - `rundea_workspace_create`
 - `rundea_project_create`
 - `rundea_service_create`
+- `rundea_workspace_node_adopt` (only an empty legacy node; blocked if workloads/state exist)
 - `rundea_service_variables_upsert`
+- `rundea_service_volume_create`
 - `rundea_service_deploy`
 - `rundea_service_domain_attach`
 
@@ -49,8 +53,9 @@ The first operator surface deliberately omits delete/archive, node maintenance, 
 1. Create workspace.
 2. Create Sendina project.
 3. Create Sendina service.
-4. Confirm an ONLINE node.
-5. Set required non-platform variables and secrets.
-6. Deploy the exact Sendina commit using brokered source delivery.
-7. Follow deployment events until READY.
-8. Attach a hostname only after READY and only when DNS already resolves to the selected node.
+4. If the live node is still in the internal legacy workspace, adopt that empty node into the new workspace; adoption is refused when workload/state blockers exist.
+5. Create a persistent volume at `/app/data` when running Sendina without external PostgreSQL.
+6. Set required non-platform variables and secrets. Leave `SENDING_ENABLED` disabled for dogfood.
+7. Deploy the exact Sendina commit using brokered source delivery.
+8. Follow deployment events until READY.
+9. Attach a hostname only after READY and only when DNS already resolves to the selected node.
