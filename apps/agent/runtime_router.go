@@ -239,7 +239,7 @@ func runtimeRouterRunning() (bool, error) {
 	).CombinedOutput()
 	if err != nil {
 		message := strings.TrimSpace(string(inspect))
-		if strings.Contains(message, "No such object") || strings.Contains(message, "No such container") {
+		if dockerObjectMissing(message) {
 			return false, nil
 		}
 		return false, fmt.Errorf("inspect runtime router: %w: %s", err, message)
@@ -291,7 +291,7 @@ func startRuntimeRouter(cfg config, configName string, restartPolicy string) err
 
 func removeRuntimeRouter() error {
 	out, err := exec.Command("docker", "rm", "-f", runtimeRouterContainer).CombinedOutput()
-	if err != nil && !strings.Contains(string(out), "No such container") {
+	if err != nil && !dockerObjectMissing(string(out)) {
 		return fmt.Errorf("remove empty runtime router: %w: %s", err, strings.TrimSpace(string(out)))
 	}
 	return nil
