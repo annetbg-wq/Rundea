@@ -417,7 +417,7 @@ func runDeployment(cfg config, w *writer, cmd deployCommand) {
 
 func cleanupContainer(ctx context.Context, w *writer, deploymentID, containerName string) {
 	out, err := exec.CommandContext(ctx, "docker", "rm", "-f", containerName).CombinedOutput()
-	if err != nil && !strings.Contains(string(out), "No such container") {
+	if err != nil && !dockerObjectMissing(string(out)) {
 		w.log(deploymentID, "system", fmt.Sprintf("failed to remove incomplete container: %v: %s", err, strings.TrimSpace(string(out))))
 	}
 }
