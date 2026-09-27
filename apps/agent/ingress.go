@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
 	"errors"
 	"fmt"
@@ -118,16 +119,21 @@ func runIngressReconciliation(cfg config, w *writer, cmd reconcileIngressCommand
 		}
 	}
 
-	config := renderCaddyfile(routes, cmd.ReconciliationID)
-	if err := writeAtomic(filepath.Join(caddyDir, "Caddyfile"), []byte(config), 0o600); err != nil {
+	marker := ingressRouteMarker(routes)
+	config := renderCaddyfile(routes, marker)
+	configPath := filepath.Join(caddyDir, "Caddyfile")
+	changed, err := writeAtomicIfChanged(configPath, []byte(config), 0o600)
+	if err != nil {
 		fail(err)
 		return
 	}
-	if err := validateCaddyConfig(caddyDir); err != nil {
-		fail(err)
-		return
+	if changed {
+		if err := validateCaddyConfig(caddyDir); err != nil {
+			fail(err)
+			return
+		}
 	}
-	if err := ensureCaddy(caddyDir, dataDir, configDir); err != nil {
+	if err := ensureCaddy(caddyDir, dataDir, configDir, changed); err != nil {
 		fail(err)
 		return
 	}
@@ -136,7 +142,7 @@ func runIngressReconciliation(cfg config, w *writer, cmd reconcileIngressCommand
 	// Rundea Control Plane on the same Caddy instance. They are deliberately
 	// not returned in the application-domain reconciliation result because
 	// the Control Plane owns only cmd.Routes in service_domains.
-	results = verifyIngressRoutes(cmd.Routes, cmd.ReconciliationID)
+	results = verifyIngressRoutes(cmd.Routes, marker)
 	allOK := true
 	for _, result := range results {
 		if !result.OK {
@@ -258,6 +264,20 @@ func validHostname(host string) bool {
 	return true
 }
 
+func ingressRouteMarker(routes []ingressRoute) string {
+	sorted := append([]ingressRoute(nil), routes...)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Hostname < sorted[j].Hostname })
+	var builder strings.Builder
+	for _, route := range sorted {
+		builder.WriteString(route.Hostname)
+		builder.WriteByte('=')
+		builder.WriteString(strconv.Itoa(route.HostPort))
+		builder.WriteByte('\n')
+	}
+	sum := sha256.Sum256([]byte(builder.String()))
+	return fmt.Sprintf("%x", sum)
+}
+
 func renderCaddyfile(routes []ingressRoute, reconciliationID string) string {
 	sorted := append([]ingressRoute(nil), routes...)
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Hostname < sorted[j].Hostname })
@@ -273,6 +293,20 @@ func renderCaddyfile(routes []ingressRoute, reconciliationID string) string {
 		builder.WriteString("\n\t}\n}\n\n")
 	}
 	return builder.String()
+}
+
+func writeAtomicIfChanged(path string, content []byte, mode os.FileMode) (bool, error) {
+	existing, err := os.ReadFile(path)
+	if err == nil && string(existing) == string(content) {
+		return false, nil
+	}
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return false, err
+	}
+	if err := writeAtomic(path, content, mode); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func writeAtomic(path string, content []byte, mode os.FileMode) error {
@@ -313,9 +347,12 @@ func validateCaddyConfig(caddyDir string) error {
 	return nil
 }
 
-func ensureCaddy(caddyDir, dataDir, configDir string) error {
+func ensureCaddy(caddyDir, dataDir, configDir string, reload bool) error {
 	inspect, err := exec.Command("docker", "inspect", "-f", "{{.Config.Image}}", caddyContainer).CombinedOutput()
 	if err == nil && strings.TrimSpace(string(inspect)) == caddyImage {
+		if !reload {
+			return nil
+		}
 		out, reloadErr := exec.Command("docker", "exec", caddyContainer, "caddy", "reload", "--config", "/etc/caddy/Caddyfile", "--adapter", "caddyfile").CombinedOutput()
 		if reloadErr != nil {
 			return fmt.Errorf("Caddy reload failed: %w: %s", reloadErr, strings.TrimSpace(string(out)))
