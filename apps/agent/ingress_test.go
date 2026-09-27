@@ -115,3 +115,21 @@ func TestNormalizeHostname(t *testing.T) {
 		t.Fatalf("unexpected hostname %q", got)
 	}
 }
+
+
+func TestIngressRouteMarkerIsStableForEquivalentRoutes(t *testing.T) {
+	a := ingressRouteMarker([]ingressRoute{
+		{Hostname: "z.example.com", HostPort: 19000},
+		{Hostname: "a.example.com", HostPort: 18000},
+	})
+	b := ingressRouteMarker([]ingressRoute{
+		{Hostname: "a.example.com", HostPort: 18000},
+		{Hostname: "z.example.com", HostPort: 19000},
+	})
+	if a != b {
+		t.Fatalf("expected stable marker, got %q and %q", a, b)
+	}
+	if a == ingressRouteMarker([]ingressRoute{{Hostname: "a.example.com", HostPort: 18001}}) {
+		t.Fatal("expected marker to change when routes change")
+	}
+}
