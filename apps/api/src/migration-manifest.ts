@@ -35,4 +35,5 @@ export const migrationFiles = [
   "034_github_push_build_pipeline.sql",
   "035_registry_pull_broker.sql",
   "036_cross_node_rollback_scope.sql",
+  "037_mcp_builtin_oauth.sql",
 ] as const;

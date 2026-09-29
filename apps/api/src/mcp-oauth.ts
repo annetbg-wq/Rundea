@@ -26,7 +26,7 @@ export type McpOAuthConfig = Readonly<{
   issuer: string;
   resource: string;
   jwksUri: string;
-  requiredScope: typeof MCP_DIAGNOSTICS_READ_SCOPE;
+  requiredScope: string;
   resourceMetadataUrl: string;
   resourceMetadataPath: string;
 }>;
