@@ -18,6 +18,13 @@ import {
   type McpOAuthConfig,
 } from "./mcp-oauth";
 import { OperationActorContext, staticTokenOperationActor, type OperationActor } from "./operation-actor";
+import {
+  MCP_OPERATOR_SCOPE,
+  registerBuiltinMcpOAuth,
+  resolveBuiltinMcpOAuthConfig,
+  verifyBuiltinMcpToken,
+  type BuiltinMcpOAuthConfig,
+} from "./mcp-builtin-oauth";
 import type { OperationExecutionResult } from "./operation-execution";
 import { registerStaticControlMcpTools, type McpControlHttpDependencies } from "./mcp-control-tools";
 
@@ -41,7 +48,15 @@ export type OAuthReadonlyMcpHttpConfig = Readonly<{
   allowedOrigins: readonly string[];
 }>;
 
-export type ReadonlyMcpHttpConfig = StaticReadonlyMcpHttpConfig | OAuthReadonlyMcpHttpConfig;
+export type BuiltinOAuthMcpHttpConfig = Readonly<{
+  authMode: "oauth-builtin";
+  oauth: McpOAuthConfig;
+  builtin: BuiltinMcpOAuthConfig;
+  allowedHosts: readonly string[];
+  allowedOrigins: readonly string[];
+}>;
+
+export type ReadonlyMcpHttpConfig = StaticReadonlyMcpHttpConfig | OAuthReadonlyMcpHttpConfig | BuiltinOAuthMcpHttpConfig;
 
 export type ReadonlyMcpHttpRegistration = Readonly<{
   close(): Promise<void>;
@@ -81,9 +96,11 @@ export function resolveReadonlyMcpHttpConfig(
 ): ReadonlyMcpHttpConfig | null {
   const token = env.RUNDEA_MCP_TOKEN?.trim();
   const oauthConfigured = oauthEnvironmentPresent(env);
+  const builtinOauth = ["1", "true", "yes", "on"].includes((env.RUNDEA_MCP_BUILTIN_OAUTH ?? "").trim().toLowerCase());
   if (!token && !oauthConfigured) return null;
+  if (builtinOauth && oauthConfigured) throw new Error("built-in and external MCP OAuth cannot be enabled together");
   if (token && oauthConfigured) {
-    throw new Error("RUNDEA_MCP_TOKEN and MCP OAuth configuration are mutually exclusive");
+    throw new Error("RUNDEA_MCP_TOKEN and external MCP OAuth configuration are mutually exclusive");
   }
 
   const allowedHosts = parseHostnameList(env.RUNDEA_MCP_ALLOWED_HOSTS, "RUNDEA_MCP_ALLOWED_HOSTS");
@@ -238,13 +255,23 @@ async function authorizeMcpRequest(
   }
 
   const token = bearer(request.headers.authorization);
-  if (!token || !oauthVerifier) {
+  if (!token) {
     reply.header("WWW-Authenticate", oauthBearerChallenge(config.oauth));
     await reply.code(401).send({ error: "unauthorized" });
     return null;
   }
 
   try {
+    if (config.authMode === "oauth-builtin") {
+      const payload = await verifyBuiltinMcpToken(token, config.builtin);
+      return {
+        authenticationMethod: "OAUTH",
+        issuer: config.builtin.issuer,
+        subject: String(payload.sub),
+        scopes: [MCP_OPERATOR_SCOPE],
+      };
+    }
+    if (!oauthVerifier) throw new Error("OAuth verifier unavailable");
     const principal = await oauthVerifier(token);
     return {
       authenticationMethod: "OAUTH",
@@ -268,10 +295,13 @@ export function registerReadonlyMcpHttp(
 ): ReadonlyMcpHttpRegistration {
   const expectedStaticTokenHash = config.authMode === "static" ? hashToken(config.token) : null;
   const oauthVerifier = config.authMode === "oauth" ? createMcpOAuthTokenVerifier(config.oauth) : null;
+  if (config.authMode === "oauth-builtin") registerBuiltinMcpOAuth(app, pool, config.builtin);
   const actorContext = new OperationActorContext();
   const dependencies = createPostgresReadonlyMcpDependencies(pool, () => actorContext.current());
-  if (config.authMode === "static" && !controlToken) throw new Error("RUNDEA_CONTROL_TOKEN is required for static MCP operator tools");
-  const control = config.authMode === "static" ? { controlToken: controlToken! } : undefined;
+  if ((config.authMode === "static" || config.authMode === "oauth-builtin") && !controlToken) {
+    throw new Error("RUNDEA_CONTROL_TOKEN is required for MCP operator tools");
+  }
+  const control = config.authMode === "oauth" ? undefined : { controlToken: controlToken! };
   const handler = createMcpHandler(() => createReadonlyMcpServer(dependencies, control), {
     onerror: (error) => app.log.error({ err: error }, "MCP protocol handler failed"),
   });
@@ -281,7 +311,7 @@ export function registerReadonlyMcpHttp(
   const validateHost = hostHeaderValidation([...config.allowedHosts]);
   const validateOrigin = originValidation([...config.allowedOrigins]);
 
-  if (config.authMode === "oauth") {
+  if (config.authMode === "oauth" || config.authMode === "oauth-builtin") {
     app.get(config.oauth.resourceMetadataPath, async (request, reply) => {
       if (!validateHost(request.raw, reply.raw)) {
         reply.hijack();
