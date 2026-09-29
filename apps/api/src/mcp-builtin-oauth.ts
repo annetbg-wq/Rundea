@@ -192,10 +192,12 @@ export function registerBuiltinMcpOAuth(
     token_endpoint_auth_methods_supported: ["none"],
   };
 
-  app.get(["/.well-known/oauth-authorization-server", "/.well-known/oauth-authorization-server/mcp"], async (_request, reply) => {
+  const serveAuthorizationMetadata = async (_request: FastifyRequest, reply: import("fastify").FastifyReply) => {
     reply.header("Cache-Control", "public, max-age=300");
     return metadata;
-  });
+  };
+  app.get("/.well-known/oauth-authorization-server", serveAuthorizationMetadata);
+  app.get("/.well-known/oauth-authorization-server/mcp", serveAuthorizationMetadata);
 
   app.get("/oauth/jwks", async () => ({ keys: [(await keys()).jwk] }));
 
