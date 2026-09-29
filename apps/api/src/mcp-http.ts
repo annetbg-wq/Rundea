@@ -115,6 +115,18 @@ export function resolveReadonlyMcpHttpConfig(
     if (equalTokenHash(hashToken(token), hashToken(controlToken))) {
       throw new Error("RUNDEA_MCP_TOKEN must be distinct from RUNDEA_CONTROL_TOKEN");
     }
+    if (builtinOauth) {
+      const builtin = resolveBuiltinMcpOAuthConfig(true, token, allowedHosts)!;
+      const oauth: McpOAuthConfig = {
+        issuer: builtin.issuer,
+        resource: builtin.resource,
+        jwksUri: `${builtin.issuer}/oauth/jwks`,
+        requiredScope: MCP_OPERATOR_SCOPE,
+        resourceMetadataUrl: `${builtin.issuer}/.well-known/oauth-protected-resource/mcp`,
+        resourceMetadataPath: "/.well-known/oauth-protected-resource/mcp",
+      };
+      return { authMode: "oauth-builtin", oauth, builtin, allowedHosts, allowedOrigins };
+    }
     return { authMode: "static", token, allowedHosts, allowedOrigins };
   }
 
@@ -185,7 +197,7 @@ export function createReadonlyMcpServer(
     title: "Rundea",
     version: control ? "0.2.0" : "0.1.0",
     description: control
-      ? "Operator access to the Rundea infrastructure control plane. Mutating tools are available only with the dedicated static MCP credential."
+      ? "Operator access to the Rundea infrastructure control plane. Mutating tools are available to authenticated MCP operators."
       : "Read-only diagnostic access to the Rundea infrastructure control plane.",
   });
 
