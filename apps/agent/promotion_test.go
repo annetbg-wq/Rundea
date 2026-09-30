@@ -60,3 +60,20 @@ func TestBackendRunArgsNeverBindStablePort(t *testing.T) {
 		t.Fatalf("revision backend must never bind the stable service port: %s", joined)
 	}
 }
+
+
+func TestDockerObjectMissingIsCaseInsensitive(t *testing.T) {
+	for _, message := range []string{
+		"Error: No such object: rundea-test",
+		"error: no such object: rundea-test",
+		"Error response from daemon: No such container: rundea-test",
+		"error response from daemon: no such container: rundea-test",
+	} {
+		if !dockerObjectMissing(message) {
+			t.Fatalf("expected missing Docker object to be recognized: %q", message)
+		}
+	}
+	if dockerObjectMissing("permission denied") {
+		t.Fatal("unrelated Docker errors must not be treated as missing objects")
+	}
+}
