@@ -128,7 +128,16 @@ async function startBrowser(workspaceId, projectId, serviceId) {
     const ready = await cdp.evaluate(`location.origin === ${JSON.stringify(web)} && document.readyState === "complete"`);
     return ready ? { done: true, value: true } : { last: ready };
   }, 30000, 250);
-  await cdp.evaluate(`localStorage.setItem("rundea:workspace", ${JSON.stringify(workspaceId)}); localStorage.setItem("rundea:project", ${JSON.stringify(projectId)}); localStorage.setItem("rundea:service", ${JSON.stringify(serviceId)}); location.reload(); true`);
+  await cdp.send("Page.addScriptToEvaluateOnNewDocument", {
+    source: `
+      try {
+        localStorage.setItem("rundea:workspace", ${JSON.stringify(workspaceId)});
+        localStorage.setItem("rundea:project", ${JSON.stringify(projectId)});
+        localStorage.setItem("rundea:service", ${JSON.stringify(serviceId)});
+      } catch {}
+    `,
+  });
+  await cdp.send("Page.reload", { ignoreCache: true });
   await poll("Rundea Web loaded", async () => {
     const ready = await cdp.evaluate(`document.readyState === "complete" && document.body.innerText.includes("Observability")`);
     return ready ? { done: true, value: true } : { last: ready };
@@ -151,7 +160,21 @@ async function startBrowser(workspaceId, projectId, serviceId) {
       scope?.selects?.[2] === serviceId;
     return restored ? { done: true, value: scope } : { last: { ...scope, expected: { workspaceId, projectId, serviceId } } };
   }, 30000, 250);
-  await cdp.evaluate(`[...document.querySelectorAll("button")].find((button) => button.textContent?.trim() === "Observability")?.click(); true`);
+  await poll("Observability navigation available", async () => {
+    const available = await cdp.evaluate(`[...document.querySelectorAll("button")].some((button) => button.textContent?.trim() === "Observability")`);
+    return available ? { done: true, value: true } : { last: false };
+  }, 30000, 250);
+  const clicked = await cdp.evaluate(`(() => {
+    const button = [...document.querySelectorAll("button")].find((candidate) => candidate.textContent?.trim() === "Observability");
+    if (!button) return false;
+    button.click();
+    return true;
+  })()`);
+  if (!clicked) throw new Error("Observability navigation disappeared before click");
+  await poll("Observability panel mounted", async () => {
+    const mounted = await cdp.evaluate(`Boolean(document.querySelector('[data-testid="observability-panel"]'))`);
+    return mounted ? { done: true, value: true } : { last: false };
+  }, 30000, 250);
 }
 
 async function browserHealth() {
