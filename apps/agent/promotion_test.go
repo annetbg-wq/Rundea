@@ -12,6 +12,22 @@ func TestRevisionContainerNameIsDeploymentScoped(t *testing.T) {
 	}
 }
 
+func TestDockerObjectMissingIsCaseInsensitive(t *testing.T) {
+	for _, message := range []string{
+		"Error: No such object: candidate",
+		"error: no such object: candidate",
+		"Error response from daemon: No such container: candidate",
+		"error response from daemon: no such container: candidate",
+	} {
+		if !dockerObjectMissing(message) {
+			t.Fatalf("expected missing Docker object to be recognized: %q", message)
+		}
+	}
+	if dockerObjectMissing("permission denied") {
+		t.Fatal("unrelated Docker errors must not be treated as a missing object")
+	}
+}
+
 func TestBackendRunArgsNeverBindStablePort(t *testing.T) {
 	deploymentID := "12345678-1234-4234-9234-123456789abc"
 	pendingRuntimeProjectNetworks.Store(deploymentID, runtimeProjectNetworkSpec{
