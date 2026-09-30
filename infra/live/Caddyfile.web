@@ -7,7 +7,9 @@
     reverse_proxy api:4000
   }
 
-  @machine path /v0/* /mcp /mcp/* /.well-known/*
+  # /oauth/* is the built-in MCP OAuth server (register/authorize/token/jwks).
+  # It authenticates itself via the connector code + PKCE, so it must bypass browser Basic Auth.
+  @machine path /v0/* /mcp /mcp/* /.well-known/* /oauth/*
   handle @machine {
     reverse_proxy api:4000
   }

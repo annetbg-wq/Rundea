@@ -8,7 +8,7 @@ This directory is the A14 staging deployment contract for the live Rundea surfac
 - API and Web images are pinned to the same immutable Git commit SHA;
 - `RUNDEA_PUBLIC_WEB_MODE=external-auth` is valid only because the browser surface is protected by the dedicated live Web gateway;
 - the browser never receives `RUNDEA_CONTROL_TOKEN`; `/api/*` requests are authenticated at the gateway and the bearer token is injected server-side;
-- machine endpoints such as `/v0/*`, `/mcp` and `/.well-known/*` keep their existing endpoint authentication and are not converted into browser-auth routes;
+- machine endpoints such as `/v0/*`, `/mcp`, `/.well-known/*` and the built-in MCP OAuth server `/oauth/*` keep their existing endpoint authentication and are not converted into browser-auth routes;
 - PostgreSQL is not published to the host network;
 - the Control Plane publishes port 4000 only on `127.0.0.1`;
 - the Web gateway publishes port 4100 only on `127.0.0.1`;
