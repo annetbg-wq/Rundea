@@ -35,6 +35,11 @@ type safeRuntimeSpec struct {
 	Labels        map[string]string
 }
 
+func dockerObjectMissing(message string) bool {
+	normalized := strings.ToLower(message)
+	return strings.Contains(normalized, "no such object") || strings.Contains(normalized, "no such container")
+}
+
 func inspectContainerState(ctx context.Context, name string) (containerRuntimeState, error) {
 	out, err := exec.CommandContext(
 		ctx,
@@ -44,7 +49,7 @@ func inspectContainerState(ctx context.Context, name string) (containerRuntimeSt
 	).CombinedOutput()
 	if err != nil {
 		message := strings.TrimSpace(string(out))
-		if strings.Contains(message, "No such object") || strings.Contains(message, "No such container") {
+		if dockerObjectMissing(message) {
 			return containerRuntimeState{}, nil
 		}
 		return containerRuntimeState{}, fmt.Errorf("inspect container %s: %w: %s", name, err, message)
