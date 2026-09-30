@@ -120,15 +120,17 @@ async function startBrowser(workspaceId, projectId, serviceId) {
   cdp = new Cdp(ws);
   await cdp.send("Runtime.enable");
   await cdp.send("Page.enable");
-  // localStorage is origin-scoped and unavailable on about:blank. Enter the
-  // canonical Rundea origin first, then seed the same persisted selection the
-  // real UI uses and reload so React boots with that selection.
+  // Seed persisted scope before any application script runs. Navigating to the
+  // origin first leaves a race where React can overwrite localStorage while the
+  // acceptance harness is preparing the reload.
+  await cdp.send("Page.addScriptToEvaluateOnNewDocument", {
+    source: `if (location.origin === ${JSON.stringify(web)}) {
+      localStorage.setItem("rundea:workspace", ${JSON.stringify(workspaceId)});
+      localStorage.setItem("rundea:project", ${JSON.stringify(projectId)});
+      localStorage.setItem("rundea:service", ${JSON.stringify(serviceId)});
+    }`,
+  });
   await cdp.send("Page.navigate", { url: web });
-  await poll("Rundea Web origin loaded", async () => {
-    const ready = await cdp.evaluate(`location.origin === ${JSON.stringify(web)} && document.readyState === "complete"`);
-    return ready ? { done: true, value: true } : { last: ready };
-  }, 30000, 250);
-  await cdp.evaluate(`localStorage.setItem("rundea:workspace", ${JSON.stringify(workspaceId)}); localStorage.setItem("rundea:project", ${JSON.stringify(projectId)}); localStorage.setItem("rundea:service", ${JSON.stringify(serviceId)}); location.reload(); true`);
   await poll("Rundea Web loaded", async () => {
     const ready = await cdp.evaluate(`document.readyState === "complete" && document.body.innerText.includes("Observability")`);
     return ready ? { done: true, value: true } : { last: ready };
