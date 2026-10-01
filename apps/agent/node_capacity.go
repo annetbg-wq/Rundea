@@ -13,9 +13,10 @@ import (
 )
 
 const (
-	minimumSystemReserveBytes uint64 = 768 * 1024 * 1024
-	runtimeMemoryLimitBytes   uint64 = 768 * 1024 * 1024
-	buildMemoryLimitBytes     uint64 = 1024 * 1024 * 1024
+	minimumSystemReserveBytes   uint64 = 768 * 1024 * 1024
+	runtimeMemoryLimitBytes     uint64 = 768 * 1024 * 1024
+	buildMemoryLimitBytes       uint64 = 1024 * 1024 * 1024
+	minimumBuildMemoryLimitBytes uint64 = 512 * 1024 * 1024
 )
 
 func systemReserveBytes(totalBytes uint64) uint64 {
@@ -24,6 +25,49 @@ func systemReserveBytes(totalBytes uint64) uint64 {
 		return minimumSystemReserveBytes
 	}
 	return percentage
+}
+
+func selectBuildMemoryLimit(totalBytes, committedBytes uint64) (uint64, error) {
+	if totalBytes == 0 {
+		return 0, errors.New("node memory capacity could not be determined")
+	}
+	reserveBytes := systemReserveBytes(totalBytes)
+	if committedBytes > totalBytes || reserveBytes > totalBytes-committedBytes {
+		return 0, errors.New("node memory commitments leave no Rundea system reserve")
+	}
+	availableBytes := totalBytes - committedBytes - reserveBytes
+	if availableBytes < minimumBuildMemoryLimitBytes {
+		return 0, fmt.Errorf(
+			"node has only %d MiB safe build headroom after %d MiB committed and %d MiB Rundea reserve; builds require at least %d MiB",
+			availableBytes/(1024*1024), committedBytes/(1024*1024), reserveBytes/(1024*1024), minimumBuildMemoryLimitBytes/(1024*1024),
+		)
+	}
+	if availableBytes > buildMemoryLimitBytes {
+		availableBytes = buildMemoryLimitBytes
+	}
+	// Docker's "m" unit is MiB. Round down so the enforced limit can never
+	// consume bytes that belong to the system reserve.
+	availableBytes = (availableBytes / (1024 * 1024)) * (1024 * 1024)
+	if availableBytes < minimumBuildMemoryLimitBytes {
+		return 0, errors.New("node build headroom fell below the minimum after normalization")
+	}
+	return availableBytes, nil
+}
+
+func nodeBuildMemoryLimitBytes(ctx context.Context) (uint64, error) {
+	totalBytes, err := nodeTotalMemoryBytes()
+	if err != nil {
+		return 0, fmt.Errorf("build admission: %w", err)
+	}
+	committedBytes, err := runningManagedBackendMemoryBytes(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("build admission: %w", err)
+	}
+	limitBytes, err := selectBuildMemoryLimit(totalBytes, committedBytes)
+	if err != nil {
+		return 0, fmt.Errorf("build admission: %w", err)
+	}
+	return limitBytes, nil
 }
 
 func validateNodeMemoryCapacity(totalBytes, committedBytes, incomingBytes uint64) error {
