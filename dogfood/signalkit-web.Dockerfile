@@ -27,7 +27,10 @@ RUN git clone "${SIGNALKIT_REPOSITORY}" . && \
     test "$(git rev-parse HEAD)" = "${SIGNALKIT_REF}"
 
 RUN pnpm install --frozen-lockfile
-RUN pnpm --filter @signalkit/web build
+RUN pnpm --filter @signalkit/shared build && \
+    pnpm --filter @signalkit/i18n build && \
+    pnpm --filter @signalkit/ui build && \
+    pnpm --filter @signalkit/web build
 RUN pnpm --filter @signalkit/web deploy --prod --legacy /deploy/web
 RUN cp -r apps/web/.next /deploy/web/.next && \
     cp apps/web/next.config.mjs /deploy/web/next.config.mjs && \
