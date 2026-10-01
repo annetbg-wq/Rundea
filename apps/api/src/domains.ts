@@ -51,14 +51,15 @@ type DesiredDomainRow = {
   service_name: string;
   status: string;
   host_port: number | null;
+  healthcheck_path: string | null;
 };
 
 async function desiredDomainRows(pool: Pool, nodeId: string): Promise<DesiredDomainRow[]> {
   const result = await pool.query(
-    `SELECT d.id,d.hostname,d.service_name,d.status,active.host_port
+    `SELECT d.id,d.hostname,d.service_name,d.status,active.host_port,active.healthcheck_path
        FROM service_domains d
        LEFT JOIN LATERAL (
-         SELECT host_port
+         SELECT host_port,healthcheck_path
            FROM deployments
           WHERE service_name=d.service_name AND node_id=d.node_id AND status='READY'
           ORDER BY updated_at DESC, created_at DESC
@@ -165,7 +166,11 @@ export async function reconcileNodeIngress(pool: Pool, sockets: Map<string, Node
   const command: AgentCommand = {
     type: "reconcileIngress",
     reconciliationId,
-    routes: routable.map((row) => ({ hostname: row.hostname, hostPort: row.host_port as number })),
+    routes: routable.map((row) => ({
+      hostname: row.hostname,
+      hostPort: row.host_port as number,
+      healthPath: row.healthcheck_path?.trim() || "/",
+    })),
   };
   try {
     socket.send(JSON.stringify(command));
