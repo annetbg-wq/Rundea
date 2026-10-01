@@ -9,7 +9,7 @@ REPO_DIR="${2:-/opt/rundea-staging-src}"
   exit 2
 }
 
-for command in git docker curl flock systemctl install; do
+for command in git docker curl flock systemctl install grep; do
   command -v "$command" >/dev/null || { echo "$command is required" >&2; exit 1; }
 done
 
