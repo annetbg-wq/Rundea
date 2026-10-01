@@ -8,6 +8,28 @@ type ControlPreHandler = (request: FastifyRequest, reply: FastifyReply) => Promi
 const serviceNamePattern = /^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/;
 const hostnamePattern = /^(?=.{4,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const domainRetryDelaysSeconds = [5, 10, 20, 40, 80] as const;
+
+export type DomainVerificationStage =
+  | "DNS_RESOLVING"
+  | "DNS_OK"
+  | "INGRESS_APPLIED"
+  | "TLS_ISSUING"
+  | "HTTPS_VERIFYING"
+  | "ACTIVE"
+  | "FAILED";
+
+export function domainVerificationStageForError(message: string | null | undefined): DomainVerificationStage {
+  const value = (message ?? "").toLowerCase();
+  if (/resolve|resolver|dns|nxdomain|no such host|lookup/.test(value)) return "DNS_RESOLVING";
+  if (/tls|certificate|x509|acme|handshake/.test(value)) return "TLS_ISSUING";
+  return "HTTPS_VERIFYING";
+}
+
+export function domainRetryDelaySeconds(failureCount: number): number | null {
+  if (!Number.isInteger(failureCount) || failureCount < 1 || failureCount > domainRetryDelaysSeconds.length) return null;
+  return domainRetryDelaysSeconds[failureCount - 1] ?? null;
+}
 
 export function normalizeDomainHostname(value: string): string {
   return value.trim().toLowerCase().replace(/\.$/, "");
@@ -56,7 +78,9 @@ async function failReconciliationBeforeSend(pool: Pool, nodeId: string, reconcil
     await client.query(
       `UPDATE service_domains
           SET status=CASE WHEN status='DELETING' THEN 'DELETING' ELSE 'PENDING' END,
-              reconciliation_id=NULL,last_error=$3,verified_at=NULL,updated_at=now()
+              reconciliation_id=NULL,last_error=$3,verified_at=NULL,
+              verification_stage=CASE WHEN status='DELETING' THEN verification_stage ELSE 'HTTPS_VERIFYING' END,
+              last_probe_at=now(),updated_at=now()
         WHERE node_id=$1 AND reconciliation_id=$2`,
       [nodeId, reconciliationId, reason],
     );
@@ -101,14 +125,17 @@ export async function reconcileNodeIngress(pool: Pool, sockets: Map<string, Node
     await client.query(
       `UPDATE service_domains
           SET status='PENDING',reconciliation_id=NULL,
-              last_error='service has no READY deployment on this node',verified_at=NULL,updated_at=now()
-        WHERE node_id=$1 AND status<>'DELETING'`,
-      [nodeId],
+              last_error='service has no READY deployment on this node',verified_at=NULL,
+              verification_stage='DNS_RESOLVING',next_retry_at=NULL,updated_at=now()
+        WHERE node_id=$1 AND status<>'DELETING' AND NOT (id = ANY($2::uuid[]))`,
+      [nodeId, routable.map((row) => row.id)],
     );
     if (routable.length > 0) {
       await client.query(
         `UPDATE service_domains
-            SET status='CONFIGURING',reconciliation_id=$2,last_error=NULL,verified_at=NULL,updated_at=now()
+            SET status=CASE WHEN status='ACTIVE' THEN 'ACTIVE' ELSE 'CONFIGURING' END,
+                reconciliation_id=$2,last_error=NULL,
+                verification_stage='HTTPS_VERIFYING',last_probe_at=now(),next_retry_at=NULL,updated_at=now()
           WHERE node_id=$1 AND id = ANY($3::uuid[])`,
         [nodeId, reconciliationId, routable.map((row) => row.id)],
       );
@@ -185,10 +212,12 @@ export async function recordIngressResult(
   if (reconciliation.rowCount !== 1 || reconciliation.rows[0].status !== "RUNNING") throw new Error("stale or unknown ingress reconciliation");
 
   const known = await pool.query(
-    "SELECT hostname FROM service_domains WHERE node_id=$1 AND reconciliation_id=$2 AND status='CONFIGURING' ORDER BY hostname",
+    "SELECT hostname,retry_count,status FROM service_domains WHERE node_id=$1 AND reconciliation_id=$2 AND status IN ('CONFIGURING','ACTIVE') ORDER BY hostname",
     [nodeId, event.reconciliationId],
   );
-  const expected = new Set<string>(known.rows.map((row) => row.hostname));
+  const expected = new Map<string, { retryCount: number; status: string }>(
+    known.rows.map((row) => [String(row.hostname), { retryCount: Number(row.retry_count ?? 0), status: String(row.status) }]),
+  );
   const seen = new Set<string>();
   for (const route of event.routes) {
     const hostname = validateDomainHostname(route.hostname);
@@ -208,12 +237,21 @@ export async function recordIngressResult(
     await client.query("BEGIN");
     for (const route of event.routes) {
       const active = event.applied && route.ok;
+      const current = expected.get(route.hostname);
+      if (!current) throw new Error("ingress route result lost reconciliation ownership");
+      const error = route.error ?? event.error ?? null;
+      const failureCount = active ? 0 : current.retryCount + 1;
+      const retryDelay = active ? null : domainRetryDelaySeconds(failureCount);
+      const nextRetryAt = retryDelay === null ? null : new Date(Date.now() + retryDelay * 1000);
+      const status = active ? "ACTIVE" : retryDelay === null ? "FAILED" : "PENDING";
+      const stage = active ? "ACTIVE" : retryDelay === null ? "FAILED" : domainVerificationStageForError(error);
       const updated = await client.query(
         `UPDATE service_domains
             SET status=$4,reconciliation_id=NULL,last_error=$5,
-                verified_at=CASE WHEN $4='ACTIVE' THEN now() ELSE NULL END,updated_at=now()
-          WHERE node_id=$1 AND reconciliation_id=$2 AND hostname=$3 AND status='CONFIGURING'`,
-        [nodeId, event.reconciliationId, route.hostname, active ? "ACTIVE" : "FAILED", route.error ?? event.error ?? null],
+                verified_at=CASE WHEN $4='ACTIVE' THEN now() ELSE NULL END,
+                verification_stage=$6,retry_count=$7,next_retry_at=$8,last_probe_at=now(),updated_at=now()
+          WHERE node_id=$1 AND reconciliation_id=$2 AND hostname=$3`,
+        [nodeId, event.reconciliationId, route.hostname, status, error, stage, failureCount, nextRetryAt],
       );
       if (updated.rowCount !== 1) throw new Error("ingress route result lost reconciliation ownership");
     }
@@ -259,7 +297,9 @@ export async function failRunningIngressForNode(pool: Pool, nodeId: string): Pro
       await client.query(
         `UPDATE service_domains
             SET status=CASE WHEN status='DELETING' THEN 'DELETING' ELSE 'PENDING' END,
-                reconciliation_id=NULL,last_error=$3,verified_at=NULL,updated_at=now()
+                reconciliation_id=NULL,last_error=$3,verified_at=NULL,
+                verification_stage=CASE WHEN status='DELETING' THEN verification_stage ELSE 'HTTPS_VERIFYING' END,
+                next_retry_at=NULL,last_probe_at=now(),updated_at=now()
           WHERE node_id=$1 AND reconciliation_id=$2`,
         [nodeId, row.id, reason],
       );
@@ -277,6 +317,30 @@ export async function failRunningIngressForNode(pool: Pool, nodeId: string): Pro
   }
 }
 
+export async function reconcileDueDomainRetries(
+  pool: Pool,
+  sockets: Map<string, NodeCommandSocket>,
+): Promise<number> {
+  const due = await pool.query(
+    `SELECT d.node_id,MIN(d.next_retry_at) AS due_at
+       FROM service_domains d
+       JOIN nodes n ON n.id=d.node_id
+      WHERE d.status='PENDING'
+        AND d.next_retry_at IS NOT NULL
+        AND d.next_retry_at<=now()
+        AND n.status='ONLINE'
+        AND n.lifecycle_status='ACTIVE'
+      GROUP BY d.node_id
+      ORDER BY MIN(d.next_retry_at) ASC
+      LIMIT 20`,
+  );
+  let started = 0;
+  for (const row of due.rows) {
+    if (await reconcileNodeIngress(pool, sockets, String(row.node_id))) started += 1;
+  }
+  return started;
+}
+
 export function registerDomainRoutes(
   app: FastifyInstance,
   pool: Pool,
@@ -285,7 +349,7 @@ export function registerDomainRoutes(
 ): void {
   app.get("/v0/domains", { preHandler: requireControl }, async () => {
     const result = await pool.query(
-      `SELECT id,hostname,service_name,node_id,status,last_error,created_at,updated_at,verified_at
+      `SELECT id,hostname,service_name,node_id,status,last_error,verification_stage,retry_count,next_retry_at,last_probe_at,created_at,updated_at,verified_at
          FROM service_domains ORDER BY created_at DESC`,
     );
     return { domains: result.rows };
@@ -324,7 +388,7 @@ export function registerDomainRoutes(
       }
       await reconcileNodeIngress(pool, sockets, nodeId);
       const created = await pool.query(
-        "SELECT id,hostname,service_name,node_id,status,last_error,created_at,updated_at,verified_at FROM service_domains WHERE id=$1",
+        "SELECT id,hostname,service_name,node_id,status,last_error,verification_stage,retry_count,next_retry_at,last_probe_at,created_at,updated_at,verified_at FROM service_domains WHERE id=$1",
         [id],
       );
       return reply.code(201).send(created.rows[0]);
@@ -338,6 +402,10 @@ export function registerDomainRoutes(
       if (!validUuid(request.params.id)) return reply.code(400).send({ error: "invalid domain id" });
       const domain = await pool.query("SELECT node_id,status FROM service_domains WHERE id=$1", [request.params.id]);
       if (domain.rowCount !== 1) return reply.code(404).send({ error: "domain not found" });
+      await pool.query(
+        "UPDATE service_domains SET retry_count=0,next_retry_at=NULL,last_error=NULL,verification_stage='DNS_RESOLVING',updated_at=now() WHERE id=$1",
+        [request.params.id],
+      );
       const sent = await reconcileNodeIngress(pool, sockets, domain.rows[0].node_id);
       return reply.code(sent ? 202 : 409).send({ status: sent ? domain.rows[0].status === "DELETING" ? "DELETING" : "CONFIGURING" : domain.rows[0].status });
     },
