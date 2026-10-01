@@ -48,6 +48,10 @@ type Domain = {
   node_id: string;
   status: string;
   last_error?: string;
+  verification_stage?: "DNS_RESOLVING" | "DNS_OK" | "INGRESS_APPLIED" | "TLS_ISSUING" | "HTTPS_VERIFYING" | "ACTIVE" | "FAILED";
+  retry_count?: number;
+  next_retry_at?: string;
+  last_probe_at?: string;
   verified_at?: string;
 };
 type DeploymentEvent = { id?: number; kind?: string; status?: string; stream?: string; message?: string; created_at?: string };
@@ -122,6 +126,39 @@ function domainDnsInstruction(domain: Domain, nodes: NodeRow[]): string {
   const addresses = node?.publicAddresses ?? [];
   if (!addresses.length) return "DNS target is not available yet; reconnect or update the node Agent so Rundea can discover its public address.";
   return addresses.map((address) => `${address.includes(":") ? "AAAA" : "A"} → ${address}`).join(" · ");
+}
+
+function domainStageLabel(stage?: Domain["verification_stage"]): string {
+  switch (stage) {
+    case "DNS_RESOLVING": return "Resolving DNS";
+    case "DNS_OK": return "DNS resolved";
+    case "INGRESS_APPLIED": return "Ingress applied";
+    case "TLS_ISSUING": return "Issuing / validating TLS";
+    case "HTTPS_VERIFYING": return "Verifying public HTTPS";
+    case "ACTIVE": return "Public HTTPS verified";
+    case "FAILED": return "Verification failed";
+    default: return "DNS / TLS verification";
+  }
+}
+
+function domainVerificationDetail(domain: Domain, localVerifying: boolean, localStartedAt: string): string {
+  if (domain.status === "ACTIVE") {
+    return domain.verified_at ? `Public HTTPS verified ${formatDate(domain.verified_at)}` : "Public HTTPS verified";
+  }
+  const stage = domainStageLabel(domain.verification_stage);
+  if (domain.next_retry_at) {
+    const attempt = domain.retry_count ? ` · failure ${domain.retry_count}/6` : "";
+    return `${stage}${attempt} · automatic retry ${formatDate(domain.next_retry_at)}${domain.last_error ? ` · ${domain.last_error}` : ""}`;
+  }
+  if (localVerifying || domain.status === "CONFIGURING" || domain.status === "PENDING") {
+    const probe = domain.last_probe_at
+      ? ` · last probe ${formatDate(domain.last_probe_at)}`
+      : localStartedAt
+        ? ` · started ${formatDate(localStartedAt)}`
+        : "";
+    return `${stage}${probe}`;
+  }
+  return domain.last_error ? `${stage} · ${domain.last_error}` : stage;
 }
 
 export default function CanonicalApp() {
@@ -495,7 +532,7 @@ export default function CanonicalApp() {
 
       {serviceId && section === "variables" && <section className="cPanel"><div className="cPanelTitle"><div><h2>Runtime variables</h2><p>Runtime secrets are encrypted. Secret plaintext is never returned by the API after save.</p></div><button className="ghost" onClick={() => setRuntimeDrafts((rows) => [...rows, { key: "", value: "", secret: true }])}>Add variable</button></div>{runtimeVariables.length > 0 && <div className="cTable">{runtimeVariables.map((row) => <div className="cRow cVar" key={row.key}><div><strong>{row.key}</strong><small>{row.secret ? "Encrypted secret" : row.value ?? "Public runtime value"}</small></div><Status value={row.secret ? "SECRET" : "PUBLIC"}/><button className="danger ghost" onClick={() => void deleteVariable(row.key)}>Delete</button></div>)}</div>}<form onSubmit={saveRuntimeVariables}>{runtimeDrafts.map((row, index) => <div className="cInline" key={index}><input value={row.key} onChange={(e) => setRuntimeDrafts((rows) => rows.map((item, i) => i === index ? { ...item, key: e.target.value } : item))} placeholder="DATABASE_URL"/><input type={row.secret ? "password" : "text"} value={row.value} onChange={(e) => setRuntimeDrafts((rows) => rows.map((item, i) => i === index ? { ...item, value: e.target.value } : item))} placeholder="value"/><label className="cCheck"><input type="checkbox" checked={row.secret} onChange={(e) => setRuntimeDrafts((rows) => rows.map((item, i) => i === index ? { ...item, secret: e.target.checked } : item))}/>Secret</label><button type="button" className="danger ghost" onClick={() => setRuntimeDrafts((rows) => rows.filter((_, i) => i !== index))}>Remove</button></div>)}{runtimeDrafts.length > 0 && <div className="cActions"><button disabled={busy}>Save runtime variables</button></div>}</form>{!runtimeVariables.length && !runtimeDrafts.length && <Empty>No runtime variables configured.</Empty>}</section>}
 
-      {serviceId && section === "domains" && <section className="cPanel"><div className="cPanelTitle"><div><h2>Domains</h2><p>Add the hostname and point its DNS A/AAAA record to the selected server’s public IP. Rundea owns Caddy and TLS; verification progress stays visible here instead of disappearing into a transient notice.</p></div></div><form className="cInline" onSubmit={attachDomain}><input value={domainDraft} onChange={(e) => setDomainDraft(e.target.value)} placeholder="app.example.com"/><button disabled={busy || !readyDeployment}>Add domain</button></form>{domains.length ? <div className="cTable">{domains.map((domain) => { const verifying = verifyingDomainId === domain.id || domain.status === "CONFIGURING"; const url = `https://${domain.hostname}`; const domainHealthUrl = `${url}${healthPath.startsWith("/") ? healthPath : `/${healthPath}`}`; return <div className="cRow cDomain" key={domain.id}><div><strong>{domain.hostname}</strong><small>{domainDnsInstruction(domain, nodes)}</small><small className={verifying ? "cVerificationProgress" : ""}>{verifying ? `Verification in progress${verificationStartedAt && verifyingDomainId === domain.id ? ` · started ${formatDate(verificationStartedAt)}` : ""} · DNS / TLS / public HTTPS` : domain.last_error ?? (domain.verified_at ? `Verified over public HTTPS ${formatDate(domain.verified_at)}` : "DNS/TLS verification pending")}</small></div><code>{nodes.find((node) => node.id === domain.node_id)?.name ?? shortId(domain.node_id)}</code><Status value={domain.status}/><div className="cDomainActions">{domain.status === "ACTIVE" && <><a className="cButton ghost" href={url} target="_blank" rel="noreferrer">Open</a><a className="cButton ghost" href={domainHealthUrl} target="_blank" rel="noreferrer">Health</a></>}{domain.status !== "DELETING" && <button type="button" className="ghost" disabled={busy || Boolean(verifyingDomainId) || verifying} onClick={() => void verifyDomain(domain)}>{verifying ? "Verifying…" : domain.status === "FAILED" ? "Retry verification" : domain.status === "ACTIVE" ? "Re-verify" : "Verify now"}</button>}<button type="button" className="danger ghost" disabled={busy || verifying || domain.status === "DELETING"} onClick={() => void removeDomain(domain)}>Remove</button></div></div>; })}</div> : <Empty>No domains attached.</Empty>}</section>}
+      {serviceId && section === "domains" && <section className="cPanel"><div className="cPanelTitle"><div><h2>Domains</h2><p>Add the hostname and point its DNS A/AAAA record to the selected server’s public IP. Rundea owns Caddy and TLS, retries transient DNS/TLS failures automatically, and keeps the current verification stage visible here.</p></div></div><form className="cInline" onSubmit={attachDomain}><input value={domainDraft} onChange={(e) => setDomainDraft(e.target.value)} placeholder="app.example.com"/><button disabled={busy || !readyDeployment}>Add domain</button></form>{domains.length ? <div className="cTable">{domains.map((domain) => { const verifying = verifyingDomainId === domain.id || domain.status === "CONFIGURING"; const url = `https://${domain.hostname}`; const domainHealthUrl = `${url}${healthPath.startsWith("/") ? healthPath : `/${healthPath}`}`; return <div className="cRow cDomain" key={domain.id}><div><strong>{domain.hostname}</strong><small>{domainDnsInstruction(domain, nodes)}</small><small className={verifying || domain.status === "PENDING" ? "cVerificationProgress" : ""}>{domainVerificationDetail(domain, verifying, verifyingDomainId === domain.id ? verificationStartedAt : "")}</small></div><code>{nodes.find((node) => node.id === domain.node_id)?.name ?? shortId(domain.node_id)}</code><Status value={domain.status}/><div className="cDomainActions">{domain.status === "ACTIVE" && <><a className="cButton ghost" href={url} target="_blank" rel="noreferrer">Open</a><a className="cButton ghost" href={domainHealthUrl} target="_blank" rel="noreferrer">Health</a></>}{domain.status !== "DELETING" && <button type="button" className="ghost" disabled={busy || Boolean(verifyingDomainId) || verifying} onClick={() => void verifyDomain(domain)}>{verifying ? "Verifying…" : domain.status === "FAILED" ? "Retry verification" : domain.status === "ACTIVE" ? "Re-verify" : "Verify now"}</button>}<button type="button" className="danger ghost" disabled={busy || verifying || domain.status === "DELETING"} onClick={() => void removeDomain(domain)}>Remove</button></div></div>; })}</div> : <Empty>No domains attached.</Empty>}</section>}
 
       {workspaceId && section === "nodes" && <section className="cPanel"><div className="cPanelTitle"><div><h2>Workspace nodes</h2><p>Only ACTIVE + ONLINE nodes in this workspace are eligible for automatic deployment. Agent update and safe node cleanup are product operations once the node reports the <code>nodeMaintenance</code> capability.</p></div></div><form className="cInline" onSubmit={createNode}><input value={nodeDraft} onChange={(e) => setNodeDraft(e.target.value)} placeholder="Node name"/><button disabled={busy}>Create node</button></form>{bootstrap && <div className="cBootstrap"><strong>Install {bootstrap.name}</strong><p>Run this command once on the target Linux host with sudo access. It contains only the one-time node bootstrap credential; Rundea rotates it before the node becomes ONLINE.</p>{bootstrapInstallCommand ? <><code>{bootstrapInstallCommand}</code><button type="button" className="ghost" onClick={() => void copyBootstrapCommand()}>Copy install command</button></> : <p>Open Rundea through its canonical HTTPS address to generate the installer command.</p>}</div>}<div className="cTable">{nodes.map((node) => { const maintenanceReady = node.agentCapabilities.includes("nodeMaintenance"); return <div className="cRow cNode" key={node.id}><div><strong>{node.name}</strong><small>Last seen: {formatDate(node.lastSeenAt)} · Agent {node.agentVersion ?? "not connected"} {node.agentBuildSha ? `· ${shortId(node.agentBuildSha)}` : ""}</small>{node.publicAddresses?.length > 0 && <small>Public: {node.publicAddresses.join(", ")}</small>}{node.compatibilityError && <em>{node.compatibilityError}</em>}</div><div className="cCaps">{node.agentCapabilities.slice(0, 5).map((cap) => <span key={cap}>{cap}</span>)}</div><Status value={node.lifecycleStatus === "MAINTENANCE" ? "MAINTENANCE" : node.lifecycleStatus === "ARCHIVED" ? "ARCHIVED" : node.status}/><div className="cNodeActions">{node.status === "ONLINE" && node.lifecycleStatus === "ACTIVE" && maintenanceReady ? <><button type="button" className="ghost" disabled={busy} onClick={() => void updateNodeAgent(node)}>Update Agent</button><button type="button" className="danger ghost" disabled={busy} onClick={() => void cleanupNode(node)}>Clean & archive</button></> : node.status === "OFFLINE" && node.lifecycleStatus === "ACTIVE" ? <button className="danger ghost" onClick={() => void archiveNode(node)}>Archive</button> : <span/>}</div></div>; })}</div>{!nodes.length && <Empty>No nodes in this workspace yet.</Empty>}</section>}
 
