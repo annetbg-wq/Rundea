@@ -47,20 +47,55 @@ func runWithSafetyMonitor(ctx context.Context, interval time.Duration, check fun
 	}
 }
 
+func applyBuildMemoryLimit(args []string, memoryBytes uint64) ([]string, error) {
+	if memoryBytes < minimumBuildMemoryLimitBytes || memoryBytes > buildMemoryLimitBytes {
+		return nil, fmt.Errorf("invalid adaptive build memory limit %d MiB", memoryBytes/(1024*1024))
+	}
+	memoryLimit := fmt.Sprintf("%dm", memoryBytes/(1024*1024))
+	out := append([]string(nil), args...)
+	memorySeen := false
+	swapSeen := false
+	for i := 0; i+1 < len(out); i++ {
+		switch out[i] {
+		case "--memory":
+			out[i+1] = memoryLimit
+			memorySeen = true
+		case "--memory-swap":
+			out[i+1] = memoryLimit
+			swapSeen = true
+		}
+	}
+	if !memorySeen || !swapSeen {
+		return nil, errors.New("docker build args are missing Rundea memory guardrails")
+	}
+	return out, nil
+}
+
 func runGuardedDockerBuild(ctx context.Context, sourceDir string, w *writer, deploymentID string, args []string) error {
 	// Disk may have changed materially during source checkout or build-plan
 	// preparation, so re-check immediately before Docker is allowed to build.
 	if err := requireDiskHeadroom(sourceDir); err != nil {
 		return fmt.Errorf("build admission: %w", err)
 	}
-	if err := requireNodeMemoryCapacity(ctx, buildMemoryLimitBytes, "build admission"); err != nil {
+	memoryLimitBytes, err := nodeBuildMemoryLimitBytes(ctx)
+	if err != nil {
 		return err
+	}
+	guardedArgs, err := applyBuildMemoryLimit(args, memoryLimitBytes)
+	if err != nil {
+		return fmt.Errorf("build admission: %w", err)
+	}
+	if memoryLimitBytes < buildMemoryLimitBytes {
+		w.log(deploymentID, "system", fmt.Sprintf(
+			"constrained node: Docker build memory cap reduced from %d MiB to %d MiB while preserving Rundea system reserve",
+			buildMemoryLimitBytes/(1024*1024), memoryLimitBytes/(1024*1024),
+		))
 	}
 	return runWithBuildTimeout(ctx, buildTimeout, func(buildCtx context.Context) error {
 		return runWithSafetyMonitor(buildCtx, buildDiskMonitorInterval, func() error {
 			return requireDiskHeadroom(sourceDir)
 		}, func(safetyCtx context.Context) error {
-			return runStreamingIn(safetyCtx, sourceDir, w, deploymentID, "build", "docker", args...)
+			return runStreamingIn(safetyCtx, sourceDir, w, deploymentID, "build", "docker", guardedArgs...)
 		})
 	})
 }
