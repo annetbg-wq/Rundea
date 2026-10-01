@@ -95,6 +95,7 @@ export type QualifyNodeCommand = {
 export type IngressRoute = {
   hostname: string;
   hostPort: number;
+  healthPath?: string;
 };
 
 export type ReconcileIngressCommand = {
