@@ -34,9 +34,15 @@ func runtimeResourceArgs() []string {
 }
 
 func buildResourceArgs() []string {
+	return buildResourceArgsForMemory(buildMemoryLimitBytes)
+}
+
+func buildResourceArgsForMemory(memoryBytes uint64) []string {
+	memoryMiB := memoryBytes / (1024 * 1024)
+	memoryLimit := fmt.Sprintf("%dm", memoryMiB)
 	return []string{
-		"--memory", buildMemoryLimit,
-		"--memory-swap", buildMemoryLimit,
+		"--memory", memoryLimit,
+		"--memory-swap", memoryLimit,
 		"--cpu-period", buildCPUPeriod,
 		"--cpu-quota", buildCPUQuota,
 	}
