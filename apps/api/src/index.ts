@@ -24,6 +24,7 @@ import { registerReadonlyMcpHttp, resolveReadonlyMcpHttpConfig } from "./mcp-htt
 import {
   failRunningIngressForNode,
   recordIngressResult,
+  reconcileDueDomainRetries,
   reconcileNodeIngress,
   reconcileServiceDomainsAfterReady,
   registerDomainRoutes,
@@ -87,7 +88,9 @@ await pool.query("UPDATE nodes SET lifecycle_status='ACTIVE' WHERE lifecycle_sta
 await pool.query(
   `UPDATE service_domains
       SET status=CASE WHEN status='DELETING' THEN 'DELETING' ELSE 'PENDING' END,
-          reconciliation_id=NULL,last_error='awaiting node agent reconciliation',verified_at=NULL,updated_at=now()
+          reconciliation_id=NULL,last_error='awaiting node agent reconciliation',verified_at=NULL,
+          verification_stage=CASE WHEN status='DELETING' THEN verification_stage ELSE 'DNS_RESOLVING' END,
+          next_retry_at=NULL,updated_at=now()
     WHERE status IN ('CONFIGURING','DELETING')`,
 );
 
@@ -896,7 +899,18 @@ app.get("/v0/agent/ws", { websocket: true }, async (socket, request) => {
 const port = Number(process.env.PORT ?? 4000);
 await app.listen({ host: "0.0.0.0", port });
 
+let domainRetryRunning = false;
+const domainRetryTimer = setInterval(() => {
+  if (domainRetryRunning) return;
+  domainRetryRunning = true;
+  void reconcileDueDomainRetries(pool, sockets)
+    .catch((error) => app.log.error(error, "automatic domain reconciliation retry failed"))
+    .finally(() => { domainRetryRunning = false; });
+}, 5000);
+domainRetryTimer.unref();
+
 async function shutdown(): Promise<void> {
+  clearInterval(domainRetryTimer);
   await mcpHttp?.close();
   await app.close();
   await pool.end();
