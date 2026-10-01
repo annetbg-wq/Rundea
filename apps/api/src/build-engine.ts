@@ -344,19 +344,32 @@ export function registerBuildEngineRoutes(
           await client.query("BEGIN");
           const ownedResult = await client.query(
             `SELECT id,service_id,source_repository,source_commit_sha,registry_repository,status,worker_id,lease_until,
-                    deploy_after_push,deployment_id
+                    deploy_after_push,deployment_id,artifact_image_ref,image_id
                FROM build_jobs
               WHERE id=$1
               FOR UPDATE`,
             [buildId],
           );
           const owned = ownedResult.rows[0];
-          if (!owned || owned.worker_id !== workerId || owned.status !== "BUILDING" || !owned.lease_until || new Date(owned.lease_until).getTime() <= Date.now()) {
+          if (!owned || owned.worker_id !== workerId) {
             await client.query("ROLLBACK");
             return reply.code(409).send({ error: "build lease is unavailable" });
           }
           if (artifactImageRef !== `${owned.registry_repository}@${imageId}`) {
             throw new Error("build artifact repository does not match the claimed job");
+          }
+
+          if (owned.status === "PUSHED") {
+            if (owned.artifact_image_ref !== artifactImageRef || owned.image_id !== imageId) {
+              throw new Error("completed build artifact does not match the persisted result");
+            }
+            await client.query("COMMIT");
+            return reply.code(204).send();
+          }
+
+          if (owned.status !== "BUILDING" || !owned.lease_until || new Date(owned.lease_until).getTime() <= Date.now()) {
+            await client.query("ROLLBACK");
+            return reply.code(409).send({ error: "build lease is unavailable" });
           }
 
           let deploymentId: string | null = owned.deployment_id ? String(owned.deployment_id) : null;

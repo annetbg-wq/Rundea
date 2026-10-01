@@ -106,9 +106,6 @@ async function runBuild(job: Job, sourceDir: string) {
 
   const child = spawn("docker", buildArgs, { cwd: contextDir, stdio: ["ignore", "inherit", "inherit"] });
   const timeout = setTimeout(() => child.kill("SIGKILL"), config.timeoutMs);
-  const heartbeat = setInterval(() => {
-    void request(`/v0/build-worker/jobs/${job.id}/heartbeat`, { method: "POST" }).catch(() => undefined);
-  }, 30000);
   try {
     const code = await new Promise<number | null>((resolve, reject) => {
       child.once("error", reject);
@@ -117,7 +114,6 @@ async function runBuild(job: Job, sourceDir: string) {
     if (code !== 0) throw new Error(code === null ? "docker build timed out" : `docker build exited with code ${code}`);
   } finally {
     clearTimeout(timeout);
-    clearInterval(heartbeat);
   }
 
   await ensureRegistryLogin(job.registry_repository);
@@ -134,12 +130,18 @@ async function runBuild(job: Job, sourceDir: string) {
 async function processJob(job: Job) {
   const dir = await mkdtemp(join(tmpdir(), "rundea-build-"));
   let localTag = "";
+  let heartbeat: ReturnType<typeof setInterval> | null = null;
   try {
     await json(`/v0/build-worker/jobs/${job.id}/start`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ message: "isolated builder started" }),
     });
+
+    heartbeat = setInterval(() => {
+      void request(`/v0/build-worker/jobs/${job.id}/heartbeat`, { method: "POST" }).catch(() => undefined);
+    }, 30000);
+
     const sourceDir = await downloadSource(job, dir);
     const built = await runBuild(job, sourceDir);
     localTag = built.tag;
@@ -157,6 +159,7 @@ async function processJob(job: Job) {
     }).catch(() => undefined);
     console.error(`build ${job.id} failed: ${message}`);
   } finally {
+    if (heartbeat) clearInterval(heartbeat);
     if (localTag) spawnSync("docker", ["image", "rm", "-f", localTag], { stdio: "ignore" });
     await rm(dir, { recursive: true, force: true });
   }
