@@ -27,6 +27,7 @@ done
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 COMPOSE_FILE="$SCRIPT_DIR/docker-compose.staging.yml"
+COMPOSE_PROJECT_NAME="${RUNDEA_COMPOSE_PROJECT_NAME:-rundea-staging}"
 AGENT_ENV="/etc/rundea/agent.env"
 AGENT_DROPIN_DIR="/etc/systemd/system/rundea-agent.service.d"
 AGENT_DROPIN="$AGENT_DROPIN_DIR/10-reserved-ingress.conf"
@@ -64,7 +65,7 @@ curl --fail --silent --show-error \
 
 install -d -m 0700 "$CADDY_DIR" "$CADDY_DATA_DIR" "$CADDY_CONFIG_DIR"
 
-edge_id="$(docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" --profile bootstrap-ingress ps -q edge)"
+edge_id="$(docker compose -p "$COMPOSE_PROJECT_NAME" --env-file "$ENV_FILE" -f "$COMPOSE_FILE" --profile bootstrap-ingress ps -q edge)"
 [[ -n "$edge_id" ]] || {
   echo "bootstrap edge is not running; refusing an unverified takeover" >&2
   exit 1
@@ -116,7 +117,7 @@ restore_agent_configuration() {
 
 rollback_bootstrap_edge() {
   docker rm -f "$CADDY_CONTAINER" >/dev/null 2>&1 || true
-  docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" --profile bootstrap-ingress up -d edge >/dev/null 2>&1 || true
+  docker compose -p "$COMPOSE_PROJECT_NAME" --env-file "$ENV_FILE" -f "$COMPOSE_FILE" --profile bootstrap-ingress up -d edge >/dev/null 2>&1 || true
   restore_agent_configuration
   systemctl restart rundea-agent >/dev/null 2>&1 || true
 }
@@ -125,8 +126,8 @@ rollback_bootstrap_edge() {
 # application-domain reconciliation from racing the bootstrap handoff.
 systemctl stop rundea-agent
 
-docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" --profile bootstrap-ingress stop edge >/dev/null
-docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" --profile bootstrap-ingress rm -f edge >/dev/null
+docker compose -p "$COMPOSE_PROJECT_NAME" --env-file "$ENV_FILE" -f "$COMPOSE_FILE" --profile bootstrap-ingress stop edge >/dev/null
+docker compose -p "$COMPOSE_PROJECT_NAME" --env-file "$ENV_FILE" -f "$COMPOSE_FILE" --profile bootstrap-ingress rm -f edge >/dev/null
 
 if ! docker run -d \
   --name "$CADDY_CONTAINER" \
