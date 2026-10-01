@@ -301,7 +301,7 @@ export function registerServiceScopedRoutes(
       try {
         const service = await resolveActiveCanonicalService(pool, request.params.serviceId);
         const result = await pool.query(
-          `SELECT id,hostname,service_id,node_id,status,last_error,created_at,updated_at,verified_at
+          `SELECT id,hostname,service_id,node_id,status,last_error,verification_stage,retry_count,next_retry_at,last_probe_at,created_at,updated_at,verified_at
              FROM service_domains
             WHERE service_id=$1
             ORDER BY created_at DESC,id DESC`,
@@ -339,7 +339,7 @@ export function registerServiceScopedRoutes(
         );
         await reconcileNodeIngress(pool, sockets, nodeId);
         const created = await pool.query(
-          `SELECT id,hostname,service_id,node_id,status,last_error,created_at,updated_at,verified_at
+          `SELECT id,hostname,service_id,node_id,status,last_error,verification_stage,retry_count,next_retry_at,last_probe_at,created_at,updated_at,verified_at
              FROM service_domains WHERE id=$1`,
           [id],
         );
@@ -364,6 +364,10 @@ export function registerServiceScopedRoutes(
           [domainId, service.id],
         );
         if (domain.rowCount !== 1) return reply.code(404).send({ error: "domain not found" });
+        await pool.query(
+          "UPDATE service_domains SET retry_count=0,next_retry_at=NULL,last_error=NULL,verification_stage='DNS_RESOLVING',updated_at=now() WHERE id=$1 AND service_id=$2",
+          [domainId, service.id],
+        );
         const sent = await reconcileNodeIngress(pool, sockets, String(domain.rows[0].node_id));
         return reply.code(sent ? 202 : 409).send({
           status: sent ? (domain.rows[0].status === "DELETING" ? "DELETING" : "CONFIGURING") : domain.rows[0].status,
