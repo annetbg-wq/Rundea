@@ -28,8 +28,9 @@ var ingressMu sync.Mutex
 var reconciliationIDPattern = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
 
 type ingressRoute struct {
-	Hostname string `json:"hostname"`
-	HostPort int    `json:"hostPort"`
+	Hostname     string `json:"hostname"`
+	HostPort     int    `json:"hostPort"`
+	PreserveHost bool   `json:"-"`
 }
 
 type reconcileIngressCommand struct {
@@ -174,7 +175,7 @@ func parseReservedIngressRoutes(raw string) ([]ingressRoute, error) {
 		if err != nil || port < 1 || port > 65535 {
 			return nil, fmt.Errorf("invalid reserved ingress port for %s", hostname)
 		}
-		routes = append(routes, ingressRoute{Hostname: hostname, HostPort: port})
+		routes = append(routes, ingressRoute{Hostname: hostname, HostPort: port, PreserveHost: true})
 	}
 	if err := validateIngressRoutes(routes); err != nil {
 		return nil, fmt.Errorf("invalid reserved ingress routes: %w", err)
@@ -286,9 +287,13 @@ func renderCaddyfile(routes []ingressRoute, reconciliationID string) string {
 		builder.WriteString(route.Hostname)
 		builder.WriteString(" {\n\treverse_proxy 127.0.0.1:")
 		builder.WriteString(strconv.Itoa(route.HostPort))
-		builder.WriteString(" {\n\t\theader_up Host 127.0.0.1:")
-		builder.WriteString(strconv.Itoa(route.HostPort))
-		builder.WriteString("\n\t\theader_down ")
+		builder.WriteString(" {\n")
+		if !route.PreserveHost {
+			builder.WriteString("\t\theader_up Host 127.0.0.1:")
+			builder.WriteString(strconv.Itoa(route.HostPort))
+			builder.WriteByte('\n')
+		}
+		builder.WriteString("\t\theader_down ")
 		builder.WriteString(ingressMarkerHeader)
 		builder.WriteByte(' ')
 		builder.WriteString(reconciliationID)
