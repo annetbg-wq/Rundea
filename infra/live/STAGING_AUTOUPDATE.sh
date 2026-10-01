@@ -13,7 +13,7 @@ source "$CONFIG_FILE"
 [[ -f "$RUNDEA_STAGING_ENV_FILE" ]] || { echo "staging env file is unavailable" >&2; exit 1; }
 [[ -d "$RUNDEA_STAGING_REPO_DIR/.git" ]] || { echo "staging repository checkout is unavailable" >&2; exit 1; }
 
-for command in git docker curl flock mktemp awk grep install systemctl; do
+for command in git docker curl flock mktemp awk grep install systemctl python3 stat seq sleep cp chmod; do
   command -v "$command" >/dev/null || { echo "$command is required" >&2; exit 1; }
 done
 
@@ -22,7 +22,7 @@ flock -n 9 || exit 0
 
 read_env_value() {
   local key="$1"
-  awk -F= -v key="$key" '$1 == key {sub(/^[^=]*=/, ""); gsub(/^['"'"'"]|['"'"'"]$/, ""); print; exit}' "$RUNDEA_STAGING_ENV_FILE"
+  awk -F= -v key="$key" '$1 == key {sub(/^[^=]*=/, ""); print; exit}' "$RUNDEA_STAGING_ENV_FILE"
 }
 
 current_tag="$(read_env_value RUNDEA_IMAGE_TAG)"
@@ -42,6 +42,44 @@ if [[ "$target" == "$current_tag" ]]; then
   echo "Rundea staging already current: $current_tag"
   exit 0
 fi
+
+runs_json="$(mktemp /tmp/rundea-staging-runs.XXXXXX)"
+trap 'rm -f "$runs_json"' RETURN
+if ! curl -fsS --proto '=https' --tlsv1.2 --connect-timeout 5 --max-time 20 \
+  -H 'Accept: application/vnd.github+json' \
+  -H 'User-Agent: Rundea-Staging-Autoupdate' \
+  "https://api.github.com/repos/annetbg-wq/Rundea/actions/runs?head_sha=$target&event=push&per_page=100" \
+  -o "$runs_json"; then
+  echo "could not read GitHub safety gates; will retry automatically"
+  rm -f "$runs_json"
+  trap - RETURN
+  exit 0
+fi
+if ! python3 - "$runs_json" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], "r", encoding="utf-8") as handle:
+    payload = json.load(handle)
+
+required = {"ci", "node-acceptance", "live-runtime-image"}
+successful = {
+    str(run.get("name"))
+    for run in payload.get("workflow_runs", [])
+    if run.get("status") == "completed" and run.get("conclusion") == "success"
+}
+missing = sorted(required - successful)
+if missing:
+    print("waiting for successful main gates: " + ", ".join(missing))
+    raise SystemExit(1)
+PY
+then
+  rm -f "$runs_json"
+  trap - RETURN
+  exit 0
+fi
+rm -f "$runs_json"
+trap - RETURN
 
 api_image="ghcr.io/annetbg-wq/rundea-api:$target"
 web_image="ghcr.io/annetbg-wq/rundea-web:$target"
