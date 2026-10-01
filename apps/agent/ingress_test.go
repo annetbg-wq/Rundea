@@ -102,6 +102,20 @@ func TestRenderCaddyfileIsDeterministicAndMarksReconciliation(t *testing.T) {
 	}
 }
 
+func TestRenderCaddyfilePreservesHostForReservedSystemIngress(t *testing.T) {
+	marker := "00000000-0000-4000-8000-000000000001"
+	got := renderCaddyfile([]ingressRoute{
+		{Hostname: "rundea.example.com", HostPort: 4000, PreserveHost: true},
+		{Hostname: "app.example.com", HostPort: 18000},
+	}, marker)
+	if strings.Contains(got, "rundea.example.com {\n\treverse_proxy 127.0.0.1:4000 {\n\t\theader_up Host 127.0.0.1:4000") {
+		t.Fatalf("reserved system ingress must preserve the public Host header:\n%s", got)
+	}
+	if !strings.Contains(got, "app.example.com {\n\treverse_proxy 127.0.0.1:18000 {\n\t\theader_up Host 127.0.0.1:18000") {
+		t.Fatalf("application ingress must rewrite Host for the loopback runtime router:\n%s", got)
+	}
+}
+
 func TestSafePublicIPGuard(t *testing.T) {
 	for _, raw := range []string{"127.0.0.1", "10.0.0.1", "172.16.0.1", "192.168.1.1", "169.254.169.254", "100.64.0.1", "198.18.0.1", "::1", "fc00::1", "fe80::1"} {
 		if isSafePublicIP(net.ParseIP(raw)) {
