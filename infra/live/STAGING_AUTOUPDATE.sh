@@ -44,7 +44,6 @@ if [[ "$target" == "$current_tag" ]]; then
 fi
 
 runs_json="$(mktemp /tmp/rundea-staging-runs.XXXXXX)"
-trap 'rm -f "$runs_json"' RETURN
 if ! curl -fsS --proto '=https' --tlsv1.2 --connect-timeout 5 --max-time 20 \
   -H 'Accept: application/vnd.github+json' \
   -H 'User-Agent: Rundea-Staging-Autoupdate' \
@@ -52,7 +51,6 @@ if ! curl -fsS --proto '=https' --tlsv1.2 --connect-timeout 5 --max-time 20 \
   -o "$runs_json"; then
   echo "could not read GitHub safety gates; will retry automatically"
   rm -f "$runs_json"
-  trap - RETURN
   exit 0
 fi
 if ! python3 - "$runs_json" <<'PY'
@@ -79,7 +77,6 @@ then
   exit 0
 fi
 rm -f "$runs_json"
-trap - RETURN
 
 api_image="ghcr.io/annetbg-wq/rundea-api:$target"
 web_image="ghcr.io/annetbg-wq/rundea-web:$target"
