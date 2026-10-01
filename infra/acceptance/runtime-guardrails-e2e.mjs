@@ -144,8 +144,11 @@ try {
 
   const totalBytes = parseMemTotalBytes(await readFile("/proc/meminfo", "utf8"));
   const reserveBytes = Math.max(768 * 1024 * 1024, Math.floor(totalBytes / 5));
-  const buildIncoming = 1024 * 1024 * 1024;
-  const targetCommitted = Math.max(16 * 1024 * 1024, totalBytes - reserveBytes - buildIncoming + 64 * 1024 * 1024);
+  // Adaptive builds may safely reduce their cap from 1024 MiB to 512 MiB.
+  // Reserve enough managed capacity that even the minimum safe build cap
+  // would consume the system reserve, so admission must still fail closed.
+  const minimumBuildIncoming = 512 * 1024 * 1024;
+  const targetCommitted = Math.max(16 * 1024 * 1024, totalBytes - reserveBytes - minimumBuildIncoming + 64 * 1024 * 1024);
   const memoryArg = String(targetCommitted);
 
   const pull = spawnSync("docker", ["pull", "alpine:3.20"], { encoding: "utf8" });
@@ -163,8 +166,11 @@ try {
   const memoryDeployment = await deploy(memoryFixture);
   await waitFailed(memoryFixture.service.id, memoryDeployment.id);
   const memoryEvents = await events(memoryDeployment.id);
-  assert.ok(memoryEvents.some((event) => String(event.message ?? "").includes("node memory capacity is exhausted")),
-    `memory guardrail failure not found in events: ${JSON.stringify(memoryEvents.slice(-8))}`);
+  assert.ok(memoryEvents.some((event) => {
+    const message = String(event.message ?? "");
+    return message.includes("build admission") &&
+      (message.includes("at least 512 MiB") || message.includes("node memory capacity is exhausted"));
+  }), `memory guardrail failure not found in events: ${JSON.stringify(memoryEvents.slice(-8))}`);
   await assertControlPlaneHealthy("after memory rejection");
 
   spawnSync("docker", ["rm", "-f", dummyName], { stdio: "ignore" });
