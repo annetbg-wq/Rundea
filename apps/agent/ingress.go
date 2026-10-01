@@ -30,6 +30,7 @@ var reconciliationIDPattern = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[1-5]
 type ingressRoute struct {
 	Hostname     string `json:"hostname"`
 	HostPort     int    `json:"hostPort"`
+	HealthPath   string `json:"healthPath,omitempty"`
 	PreserveHost bool   `json:"-"`
 }
 
@@ -235,6 +236,10 @@ func validateIngressRoutes(routes []ingressRoute) error {
 		if route.HostPort < 1 || route.HostPort > 65535 {
 			return fmt.Errorf("invalid upstream port for %s", route.Hostname)
 		}
+		healthPath := strings.TrimSpace(route.HealthPath)
+		if healthPath != "" && (!strings.HasPrefix(healthPath, "/") || len(healthPath) > 512 || strings.ContainsAny(healthPath, "\r\n")) {
+			return fmt.Errorf("invalid public health path for %s", route.Hostname)
+		}
 		if _, exists := seen[hostname]; exists {
 			return fmt.Errorf("duplicate ingress hostname %s", hostname)
 		}
@@ -392,7 +397,11 @@ func verifyIngressRoutes(routes []ingressRoute, reconciliationID string) []ingre
 			defer wg.Done()
 			semaphore <- struct{}{}
 			defer func() { <-semaphore }()
-			err := verifyHTTPSRoute(current.Hostname, reconciliationID, 75*time.Second)
+			healthPath := strings.TrimSpace(current.HealthPath)
+			if healthPath == "" {
+				healthPath = "/"
+			}
+			err := verifyHTTPSRoute(current.Hostname, reconciliationID, healthPath, 75*time.Second)
 			result := ingressRouteResult{Hostname: current.Hostname, OK: err == nil}
 			if err != nil {
 				result.Error = sanitizeProbeError(err.Error())
@@ -441,7 +450,7 @@ func isSafePublicIP(ip net.IP) bool {
 	return true
 }
 
-func verifyHTTPSRoute(hostname, reconciliationID string, deadline time.Duration) error {
+func verifyHTTPSRoute(hostname, reconciliationID, healthPath string, deadline time.Duration) error {
 	end := time.Now().Add(deadline)
 	var lastErr error
 	for time.Now().Before(end) {
@@ -483,13 +492,16 @@ func verifyHTTPSRoute(hostname, reconciliationID string, deadline time.Duration)
 				return http.ErrUseLastResponse
 			},
 		}
-		req, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, "https://"+hostname+"/", nil)
+		if healthPath == "" {
+			healthPath = "/"
+		}
+		req, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, "https://"+hostname+healthPath, nil)
 		resp, err := client.Do(req)
 		if err == nil {
 			_, _ = io.Copy(io.Discard, resp.Body)
 			resp.Body.Close()
 			marker := resp.Header.Get(ingressMarkerHeader)
-			if resp.StatusCode < 500 && marker == reconciliationID {
+			if resp.StatusCode >= 200 && resp.StatusCode < 400 && marker == reconciliationID {
 				transport.CloseIdleConnections()
 				return nil
 			}
@@ -507,5 +519,5 @@ func verifyHTTPSRoute(hostname, reconciliationID string, deadline time.Duration)
 	if lastErr == nil {
 		lastErr = errors.New("HTTPS verification timed out")
 	}
-	return fmt.Errorf("HTTPS verification failed for %s: %w", hostname, lastErr)
+	return fmt.Errorf("HTTPS verification failed for %s%s: %w", hostname, healthPath, lastErr)
 }

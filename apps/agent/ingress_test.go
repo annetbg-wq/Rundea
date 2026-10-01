@@ -129,6 +129,21 @@ func TestSafePublicIPGuard(t *testing.T) {
 	}
 }
 
+func TestValidateIngressRoutesAcceptsApplicationHealthPath(t *testing.T) {
+	routes := []ingressRoute{{Hostname: "api.example.com", HostPort: 18080, HealthPath: "/health"}}
+	if err := validateIngressRoutes(routes); err != nil {
+		t.Fatalf("expected health path to be valid: %v", err)
+	}
+}
+
+func TestValidateIngressRoutesRejectsUnsafeApplicationHealthPath(t *testing.T) {
+	for _, path := range []string{"health", "/ok\nX-Bad: yes", "/" + strings.Repeat("x", 512)} {
+		if validateIngressRoutes([]ingressRoute{{Hostname: "api.example.com", HostPort: 18080, HealthPath: path}}) == nil {
+			t.Fatalf("expected health path %q to fail", path)
+		}
+	}
+}
+
 func TestNormalizeHostname(t *testing.T) {
 	if got := normalizeHostname(" API.Example.COM. "); got != "api.example.com" {
 		t.Fatalf("unexpected hostname %q", got)
