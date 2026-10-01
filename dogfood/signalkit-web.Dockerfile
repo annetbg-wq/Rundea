@@ -27,6 +27,10 @@ RUN git clone "${SIGNALKIT_REPOSITORY}" . && \
     test "$(git rev-parse HEAD)" = "${SIGNALKIT_REF}"
 
 RUN pnpm install --frozen-lockfile
+# SignalKit currently documents a web/mobile duplicate React-types caveat.
+# Use Next's global React namespace for the root layout during this dogfood build.
+RUN sed -i "/import type { ReactNode } from 'react';/d" apps/web/app/layout.tsx && \
+    sed -i 's/children: ReactNode/children: React.ReactNode/' apps/web/app/layout.tsx
 RUN pnpm --filter @signalkit/shared build && \
     pnpm --filter @signalkit/i18n build && \
     pnpm --filter @signalkit/ui build && \
