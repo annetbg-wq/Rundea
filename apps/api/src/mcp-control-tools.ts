@@ -314,6 +314,69 @@ export function registerStaticControlMcpTools(server: McpServer, dependencies: M
   );
 
   server.registerTool(
+    "rundea_node_maintenance_list",
+    {
+      title: "List node maintenance actions",
+      description: "Read recent product-level maintenance actions for one Rundea node, including Agent update result state.",
+      inputSchema: z.strictObject({ nodeId: uuid }),
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    },
+    async ({ nodeId }) => request(
+      dependencies,
+      "GET",
+      `/v0/nodes/${encodeURIComponent(nodeId)}/maintenance`,
+    ),
+  );
+
+  server.registerTool(
+    "rundea_node_agent_update",
+    {
+      title: "Update Rundea Agent",
+      description: "Start the canonical product-level Agent update on one ACTIVE and ONLINE Rundea node. The node validates and applies the Control Plane-pinned Agent release.",
+      inputSchema: z.strictObject({ nodeId: uuid }),
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+    },
+    async ({ nodeId }) => request(
+      dependencies,
+      "POST",
+      `/v0/nodes/${encodeURIComponent(nodeId)}/maintenance/update`,
+      {},
+    ),
+  );
+
+  server.registerTool(
+    "rundea_deployment_restart",
+    {
+      title: "Restart deployment",
+      description: "Restart the current runtime for one READY Rundea deployment using the canonical runtime action path.",
+      inputSchema: z.strictObject({ deploymentId: uuid }),
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+    },
+    async ({ deploymentId }) => request(
+      dependencies,
+      "POST",
+      `/v0/deployments/${encodeURIComponent(deploymentId)}/restart`,
+      {},
+    ),
+  );
+
+  server.registerTool(
+    "rundea_deployment_rollback",
+    {
+      title: "Rollback deployment",
+      description: "Create a canonical rollback from one eligible prior Rundea deployment.",
+      inputSchema: z.strictObject({ deploymentId: uuid }),
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
+    },
+    async ({ deploymentId }) => request(
+      dependencies,
+      "POST",
+      `/v0/deployments/${encodeURIComponent(deploymentId)}/rollback`,
+      {},
+    ),
+  );
+
+  server.registerTool(
     "rundea_service_domains_list",
     {
       title: "List service domains",
@@ -344,6 +407,22 @@ export function registerStaticControlMcpTools(server: McpServer, dependencies: M
       "POST",
       `/v0/services/${encodeURIComponent(serviceId)}/domains`,
       { hostname },
+    ),
+  );
+
+  server.registerTool(
+    "rundea_service_domain_reconcile",
+    {
+      title: "Reconcile service domain",
+      description: "Retry managed ingress, DNS/TLS and public HTTPS reconciliation for one domain attached to a canonical service.",
+      inputSchema: z.strictObject({ serviceId: uuid, domainId: uuid }),
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+    },
+    async ({ serviceId, domainId }) => request(
+      dependencies,
+      "POST",
+      `/v0/services/${encodeURIComponent(serviceId)}/domains/${encodeURIComponent(domainId)}/reconcile`,
+      {},
     ),
   );
 }
