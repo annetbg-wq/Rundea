@@ -88,12 +88,17 @@ func TestRenderCaddyfileIsDeterministicAndMarksReconciliation(t *testing.T) {
 		{Hostname: "z.example.com", HostPort: 19000},
 		{Hostname: "a.example.com", HostPort: 18000},
 	}, marker)
-	want := "a.example.com {\n\treverse_proxy 127.0.0.1:18000 {\n\t\theader_down X-Rundea-Reconciliation " + marker + "\n\t}\n}\n\nz.example.com {\n\treverse_proxy 127.0.0.1:19000 {\n\t\theader_down X-Rundea-Reconciliation " + marker + "\n\t}\n}\n\n"
+	want := "a.example.com {\n\treverse_proxy 127.0.0.1:18000 {\n\t\theader_up Host 127.0.0.1:18000\n\t\theader_down X-Rundea-Reconciliation " + marker + "\n\t}\n}\n\nz.example.com {\n\treverse_proxy 127.0.0.1:19000 {\n\t\theader_up Host 127.0.0.1:19000\n\t\theader_down X-Rundea-Reconciliation " + marker + "\n\t}\n}\n\n"
 	if got != want {
 		t.Fatalf("unexpected Caddyfile:\n%s", got)
 	}
 	if strings.Contains(got, "0.0.0.0") {
 		t.Fatal("ingress upstream must remain loopback-only")
+	}
+	for _, expected := range []string{"header_up Host 127.0.0.1:18000", "header_up Host 127.0.0.1:19000"} {
+		if !strings.Contains(got, expected) {
+			t.Fatalf("managed ingress must rewrite upstream Host for the loopback runtime router, missing %q:\n%s", expected, got)
+		}
 	}
 }
 
