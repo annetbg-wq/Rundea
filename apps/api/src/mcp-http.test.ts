@@ -234,6 +234,11 @@ test("static operator MCP exposes bounded control-plane tools without changing t
     assert.equal(names.includes("rundea_workspace_create"), true);
     assert.equal(names.includes("rundea_service_deploy"), true);
     assert.equal(names.includes("rundea_service_variables_upsert"), true);
+    assert.equal(names.includes("rundea_node_agent_update"), true);
+    assert.equal(names.includes("rundea_node_maintenance_list"), true);
+    assert.equal(names.includes("rundea_deployment_restart"), true);
+    assert.equal(names.includes("rundea_deployment_rollback"), true);
+    assert.equal(names.includes("rundea_service_domain_reconcile"), true);
 
     const called = await handler.fetch(modernRequest(
       "tools/call",
@@ -246,6 +251,32 @@ test("static operator MCP exposes bounded control-plane tools without changing t
     assert.deepEqual(seen, [{
       url: "http://127.0.0.1:4000/v0/workspaces",
       method: "GET",
+    }]);
+
+    seen.length = 0;
+    const updateCalled = await handler.fetch(modernRequest(
+      "tools/call",
+      { name: "rundea_node_agent_update", arguments: { nodeId } },
+      "rundea_node_agent_update",
+    ));
+    assert.equal(updateCalled.status, 200);
+    assert.deepEqual(seen, [{
+      url: `http://127.0.0.1:4000/v0/nodes/${nodeId}/maintenance/update`,
+      method: "POST",
+      body: {},
+    }]);
+
+    seen.length = 0;
+    const reconcileCalled = await handler.fetch(modernRequest(
+      "tools/call",
+      { name: "rundea_service_domain_reconcile", arguments: { serviceId: deploymentId, domainId: nodeId } },
+      "rundea_service_domain_reconcile",
+    ));
+    assert.equal(reconcileCalled.status, 200);
+    assert.deepEqual(seen, [{
+      url: `http://127.0.0.1:4000/v0/services/${deploymentId}/domains/${nodeId}/reconcile`,
+      method: "POST",
+      body: {},
     }]);
   } finally {
     await handler.close();
