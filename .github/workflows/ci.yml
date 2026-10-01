@@ -56,7 +56,10 @@ jobs:
           fi
       - name: Validate installer shell syntax
         working-directory: ${{ github.workspace }}
-        run: bash -n infra/agent/install.sh
+        run: |
+          bash -n infra/agent/install.sh
+          bash -n infra/live/STAGING_AUTOUPDATE.sh
+          bash -n infra/live/INSTALL_STAGING_AUTOUPDATE.sh
       - uses: actions/setup-go@v5
         with:
           go-version: '1.25.x'
