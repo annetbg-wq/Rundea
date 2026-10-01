@@ -55,6 +55,24 @@ Once managed mode is active, the compose deployment path never respawns `edge`. 
 The current public hostname does not change the runtime safety boundary: this stack still runs with `RUNDEA_ENVIRONMENT=staging`. Before a final production promotion, production state/secrets and the long-term staging hostname must remain operationally separated.
 
 
+## Safe staging autodeploy
+
+After the initial live stack and managed-ingress takeover are stable, staging can stop requiring SSH for every Control Plane/Web update.
+
+Run the installer once as root:
+
+`bash infra/live/INSTALL_STAGING_AUTOUPDATE.sh /absolute/path/to/staging.env`
+
+The installed timer checks `origin/main` about every five minutes. It will deploy a commit only when:
+
+- the exact main SHA has successful `ci`, `node-acceptance` and `live-runtime-image` push workflows;
+- both immutable GHCR images for that exact SHA exist;
+- the local staging environment is already in `RUNDEA_INGRESS_MODE=managed`.
+
+Deployment remains pinned to a 40-character commit SHA. After updating API/Web it requires local API health, local Web-gateway health and public HTTPS health. Any failed health gate restores the previous environment/image SHA and redeploys the previous stack. The protected staging secrets are never copied to GitHub or written to logs.
+
+This automation is staging-only. Production promotion remains a separate explicit operation.
+
 ## Backup and disaster recovery
 
 The canonical encrypted backup/restore procedure is in `infra/dr/README.md`.
