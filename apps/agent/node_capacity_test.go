@@ -41,3 +41,35 @@ func TestParseMemTotalBytes(t *testing.T) {
 		t.Fatal("missing MemTotal must fail closed")
 	}
 }
+
+func TestSelectBuildMemoryLimitAdaptsToConstrainedNode(t *testing.T) {
+	mib := uint64(1024 * 1024)
+
+	limit, err := selectBuildMemoryLimit(3819*mib, 2048*mib)
+	if err != nil {
+		t.Fatalf("constrained but safe node rejected: %v", err)
+	}
+	if limit != 1003*mib {
+		t.Fatalf("adaptive build limit = %d MiB, want 1003", limit/mib)
+	}
+
+	limit, err = selectBuildMemoryLimit(4096*mib, 1536*mib)
+	if err != nil {
+		t.Fatalf("healthy node rejected: %v", err)
+	}
+	if limit != buildMemoryLimitBytes {
+		t.Fatalf("healthy node build limit = %d MiB, want %d", limit/mib, buildMemoryLimitBytes/mib)
+	}
+
+	limit, err = selectBuildMemoryLimit(2048*mib, 768*mib)
+	if err != nil {
+		t.Fatalf("minimum safe build headroom rejected: %v", err)
+	}
+	if limit != minimumBuildMemoryLimitBytes {
+		t.Fatalf("minimum build limit = %d MiB, want %d", limit/mib, minimumBuildMemoryLimitBytes/mib)
+	}
+
+	if _, err := selectBuildMemoryLimit(2048*mib, 1024*mib); err == nil || !strings.Contains(err.Error(), "at least 512 MiB") {
+		t.Fatalf("unsafe build headroom was not rejected: %v", err)
+	}
+}
