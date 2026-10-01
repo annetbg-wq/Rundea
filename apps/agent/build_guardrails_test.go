@@ -45,3 +45,39 @@ func TestRunWithSafetyMonitorCancelsBuildWhenSafetyFloorIsCrossed(t *testing.T) 
 		t.Fatalf("expected safety cancellation, got %v", err)
 	}
 }
+
+func TestApplyBuildMemoryLimitPreservesOtherGuardrails(t *testing.T) {
+	mib := uint64(1024 * 1024)
+	args := []string{
+		"build",
+		"--memory", "1024m",
+		"--memory-swap", "1024m",
+		"--cpu-period", "100000",
+		"--cpu-quota", "100000",
+		"--pull", ".",
+	}
+	got, err := applyBuildMemoryLimit(args, 1003*mib)
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(got, " ")
+	if !strings.Contains(joined, "--memory 1003m") || !strings.Contains(joined, "--memory-swap 1003m") {
+		t.Fatalf("adaptive memory limit not applied: %s", joined)
+	}
+	if !strings.Contains(joined, "--cpu-period 100000 --cpu-quota 100000") {
+		t.Fatalf("CPU guardrails changed unexpectedly: %s", joined)
+	}
+	if strings.Contains(strings.Join(args, " "), "1003m") {
+		t.Fatal("applyBuildMemoryLimit mutated caller args")
+	}
+}
+
+func TestApplyBuildMemoryLimitRejectsUnsafeOrMalformedArgs(t *testing.T) {
+	mib := uint64(1024 * 1024)
+	if _, err := applyBuildMemoryLimit([]string{"build", "--memory", "1024m"}, 768*mib); err == nil {
+		t.Fatal("missing memory-swap guardrail must fail")
+	}
+	if _, err := applyBuildMemoryLimit([]string{"build", "--memory", "1024m", "--memory-swap", "1024m"}, 511*mib); err == nil {
+		t.Fatal("sub-minimum adaptive limit must fail")
+	}
+}
